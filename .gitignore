@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python tools
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+coverage.xml
+htmlcov/
+.coverage
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Models and data
+models/
+*.bin
+*.pt
+*.onnx
+*.ct2
+
+# Logs
+logs/
+*.log
+
+# Node / Frontend
+node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+
+# IDE
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Tauri
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/WixTools/
+apps/desktop/src-tauri/Frameworks/

@@ -1,0 +1,17 @@
+# Core
+websockets>=12.0
+numpy>=1.24
+pyaudio>=0.2.14
+
+# ASR
+faster-whisper>=1.0
+
+# Translation
+transformers>=4.36
+sentencepiece>=0.1.99
+
+# Environment
+python-dotenv>=1.0
+
+# System audio (optional)
+# soundcard>=0.4.2

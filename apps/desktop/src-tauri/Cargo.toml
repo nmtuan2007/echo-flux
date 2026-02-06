@@ -1,0 +1,39 @@
+[package]
+name = "echoflux-desktop"
+version = "0.1.0"
+description = "EchoFlux Desktop Application"
+edition = "2021"
+rust-version = "1.70"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+tauri = { version = "1.6", features = [
+    "shell-open-api",
+    "window-close",
+    "window-hide",
+    "window-show",
+    "window-maximize",
+    "window-minimize",
+    "window-unmaximize",
+    "window-unminimize",
+    "window-start-dragging",
+    "window-set-always-on-top",
+    "window-set-size",
+    "window-set-position",
+    "window-set-decorations",
+    "window-set-skip-taskbar",
+    "process-exit",
+    "fs-read-file",
+    "fs-write-file",
+    "fs-exists",
+    "path-all",
+    "dialog-save",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

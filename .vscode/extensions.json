@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "ms-python.python",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "tauri-apps.tauri-vscode",
+    "dbaeumer.vscode-eslint"
+  ]
+}

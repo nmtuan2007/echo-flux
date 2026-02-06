@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Engine: Run",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "engine.main",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "CLI: Run",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "apps.cli.main",
+      "args": ["--model", "small", "--lang", "en"],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Desktop: Tauri Dev",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "tauri", "dev"],
+      "cwd": "${workspaceFolder}/apps/desktop",
+      "console": "integratedTerminal"
+    }
+  ]
+}

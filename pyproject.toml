@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "echoflux"
+version = "0.1.0"
+description = "Real-time local speech-to-text and translation"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "EchoFlux Contributors" },
+]
+
+dependencies = [
+    "websockets>=12.0",
+    "numpy>=1.24",
+    "pyaudio>=0.2.14",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "faster-whisper>=1.0",
+    "torch>=2.0",
+    "transformers>=4.36",
+    "sentencepiece>=0.1.99",
+]
+cpu = [
+    "faster-whisper>=1.0",
+    "transformers>=4.36",
+    "sentencepiece>=0.1.99",
+]
+system-audio = [
+    "soundcard>=0.4.2",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "debugpy>=1.8",
+    "pre-commit>=3.7",
+]
+
+[project.scripts]
+echoflux = "apps.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["engine*", "apps*", "plugins*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "SIM",
+    "RUF",
+]
+ignore = [
+    "E501",
+    "B008",
+    "SIM108",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["engine", "apps", "plugins"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = 80
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
