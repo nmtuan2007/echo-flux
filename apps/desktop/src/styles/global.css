@@ -3,6 +3,7 @@
   --bg-secondary: #1a1a1a;
   --bg-tertiary: #242424;
   --bg-hover: #2e2e2e;
+  --bg-input: #111111;
 
   --text-primary: #e0e0e0;
   --text-secondary: #999999;
@@ -60,6 +61,7 @@ body,
 .app-content {
   flex: 1;
   overflow: hidden;
+  position: relative;
 }
 
 /* ── Header ── */
@@ -98,6 +100,11 @@ body,
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--text-primary);
+  transition: color 0.2s;
+}
+
+.header-title:hover {
+  color: var(--accent);
 }
 
 /* ── Buttons ── */
@@ -116,11 +123,12 @@ body,
   cursor: pointer;
   transition:
     background-color 0.15s ease,
-    opacity 0.15s ease;
+    opacity 0.15s ease,
+    color 0.15s ease;
 }
 
 .btn:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -160,9 +168,42 @@ body,
   border-radius: var(--radius-sm);
 }
 
-.btn-icon:hover {
+.btn-icon:hover:not(.active) {
   background-color: var(--bg-tertiary);
   color: var(--text-primary);
+}
+
+.btn-icon.active {
+  background-color: var(--bg-tertiary);
+  color: var(--accent);
+}
+
+.btn-icon-sm {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.btn-icon-sm:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.btn-icon-sm.danger:hover {
+  color: var(--danger);
+  background-color: rgba(224, 85, 85, 0.1);
+}
+
+.btn-icon-sm.success:hover {
+  color: var(--success);
+  background-color: rgba(76, 175, 80, 0.1);
 }
 
 /* ── Transcript ── */
@@ -318,23 +359,23 @@ body,
   font-size: 11px;
 }
 
-/* ── Settings ── */
+/* ── Settings & History Common ── */
 
-.settings-panel {
+.settings-panel, .history-panel {
   height: 100%;
   overflow-y: auto;
   padding: 24px;
 }
 
-.settings-panel::-webkit-scrollbar {
+.settings-panel::-webkit-scrollbar, .history-panel::-webkit-scrollbar {
   width: 6px;
 }
 
-.settings-panel::-webkit-scrollbar-track {
+.settings-panel::-webkit-scrollbar-track, .history-panel::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.settings-panel::-webkit-scrollbar-thumb {
+.settings-panel::-webkit-scrollbar-thumb, .history-panel::-webkit-scrollbar-thumb {
   background-color: var(--bg-tertiary);
   border-radius: 3px;
 }
@@ -399,7 +440,7 @@ body,
 .settings-field input[type="number"] {
   height: 34px;
   padding: 0 10px;
-  background-color: var(--bg-tertiary);
+  background-color: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -428,7 +469,100 @@ body,
   cursor: pointer;
 }
 
-.settings-field input[type="checkbox"]:disabled {
+/* ── History List ── */
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-empty {
+  color: var(--text-muted);
+  text-align: center;
+  margin-top: 40px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.history-item:hover {
+  background-color: var(--bg-tertiary);
+  border-color: var(--bg-hover);
+}
+
+.history-item.disabled {
   opacity: 0.5;
-  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.history-item-content {
+  flex: 1;
+  min-width: 0;
+  margin-right: 12px;
+}
+
+.history-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.history-name:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.history-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: var(--font-sans);
+  outline: none;
+}
+
+.history-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+}
+
+.history-item:hover .history-actions {
+  opacity: 1;
+}
+
+/* ── Loading Spinner ── */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
 }

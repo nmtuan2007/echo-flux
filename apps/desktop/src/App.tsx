@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { Header } from "./components/Header";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { StatusBar } from "./components/StatusBar";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useEngineStore } from "./store/engineStore";
 
 export default function App() {
-  const { settingsOpen, connect, disconnect } = useEngineStore();
+  const { activeView, connect, disconnect } = useEngineStore();
 
   useEffect(() => {
     connect();
@@ -18,7 +19,11 @@ export default function App() {
   return (
     <div className="app">
       <Header />
-      <main className="app-content">{settingsOpen ? <SettingsPanel /> : <TranscriptPanel />}</main>
+      <main className="app-content">
+        {activeView === "settings" && <SettingsPanel />}
+        {activeView === "history" && <HistoryPanel />}
+        {activeView === "transcript" && <TranscriptPanel />}
+      </main>
       <StatusBar />
     </div>
   );

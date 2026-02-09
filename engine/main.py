@@ -189,7 +189,7 @@ class EchoFluxEngine:
             # Final flush
             result = self._asr_backend.finalize_current()
             if result:
-                self._process_result(result) # Ensure translation happens on flush
+                self._process_result(result) 
                 
             self._asr_backend.unload_model()
             self._asr_backend = None
@@ -268,25 +268,21 @@ class EchoFluxEngine:
         """Helper to attach translation and queue the result."""
         translated_text = None
         
-        # Only translate if enabled
-        # Performance optimization: For online, maybe only translate Final results
-        # For now, we translate everything to be snappy, but online might lag on partials.
+        # Only translate if enabled AND model is loaded
         if self._translation_backend and self._translation_backend.is_loaded:
-            # We skip empty strings
             if asr_result.text.strip():
                 try:
                     src = self._current_config.get("translation.source_lang", "auto")
                     tgt = self._current_config.get("translation.target_lang", "vi")
                     
-                    # Optional: skip partial translation if using online backend to save requests/latency
-                    is_online = isinstance(self._translation_backend.__class__.__name__, str) and "Online" in self._translation_backend.__class__.__name__
-                    should_translate = asr_result.is_final or not is_online
-
-                    if should_translate:
+                    # --- CHANGE: Only translate if the segment is FINAL ---
+                    # This prevents heavy CPU load and flickering text.
+                    if asr_result.is_final:
                         trans_res = self._translation_backend.translate(
                             asr_result.text, src, tgt
                         )
                         translated_text = trans_res.translated_text
+                        
                 except Exception as e:
                     logger.error("Translation processing error: %s", e)
 
@@ -294,7 +290,7 @@ class EchoFluxEngine:
         self._result_queue.put({
             "type": "final" if asr_result.is_final else "partial",
             "text": asr_result.text,
-            "translation": translated_text,
+            "translation": translated_text, # Will be None for partial results
             "is_final": asr_result.is_final,
             "timestamp": time.time(),
         })
