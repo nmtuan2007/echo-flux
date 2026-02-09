@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -57,15 +58,25 @@ _ENV_MAP = {
     "ECHOFLUX_COMPUTE_TYPE":          ("asr.compute_type",         str),
     "ECHOFLUX_DEVICE":                ("asr.device",               str),
     "ECHOFLUX_ASR_MODEL_PATH":        ("asr.model_path",           str),
-    "ECHOFLUX_TRANSLATION_ENABLED":   ("translation.enabled",      _bool := lambda v: v.lower() in ("true", "1", "yes")),
+    "ECHOFLUX_TRANSLATION_ENABLED":   ("translation.enabled",      lambda v: str(v).lower() in ("true", "1", "yes")),
     "ECHOFLUX_TRANSLATION_BACKEND":   ("translation.backend",      str),
     "ECHOFLUX_SOURCE_LANG":           ("translation.source_lang",  str),
     "ECHOFLUX_TARGET_LANG":           ("translation.target_lang",  str),
     "ECHOFLUX_TRANSLATION_MODEL_PATH":("translation.model_path",   str),
-    "ECHOFLUX_VAD_ENABLED":           ("vad.enabled",              lambda v: v.lower() in ("true", "1", "yes")),
+    "ECHOFLUX_VAD_ENABLED":           ("vad.enabled",              lambda v: str(v).lower() in ("true", "1", "yes")),
     "ECHOFLUX_VAD_THRESHOLD":         ("vad.threshold",            float),
     "ECHOFLUX_LOG_LEVEL":             ("logging.level",            str),
 }
+
+
+@dataclass
+class TranscriptionConfig:
+    """Configuration object for ASR backends."""
+    model_size: str
+    language: str
+    device: str
+    compute_type: str
+    model_path: Optional[str] = None
 
 
 def _get_data_dir() -> Path:
@@ -109,6 +120,13 @@ class Config:
         self._data_dir = _get_data_dir()
         self._config_path = Path(config_path) if config_path else self._data_dir / "config.json"
 
+        # Override model/data dirs from env
+        models_override = os.environ.get("ECHOFLUX_MODELS_DIR")
+        if models_override:
+            self._models_dir_override = Path(models_override)
+        else:
+            self._models_dir_override = None
+
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -122,14 +140,6 @@ class Config:
             self._load_file()
 
         self._apply_env_overrides()
-
-        # Override model/data dirs from env
-        models_override = os.environ.get("ECHOFLUX_MODELS_DIR")
-        if models_override:
-            self._models_dir_override = Path(models_override)
-            self._models_dir_override.mkdir(parents=True, exist_ok=True)
-        else:
-            self._models_dir_override = None
 
     def _load_file(self):
         with open(self._config_path, "r", encoding="utf-8") as f:

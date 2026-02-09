@@ -1,17 +1,27 @@
-import struct
+import logging
+import os
+import urllib.request
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
-from engine.core.logging import get_logger
+import numpy as np
+import onnxruntime as ort
 
-logger = get_logger("audio.vad")
+from engine.core.config import Config
+
+logger = logging.getLogger("echoflux.audio.vad")
+
+# Silero VAD v4 constants (Updated to stable tag)
+MODEL_URL = "https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx"
+# Supported window sizes for 16000Hz: 512, 1024, 1536
+WINDOW_SIZE_SAMPLES = 512  # ~32ms at 16kHz
 
 
 class VAD:
     """
-    Energy-based Voice Activity Detection.
-    Serves as a lightweight default. Can be replaced with a model-based
-    detector (e.g. Silero VAD) via the same interface.
+    Neural Voice Activity Detection using Silero VAD (ONNX).
+    Replaces the legacy Energy-based VAD.
     """
 
     def __init__(self, config: dict):
@@ -19,17 +29,52 @@ class VAD:
         self._threshold = config.get("threshold", 0.5)
         self._sample_rate = config.get("sample_rate", 16000)
 
-        # Adaptive energy tracking
-        self._window_size = config.get("window_frames", 30)
-        self._energy_history: deque = deque(maxlen=self._window_size)
-        self._speech_frames = 0
-        self._silence_frames = 0
+        # Buffer for accumulating samples to match model window size
+        self._buffer = np.array([], dtype=np.float32)
+        
+        # ONNX Runtime session
+        self._session: Optional[ort.InferenceSession] = None
+        self._h = np.zeros((2, 1, 64), dtype=np.float32)
+        self._c = np.zeros((2, 1, 64), dtype=np.float32)
 
-        # Require a few consecutive speech/silence frames to transition
-        self._speech_pad_frames = config.get("speech_pad_frames", 3)
-        self._silence_pad_frames = config.get("silence_pad_frames", 8)
-
+        # State tracking
         self._is_speech = False
+        
+        self._models_dir = Config().models_dir
+        self._model_path = self._models_dir / "silero_vad.onnx"
+
+        if self._enabled:
+            self._init_model()
+
+    def _init_model(self):
+        """Download and load the ONNX model."""
+        try:
+            if not self._model_path.exists():
+                logger.info("Downloading Silero VAD model to %s...", self._model_path)
+                self._models_dir.mkdir(parents=True, exist_ok=True)
+                # Set user agent to avoid 403 forbidden on some systems
+                opener = urllib.request.build_opener()
+                opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+                urllib.request.install_opener(opener)
+                urllib.request.urlretrieve(MODEL_URL, self._model_path)
+                logger.info("Download complete.")
+
+            opts = ort.SessionOptions()
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = 1
+            opts.log_severity_level = 3  # Error only
+
+            self._session = ort.InferenceSession(
+                str(self._model_path), 
+                sess_options=opts, 
+                providers=["CPUExecutionProvider"]
+            )
+            logger.info("Silero VAD initialized (threshold=%.2f)", self._threshold)
+        except Exception as e:
+            logger.error("Failed to initialize Silero VAD: %s", e)
+            # We explicitly disable VAD if init fails to prevent crashes,
+            # but log clearly so user knows performance will degrade.
+            self._enabled = False
 
     @property
     def enabled(self) -> bool:
@@ -40,50 +85,54 @@ class VAD:
         return self._is_speech
 
     def process(self, audio_chunk: bytes) -> bool:
-        if not self._enabled:
+        """
+        Process a chunk of audio bytes (int16).
+        Returns True if speech is detected in the current buffer context.
+        """
+        if not self._enabled or self._session is None:
             return True
 
-        energy = self._compute_energy(audio_chunk)
-        self._energy_history.append(energy)
+        # Convert bytes to float32 numpy array
+        audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
+        audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
-        adaptive_threshold = self._get_adaptive_threshold()
-        frame_is_speech = energy > adaptive_threshold
+        # Append to internal buffer
+        self._buffer = np.concatenate((self._buffer, audio_float32))
 
-        if frame_is_speech:
-            self._speech_frames += 1
-            self._silence_frames = 0
-        else:
-            self._silence_frames += 1
-            self._speech_frames = 0
+        # Process in chunks of WINDOW_SIZE_SAMPLES (512)
+        has_speech_in_chunk = False
 
-        if not self._is_speech and self._speech_frames >= self._speech_pad_frames:
-            self._is_speech = True
-            logger.debug("Speech start detected (energy=%.4f, threshold=%.4f)", energy, adaptive_threshold)
+        while len(self._buffer) >= WINDOW_SIZE_SAMPLES:
+            window = self._buffer[:WINDOW_SIZE_SAMPLES]
+            self._buffer = self._buffer[WINDOW_SIZE_SAMPLES:]
 
-        if self._is_speech and self._silence_frames >= self._silence_pad_frames:
-            self._is_speech = False
-            logger.debug("Speech end detected (energy=%.4f, threshold=%.4f)", energy, adaptive_threshold)
-
+            prob = self._inference(window)
+            
+            if prob > self._threshold:
+                self._is_speech = True
+                has_speech_in_chunk = True
+            else:
+                pass 
+        
         return self._is_speech
 
+    def _inference(self, window: np.ndarray) -> float:
+        # Prepare inputs: input [1, N], sr [1], h, c
+        x = window[np.newaxis, :] 
+        sr = np.array([self._sample_rate], dtype=np.int64)
+
+        ort_inputs = {
+            "input": x,
+            "sr": sr,
+            "h": self._h,
+            "c": self._c
+        }
+
+        out, self._h, self._c = self._session.run(None, ort_inputs)
+        return out[0][0]
+
     def reset(self):
-        self._energy_history.clear()
-        self._speech_frames = 0
-        self._silence_frames = 0
+        self._h = np.zeros((2, 1, 64), dtype=np.float32)
+        self._c = np.zeros((2, 1, 64), dtype=np.float32)
+        self._buffer = np.array([], dtype=np.float32)
         self._is_speech = False
-
-    def _compute_energy(self, audio_chunk: bytes) -> float:
-        if len(audio_chunk) < 2:
-            return 0.0
-        n_samples = len(audio_chunk) // 2
-        samples = struct.unpack(f"<{n_samples}h", audio_chunk[:n_samples * 2])
-        rms = (sum(s * s for s in samples) / n_samples) ** 0.5
-        # Normalize to 0.0–1.0 range based on int16 max
-        return min(rms / 32768.0, 1.0)
-
-    def _get_adaptive_threshold(self) -> float:
-        if len(self._energy_history) < 5:
-            return self._threshold * 0.02
-
-        avg_energy = sum(self._energy_history) / len(self._energy_history)
-        return max(avg_energy * self._threshold, 0.005)

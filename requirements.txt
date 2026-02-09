@@ -10,8 +10,12 @@ faster-whisper>=1.0
 transformers>=4.36
 sentencepiece>=0.1.99
 
+# VAD & Audio Processing
+onnxruntime>=1.16.0
+pyaudiowpatch>=0.2.12; sys_platform == 'win32'
+
 # Environment
 python-dotenv>=1.0
 
-# System audio (optional)
-# soundcard>=0.4.2
+# Legacy/Alternative Audio
+soundcard>=0.4.2
