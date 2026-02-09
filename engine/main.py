@@ -1,5 +1,3 @@
-"""EchoFlux Engine – VAD Gated Architecture."""
-
 import asyncio
 import json
 import logging
@@ -55,6 +53,7 @@ class EchoFluxEngine:
 
         self._audio_input = None
         self._asr_backend = None
+        self._translation_backend = None
         self._vad = None
         
         self._running = False
@@ -66,6 +65,7 @@ class EchoFluxEngine:
         self._result_task: Optional[asyncio.Task] = None
         
         self._client = None
+        self._current_config = {}
 
     async def start(self):
         self._ws_server.on_start(self._on_client_start)
@@ -103,6 +103,9 @@ class EchoFluxEngine:
         await self._ws_server.stop()
 
     def _initialize_pipeline(self, settings: dict):
+        self._current_config = settings
+
+        # 1. Audio Source
         audio_source = os.getenv("ECHOFLUX_AUDIO_SOURCE", "microphone")
         if audio_source == "system":
             from engine.audio.system_audio import SystemAudioInput
@@ -111,6 +114,7 @@ class EchoFluxEngine:
             from engine.audio.microphone import MicrophoneInput
             self._audio_input = MicrophoneInput(settings)
         
+        # 2. VAD
         from engine.audio.vad import VAD
         self._vad = VAD({
             "enabled": settings.get("vad.enabled", True),
@@ -118,6 +122,7 @@ class EchoFluxEngine:
             "sample_rate": 16000
         })
 
+        # 3. ASR Backend
         from engine.asr.faster_whisper_backend import FasterWhisperBackend
         self._asr_backend = FasterWhisperBackend()
         
@@ -128,6 +133,19 @@ class EchoFluxEngine:
             compute_type=os.getenv("ECHOFLUX_COMPUTE_TYPE", "float16"),
         )
         self._asr_backend.load_model(asr_config)
+
+        # 4. Translation Backend
+        if settings.get("translation.enabled", False):
+            backend_type = settings.get("translation.backend", "marian")
+            
+            if backend_type == "online":
+                from engine.translation.online_backend import OnlineBackend
+                self._translation_backend = OnlineBackend()
+            else:
+                from engine.translation.marian_backend import MarianBackend
+                self._translation_backend = MarianBackend()
+            
+            self._translation_backend.load_model(settings)
 
     def _start_threads(self):
         self._running = True
@@ -168,14 +186,17 @@ class EchoFluxEngine:
                 pass
         
         if self._asr_backend:
-            # Final check before destroying
+            # Final flush
             result = self._asr_backend.finalize_current()
-            if result and self._client:
-                 await self._client.send(json.dumps({
-                    "type": "final", "text": result.text, "is_final": True, "timestamp": time.time()
-                }))
+            if result:
+                self._process_result(result) # Ensure translation happens on flush
+                
             self._asr_backend.unload_model()
             self._asr_backend = None
+
+        if self._translation_backend:
+            self._translation_backend.unload_model()
+            self._translation_backend = None
         
         self._audio_input = None
         self._vad = None
@@ -201,13 +222,12 @@ class EchoFluxEngine:
         logger.info("Processing thread started.")
         
         silence_counter = 0
-        max_silence_chunks = 100 # Approx 2 seconds of silence to trigger a forced finalize
+        max_silence_chunks = 100 # Approx 2 seconds
         
         try:
             while self._running:
                 chunks_to_process = []
                 try:
-                    # Batch drain to keep latency low
                     first_chunk = self._audio_queue.get(timeout=0.5)
                     chunks_to_process.append(first_chunk)
                     while not self._audio_queue.empty():
@@ -222,44 +242,21 @@ class EchoFluxEngine:
                     continue
 
                 combined_audio = b"".join(chunks_to_process)
-
-                # 1. Run VAD
-                # Check if this chunk contains speech
                 is_speech = self._vad.process(combined_audio)
-                
-                # 2. VAD Gating Logic
-                # If speech is detected -> Run ASR
-                # If silence -> Don't run ASR (saving CPU), but check if we need to finalize
                 
                 if is_speech:
                     silence_counter = 0
                     result = self._asr_backend.transcribe_stream(combined_audio)
                     if result:
-                        self._result_queue.put(result)
+                        self._process_result(result)
                 else:
-                    # It's silence.
-                    # We still feed audio to backend buffer, but SKIP inference trigger
-                    # BUT backend needs to know audio exists to maintain timeline.
-                    # Our modified backend handles appending without inference if we don't call transcribe.
-                    # Wait, we MUST feed audio to the backend buffer so when speech returns, context is there.
-                    
-                    # Call transcribe but rely on backend's internal timer.
-                    # However, to save MAX CPU, we manually inhibit inference here.
-                    
-                    # HACK: We feed the audio to buffer, but ignore result unless we want to finalize.
-                    # Actually, calling transcribe_stream is fine because we optimized it to be fast.
-                    # But to be SUPER fast, we can choose to ONLY finalize if silence persists.
-                    
                     silence_counter += len(chunks_to_process)
-                    
-                    # If we have been silent for a while, force a finalize/flush
                     if silence_counter > max_silence_chunks:
                         result = self._asr_backend.finalize_current()
                         if result:
-                            self._result_queue.put(result)
+                            self._process_result(result)
                         silence_counter = 0
                     else:
-                        # Still feed audio to keep context buffer alive
                         self._asr_backend.transcribe_stream(combined_audio)
 
         except Exception as e:
@@ -267,20 +264,49 @@ class EchoFluxEngine:
         finally:
             logger.info("Processing thread ended.")
 
+    def _process_result(self, asr_result):
+        """Helper to attach translation and queue the result."""
+        translated_text = None
+        
+        # Only translate if enabled
+        # Performance optimization: For online, maybe only translate Final results
+        # For now, we translate everything to be snappy, but online might lag on partials.
+        if self._translation_backend and self._translation_backend.is_loaded:
+            # We skip empty strings
+            if asr_result.text.strip():
+                try:
+                    src = self._current_config.get("translation.source_lang", "auto")
+                    tgt = self._current_config.get("translation.target_lang", "vi")
+                    
+                    # Optional: skip partial translation if using online backend to save requests/latency
+                    is_online = isinstance(self._translation_backend.__class__.__name__, str) and "Online" in self._translation_backend.__class__.__name__
+                    should_translate = asr_result.is_final or not is_online
+
+                    if should_translate:
+                        trans_res = self._translation_backend.translate(
+                            asr_result.text, src, tgt
+                        )
+                        translated_text = trans_res.translated_text
+                except Exception as e:
+                    logger.error("Translation processing error: %s", e)
+
+        # Enqueue as a dict to be broadcast
+        self._result_queue.put({
+            "type": "final" if asr_result.is_final else "partial",
+            "text": asr_result.text,
+            "translation": translated_text,
+            "is_final": asr_result.is_final,
+            "timestamp": time.time(),
+        })
+
     async def _broadcast_loop(self):
         while self._running:
             try:
                 while not self._result_queue.empty():
-                    result = self._result_queue.get_nowait()
+                    msg_dict = self._result_queue.get_nowait()
                     if self._client:
-                        msg = json.dumps({
-                            "type": "final" if result.is_final else "partial",
-                            "text": result.text,
-                            "is_final": result.is_final,
-                            "timestamp": time.time(),
-                        })
-                        await self._client.send(msg)
-                await asyncio.sleep(0.02) # Faster polling
+                        await self._client.send(json.dumps(msg_dict))
+                await asyncio.sleep(0.02)
             except Exception as e:
                 logger.error("Broadcast error: %s", e)
                 await asyncio.sleep(1)

@@ -1,7 +1,12 @@
-import { useEngineStore } from "../store/engineStore";
+import { useEngineStore, EngineConfig } from "../store/engineStore";
 
 const MODEL_SIZES = ["tiny", "base", "small", "medium", "large"];
 const DEVICES = ["auto", "cpu", "cuda"];
+const TRANSLATION_BACKENDS = [
+  { value: "online", label: "Online (Google Translate)" },
+  { value: "marian", label: "Local (MarianMT)" },
+];
+
 const LANGUAGES = [
   { code: "en", label: "English" },
   { code: "zh", label: "Chinese" },
@@ -48,7 +53,7 @@ export function SettingsPanel() {
         </div>
 
         <div className="settings-field">
-          <label htmlFor="language">Language</label>
+          <label htmlFor="language">Input Language</label>
           <select
             id="language"
             value={config.language}
@@ -108,16 +113,18 @@ export function SettingsPanel() {
         {config.translationEnabled && (
           <>
             <div className="settings-field">
-              <label htmlFor="source-lang">Source Language</label>
+              <label htmlFor="translation-backend">Translation Backend</label>
               <select
-                id="source-lang"
-                value={config.sourceLang}
-                onChange={(e) => updateConfig({ sourceLang: e.target.value })}
+                id="translation-backend"
+                value={config.translationBackend}
+                onChange={(e) =>
+                  updateConfig({ translationBackend: e.target.value as EngineConfig["translationBackend"] })
+                }
                 disabled={running}
               >
-                {LANGUAGES.map((lang) => (
-                  <option key={lang.code} value={lang.code}>
-                    {lang.label}
+                {TRANSLATION_BACKENDS.map((b) => (
+                  <option key={b.value} value={b.value}>
+                    {b.label}
                   </option>
                 ))}
               </select>
@@ -138,6 +145,10 @@ export function SettingsPanel() {
                 ))}
               </select>
             </div>
+            
+             <p className="settings-note" style={{fontSize: "12px", color: "#666", marginTop: "8px"}}>
+                Note: "Online" uses internet. "Local" downloads models (~300MB per pair).
+            </p>
           </>
         )}
       </section>

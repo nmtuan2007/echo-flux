@@ -14,9 +14,12 @@ export interface EngineConfig {
   modelSize: string;
   language: string;
   device: string;
+  // Translation config
   translationEnabled: boolean;
+  translationBackend: "marian" | "online"; // New field
   sourceLang: string;
   targetLang: string;
+  // VAD config
   vadEnabled: boolean;
 }
 
@@ -56,6 +59,7 @@ const DEFAULT_CONFIG: EngineConfig = {
   language: "en",
   device: "auto",
   translationEnabled: false,
+  translationBackend: "online", // Default to online for ease of use
   sourceLang: "en",
   targetLang: "vi",
   vadEnabled: true,
@@ -141,6 +145,7 @@ export const useEngineStore = create<EngineState>((set, get) => ({
           "asr.language": config.language,
           "asr.device": config.device,
           "translation.enabled": config.translationEnabled,
+          "translation.backend": config.translationBackend,
           "translation.source_lang": config.sourceLang,
           "translation.target_lang": config.targetLang,
           "vad.enabled": config.vadEnabled,
