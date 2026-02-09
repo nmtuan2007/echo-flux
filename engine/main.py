@@ -1,4 +1,4 @@
-"""EchoFlux Engine – Main Entry Point (Refactored for True Streaming)."""
+"""EchoFlux Engine – VAD Gated Architecture."""
 
 import asyncio
 import json
@@ -58,7 +58,7 @@ class EchoFluxEngine:
         self._vad = None
         
         self._running = False
-        self._audio_queue = Queue(maxsize=500)  # ~10 seconds of audio at 20ms chunks
+        self._audio_queue = Queue(maxsize=500)
         self._result_queue = Queue()
         
         self._capture_thread: Optional[threading.Thread] = None
@@ -68,7 +68,6 @@ class EchoFluxEngine:
         self._client = None
 
     async def start(self):
-        """Start the engine and WebSocket server."""
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
         
@@ -104,7 +103,6 @@ class EchoFluxEngine:
         await self._ws_server.stop()
 
     def _initialize_pipeline(self, settings: dict):
-        # 1. Audio Input
         audio_source = os.getenv("ECHOFLUX_AUDIO_SOURCE", "microphone")
         if audio_source == "system":
             from engine.audio.system_audio import SystemAudioInput
@@ -113,7 +111,6 @@ class EchoFluxEngine:
             from engine.audio.microphone import MicrophoneInput
             self._audio_input = MicrophoneInput(settings)
         
-        # 2. VAD
         from engine.audio.vad import VAD
         self._vad = VAD({
             "enabled": settings.get("vad.enabled", True),
@@ -121,7 +118,6 @@ class EchoFluxEngine:
             "sample_rate": 16000
         })
 
-        # 3. ASR
         from engine.asr.faster_whisper_backend import FasterWhisperBackend
         self._asr_backend = FasterWhisperBackend()
         
@@ -172,6 +168,12 @@ class EchoFluxEngine:
                 pass
         
         if self._asr_backend:
+            # Final check before destroying
+            result = self._asr_backend.finalize_current()
+            if result and self._client:
+                 await self._client.send(json.dumps({
+                    "type": "final", "text": result.text, "is_final": True, "timestamp": time.time()
+                }))
             self._asr_backend.unload_model()
             self._asr_backend = None
         
@@ -180,7 +182,6 @@ class EchoFluxEngine:
         logger.info("Pipeline stopped.")
 
     def _capture_loop(self):
-        """Reads audio from device and puts into queue."""
         logger.info("Capture thread started.")
         try:
             self._audio_input.start()
@@ -189,10 +190,6 @@ class EchoFluxEngine:
                 if chunk:
                     if not self._audio_queue.full():
                         self._audio_queue.put(chunk)
-                    else:
-                        # Log less frequently to avoid spamming
-                        # logger.warning("Audio queue full! Dropping frame.")
-                        pass
                 else:
                     time.sleep(0.005)
         except Exception as e:
@@ -201,22 +198,18 @@ class EchoFluxEngine:
             logger.info("Capture thread ended.")
 
     def _process_loop(self):
-        """Reads audio from queue and runs Inference."""
         logger.info("Processing thread started.")
+        
+        silence_counter = 0
+        max_silence_chunks = 100 # Approx 2 seconds of silence to trigger a forced finalize
         
         try:
             while self._running:
-                # 1. Drain the queue (Batch Processing)
-                # Instead of getting 1 chunk and blocking, get ALL pending chunks
-                # This fixes the 'Audio queue full' issue when inference is slow
                 chunks_to_process = []
-                
                 try:
-                    # Blocking wait for the first chunk
+                    # Batch drain to keep latency low
                     first_chunk = self._audio_queue.get(timeout=0.5)
                     chunks_to_process.append(first_chunk)
-                    
-                    # Non-blocking drain of the rest
                     while not self._audio_queue.empty():
                         try:
                             chunks_to_process.append(self._audio_queue.get_nowait())
@@ -228,22 +221,46 @@ class EchoFluxEngine:
                 if not chunks_to_process:
                     continue
 
-                # Combine chunks
                 combined_audio = b"".join(chunks_to_process)
 
-                # 2. Run VAD (Updates internal state)
-                # We can process just the combined chunk or feed it piece by piece if VAD logic implies it
-                # For Silero, feeding the whole blob is fine if we updated the logic, 
-                # but to be safe with the VAD wrapper (which buffers internally), we just feed it.
+                # 1. Run VAD
+                # Check if this chunk contains speech
                 is_speech = self._vad.process(combined_audio)
                 
-                # 3. Pass to ASR Backend
-                # If VAD is active or backend manages context, feed audio.
-                # Currently we feed everything to maintain context.
-                result = self._asr_backend.transcribe_stream(combined_audio)
+                # 2. VAD Gating Logic
+                # If speech is detected -> Run ASR
+                # If silence -> Don't run ASR (saving CPU), but check if we need to finalize
                 
-                if result:
-                    self._result_queue.put(result)
+                if is_speech:
+                    silence_counter = 0
+                    result = self._asr_backend.transcribe_stream(combined_audio)
+                    if result:
+                        self._result_queue.put(result)
+                else:
+                    # It's silence.
+                    # We still feed audio to backend buffer, but SKIP inference trigger
+                    # BUT backend needs to know audio exists to maintain timeline.
+                    # Our modified backend handles appending without inference if we don't call transcribe.
+                    # Wait, we MUST feed audio to the backend buffer so when speech returns, context is there.
+                    
+                    # Call transcribe but rely on backend's internal timer.
+                    # However, to save MAX CPU, we manually inhibit inference here.
+                    
+                    # HACK: We feed the audio to buffer, but ignore result unless we want to finalize.
+                    # Actually, calling transcribe_stream is fine because we optimized it to be fast.
+                    # But to be SUPER fast, we can choose to ONLY finalize if silence persists.
+                    
+                    silence_counter += len(chunks_to_process)
+                    
+                    # If we have been silent for a while, force a finalize/flush
+                    if silence_counter > max_silence_chunks:
+                        result = self._asr_backend.finalize_current()
+                        if result:
+                            self._result_queue.put(result)
+                        silence_counter = 0
+                    else:
+                        # Still feed audio to keep context buffer alive
+                        self._asr_backend.transcribe_stream(combined_audio)
 
         except Exception as e:
             logger.error("Processing thread error: %s", e, exc_info=True)
@@ -251,13 +268,10 @@ class EchoFluxEngine:
             logger.info("Processing thread ended.")
 
     async def _broadcast_loop(self):
-        """Reads results from queue and sends via WebSocket."""
-        logger.info("Broadcast loop started.")
         while self._running:
             try:
                 while not self._result_queue.empty():
                     result = self._result_queue.get_nowait()
-                    
                     if self._client:
                         msg = json.dumps({
                             "type": "final" if result.is_final else "partial",
@@ -266,8 +280,7 @@ class EchoFluxEngine:
                             "timestamp": time.time(),
                         })
                         await self._client.send(msg)
-                
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.02) # Faster polling
             except Exception as e:
                 logger.error("Broadcast error: %s", e)
                 await asyncio.sleep(1)
