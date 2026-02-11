@@ -1,88 +1,184 @@
+import os
+import shutil
+import logging
+from pathlib import Path
 from typing import Optional, List, Tuple
 
 from engine.translation.base import TranslationBackend, TranslationResult
+from engine.core.config import Config
 from engine.core.logging import get_logger
 from engine.core.exceptions import ModelLoadError, TranslationError
 
 logger = get_logger("translation.marian")
 
+# Preset models mapping
+_PRESET_MODELS = {
+    ("en", "vi"): "Helsinki-NLP/opus-mt-en-vi",
+    ("en", "zh"): "Helsinki-NLP/opus-mt-en-zh",
+    ("en", "ja"): "Helsinki-NLP/opus-mt-en-jap",
+    ("en", "ko"): "Helsinki-NLP/opus-mt-tc-big-en-ko",
+    ("en", "de"): "Helsinki-NLP/opus-mt-en-de",
+    ("en", "fr"): "Helsinki-NLP/opus-mt-en-fr",
+    ("en", "es"): "Helsinki-NLP/opus-mt-en-es",
+    ("vi", "en"): "Helsinki-NLP/opus-mt-vi-en",
+}
 
 class MarianBackend(TranslationBackend):
+    """
+    Optimized MarianMT backend using CTranslate2.
+    Automatically converts HuggingFace models to CTranslate2 INT8 format on first load.
+    Robust GPU-to-CPU fallback included.
+    """
 
     def __init__(self):
-        self._model = None
+        self._translator = None
         self._tokenizer = None
-        self._device = None
+        self._device = "cpu"
         self._source_lang: Optional[str] = None
         self._target_lang: Optional[str] = None
         self._model_name: Optional[str] = None
+        self._ct2_model_path: Optional[Path] = None
 
     def load_model(self, config: dict) -> None:
         try:
-            from transformers import MarianMTModel, MarianTokenizer
+            import ctranslate2
+            from transformers import MarianTokenizer
         except ImportError:
-            raise ModelLoadError("transformers library is not installed")
+            raise ModelLoadError("ctranslate2 or transformers not installed")
 
-        self._source_lang = config.get("source_lang", "en")
-        self._target_lang = config.get("target_lang", "vi")
-        self._model_name = config.get(
-            "model_name",
-            f"Helsinki-NLP/opus-mt-{self._source_lang}-{self._target_lang}",
-        )
-        model_path = config.get("model_path", self._model_name)
-        self._device = self._resolve_device(config.get("device", "auto"))
+        self._source_lang = config.get("translation.source_lang", "en")
+        self._target_lang = config.get("translation.target_lang", "vi")
 
-        logger.info(
-            "Loading translation model: %s (device=%s)",
-            model_path, self._device,
-        )
+        # 1. Resolve potential device
+        device_str = config.get("device", "auto")
+        potential_device = "cpu"
+        if device_str == "cuda":
+            potential_device = "cuda"
+        elif device_str == "auto":
+            try:
+                if ctranslate2.get_cuda_device_count() > 0:
+                    potential_device = "cuda"
+            except Exception:
+                potential_device = "cpu"
 
+        # 2. Resolve model name
+        custom_model = config.get("translation.model")
+        if custom_model:
+            self._model_name = custom_model
+        else:
+            pair = (self._source_lang, self._target_lang)
+            self._model_name = _PRESET_MODELS.get(
+                pair,
+                f"Helsinki-NLP/opus-mt-{self._source_lang}-{self._target_lang}",
+            )
+
+        # 3. Prepare paths and convert if needed
+        app_config = Config()
+        ct2_dir = app_config.models_dir / "ct2"
+        safe_name = self._model_name.replace("/", "_")
+        self._ct2_model_path = ct2_dir / safe_name
+
+        if not self._is_valid_ct2_model(self._ct2_model_path):
+            self._convert_model(self._model_name, self._ct2_model_path)
+
+        # 4. Load Tokenizer
         try:
-            self._tokenizer = MarianTokenizer.from_pretrained(model_path)
-            self._model = MarianMTModel.from_pretrained(model_path)
+            self._tokenizer = MarianTokenizer.from_pretrained(self._model_name)
         except Exception as e:
-            self._model = None
-            self._tokenizer = None
-            raise ModelLoadError(f"Failed to load Marian model: {e}") from e
+            raise ModelLoadError(f"Failed to load tokenizer for '{self._model_name}': {e}") from e
 
+        # 5. Load and Test Translator (Robust Fallback Logic)
+        self._load_translator_safe(str(self._ct2_model_path), potential_device)
+
+    def _load_translator_safe(self, model_path: str, device: str):
+        import ctranslate2
+
+        # Try loading with the preferred device
         try:
-            self._model.to(self._device)
+            compute_type = "float16" if device == "cuda" else "int8"
+            logger.info("Attempting to load CTranslate2 model on %s (%s)...", device, compute_type)
+
+            translator = ctranslate2.Translator(
+                model_path,
+                device=device,
+                compute_type=compute_type
+            )
+
+            # SELF-TEST: Try to translate a dummy token to verify libraries are actually working
+            # This catches missing DLLs (cublas64_12.dll) which only crash at runtime
+            translator.translate_batch([["test"]], max_batch_size=1)
+
+            # If successful
+            self._translator = translator
+            self._device = device
+            logger.info("Translation model loaded and verified on %s.", device)
+            return
+
         except Exception as e:
-            if self._device == "cuda":
+            error_msg = str(e).lower()
+            is_library_error = "dll" in error_msg or "library" in error_msg or "cublas" in error_msg or "cudnn" in error_msg
+
+            if device == "cuda" and is_library_error:
                 logger.warning(
-                    "Failed to move translation model to CUDA: %s. Falling back to CPU.", e
+                    "Failed to initialize CUDA inference (missing libraries?): %s. "
+                    "Falling back to CPU (INT8).", e
                 )
-                self._device = "cpu"
-                self._model.to(self._device)
+                # Recursive call to load on CPU
+                self._load_translator_safe(model_path, "cpu")
+            elif device == "cuda":
+                logger.warning("Unknown CUDA error: %s. Falling back to CPU.", e)
+                self._load_translator_safe(model_path, "cpu")
             else:
-                raise ModelLoadError(f"Failed to place model on {self._device}: {e}") from e
+                # If it failed on CPU, it's a fatal error
+                raise ModelLoadError(f"Failed to load CTranslate2 model on CPU: {e}") from e
 
-        self._model.eval()
-        logger.info("Translation model loaded successfully (device=%s)", self._device)
+    def _is_valid_ct2_model(self, path: Path) -> bool:
+        return path.exists() and (path / "model.bin").exists() and (path / "config.json").exists()
 
-    def translate(self, text: str, source_lang: str, target_lang: str) -> TranslationResult:
-        if not self._model or not self._tokenizer:
+    def _convert_model(self, model_name: str, output_path: Path):
+        import ctranslate2.converters
+
+        logger.info("Converting '%s' to CTranslate2 INT8 format...", model_name)
+        try:
+            converter = ctranslate2.converters.TransformersConverter(model_name)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            converter.convert(str(output_path), quantization="int8", force=True)
+            logger.info("Conversion complete.")
+        except Exception as e:
+            if output_path.exists():
+                shutil.rmtree(output_path, ignore_errors=True)
+            raise ModelLoadError(f"Failed to convert model '{model_name}': {e}") from e
+
+    def translate_raw(self, text: str, source_lang: str, target_lang: str) -> TranslationResult:
+        if not self._translator or not self._tokenizer:
             raise TranslationError("Translation model not loaded")
 
         if not text.strip():
-            return TranslationResult(
-                source_text=text,
-                translated_text="",
-                source_lang=source_lang,
-                target_lang=target_lang,
-            )
+            return TranslationResult(text, "", source_lang, target_lang)
 
         try:
-            inputs = self._tokenizer(text, return_tensors="pt", padding=True, truncation=True)
-            inputs = {k: v.to(self._device) for k, v in inputs.items()}
+            sentences = self.split_sentences(text, max_length=200)
 
-            import torch
-            with torch.no_grad():
-                translated_ids = self._model.generate(**inputs)
+            source_tokens = [
+                self._tokenizer.convert_ids_to_tokens(self._tokenizer.encode(s))
+                for s in sentences
+            ]
 
-            translated_text = self._tokenizer.decode(
-                translated_ids[0], skip_special_tokens=True
+            results = self._translator.translate_batch(
+                source_tokens,
+                batch_type="tokens",
+                max_batch_size=2048,
+                beam_size=2,
             )
+
+            translated_sentences = []
+            for res in results:
+                decoded = self._tokenizer.decode(
+                    self._tokenizer.convert_tokens_to_ids(res.hypotheses[0])
+                )
+                translated_sentences.append(decoded)
+
+            translated_text = " ".join(translated_sentences)
 
             return TranslationResult(
                 source_text=text,
@@ -92,17 +188,21 @@ class MarianBackend(TranslationBackend):
             )
 
         except Exception as e:
-            logger.error("Translation error: %s", e)
+            logger.error("CTranslate2 inference error: %s", e)
             raise TranslationError(f"Translation failed: {e}") from e
 
     def unload_model(self) -> None:
-        self._model = None
+        if self._translator:
+            del self._translator
+        self._translator = None
         self._tokenizer = None
-        logger.info("Translation model unloaded")
+        import gc
+        gc.collect()
+        logger.info("MarianBackend unloaded")
 
     @property
     def is_loaded(self) -> bool:
-        return self._model is not None and self._tokenizer is not None
+        return self._translator is not None
 
     @property
     def supported_pairs(self) -> List[Tuple[str, str]]:
@@ -111,25 +211,5 @@ class MarianBackend(TranslationBackend):
         return []
 
     @staticmethod
-    def _resolve_device(device: str) -> str:
-        if device == "cpu":
-            return "cpu"
-
-        try:
-            import torch
-            if torch.cuda.is_available():
-                logger.info("CUDA available — using GPU for translation")
-                return "cuda"
-        except ImportError:
-            pass
-
-        if device == "cuda":
-            logger.warning(
-                "CUDA was explicitly requested but is not available. "
-                "Ensure PyTorch is installed with CUDA support (e.g. pip install torch --index-url "
-                "https://download.pytorch.org/whl/cu121). Falling back to CPU."
-            )
-        else:
-            logger.info("CUDA not available — using CPU for translation")
-
-        return "cpu"
+    def get_preset_models() -> dict:
+        return dict(_PRESET_MODELS)

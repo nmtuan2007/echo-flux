@@ -1,2 +1,4 @@
 from engine.translation.base import TranslationBackend, TranslationResult
 from engine.translation.marian_backend import MarianBackend
+from engine.translation.online_backend import OnlineBackend
+from engine.translation.fallback_backend import FallbackTranslationBackend

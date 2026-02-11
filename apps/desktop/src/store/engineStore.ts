@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 
 export interface TranscriptEntry {
   id: string;
@@ -22,12 +22,11 @@ export interface EngineConfig {
   modelSize: string;
   language: string;
   device: string;
-  // Translation config
   translationEnabled: boolean;
-  translationBackend: "marian" | "online";
+  translationBackend: "online" | "marian";
+  translationModel: string;
   sourceLang: string;
   targetLang: string;
-  // VAD config
   vadEnabled: boolean;
 }
 
@@ -46,6 +45,9 @@ interface EngineState {
   entries: TranscriptEntry[];
   partialText: string;
   partialTranslation: string | null;
+
+  // Translation status
+  activeTranslationBackend: string | null;
 
   // History
   history: Conversation[];
@@ -79,7 +81,8 @@ const DEFAULT_CONFIG: EngineConfig = {
   language: "en",
   device: "auto",
   translationEnabled: true,
-  translationBackend: "marian",
+  translationBackend: "online",
+  translationModel: "",
   sourceLang: "en",
   targetLang: "vi",
   vadEnabled: true,
@@ -103,6 +106,7 @@ export const useEngineStore = create<EngineState>()(
       entries: [],
       partialText: "",
       partialTranslation: null,
+      activeTranslationBackend: null,
       history: [],
       activeView: "transcript",
       config: { ...DEFAULT_CONFIG },
@@ -132,7 +136,13 @@ export const useEngineStore = create<EngineState>()(
         };
 
         ws.onclose = () => {
-          set({ connected: false, socket: null, running: false, isToggling: false });
+          set({
+            connected: false,
+            socket: null,
+            running: false,
+            isToggling: false,
+            activeTranslationBackend: null,
+          });
           reconnectTimer = setTimeout(() => {
             get().connect();
           }, 3000);
@@ -154,14 +164,19 @@ export const useEngineStore = create<EngineState>()(
         if (socket) {
           socket.close();
         }
-        set({ connected: false, socket: null, running: false, isToggling: false });
+        set({
+          connected: false,
+          socket: null,
+          running: false,
+          isToggling: false,
+          activeTranslationBackend: null,
+        });
       },
 
       startPipeline: () => {
         const { socket, connected, config } = get();
         if (!socket || !connected) return;
 
-        // Ensure we are on the transcript view when starting
         set({ isToggling: true, activeView: "transcript" });
 
         socket.send(
@@ -173,6 +188,7 @@ export const useEngineStore = create<EngineState>()(
               "asr.device": config.device,
               "translation.enabled": config.translationEnabled,
               "translation.backend": config.translationBackend,
+              "translation.model": config.translationModel || undefined,
               "translation.source_lang": config.sourceLang,
               "translation.target_lang": config.targetLang,
               "vad.enabled": config.vadEnabled,
@@ -209,11 +225,10 @@ export const useEngineStore = create<EngineState>()(
 
         const timestamp = Date.now();
         const dateStr = new Date(timestamp).toLocaleString();
-        
-        // Generate a name from the first entry, or default
+
         let name = "Session " + dateStr;
         if (entries[0] && entries[0].text) {
-           name = entries[0].text.slice(0, 30) + (entries[0].text.length > 30 ? "..." : "");
+          name = entries[0].text.slice(0, 30) + (entries[0].text.length > 30 ? "..." : "");
         }
 
         const conversation: Conversation = {
@@ -242,10 +257,7 @@ export const useEngineStore = create<EngineState>()(
 
       loadConversation: (id) => {
         const { history, running } = get();
-        if (running) {
-          console.warn("Cannot load conversation while engine is running");
-          return;
-        }
+        if (running) return;
 
         const target = history.find((c) => c.id === id);
         if (target) {
@@ -253,10 +265,10 @@ export const useEngineStore = create<EngineState>()(
             entries: [...target.entries],
             activeView: "transcript",
             partialText: "",
-            partialTranslation: null
+            partialTranslation: null,
           });
         }
-      }
+      },
     }),
     {
       name: "echoflux-storage",
@@ -265,8 +277,8 @@ export const useEngineStore = create<EngineState>()(
         config: state.config,
         history: state.history,
       }),
-    }
-  )
+    },
+  ),
 );
 
 function handleMessage(
@@ -275,20 +287,47 @@ function handleMessage(
   get: () => EngineState,
 ) {
   switch (message.type) {
-    case "partial":
-      set({
-        partialText: message.text as string,
-        partialTranslation: (message.translation as string) ?? null,
-      });
-      break;
+    case "partial": {
+      const newPartial = (message.text as string) || "";
+      const currentPartial = get().partialText;
 
-    case "final":
+      // Update active backend if present
+      const extra: Partial<EngineState> = {};
+      if (message.translation_backend) {
+        extra.activeTranslationBackend = message.translation_backend as string;
+      }
+
+      // Simple heuristic to prevent flickering: update only if longer or significant change
+      if (
+        newPartial.length >= currentPartial.length ||
+        newPartial.length >= currentPartial.length * 0.6 ||
+        currentPartial === ""
+      ) {
+        set({
+          partialText: newPartial,
+          partialTranslation: (message.translation as string) ?? null,
+          ...extra,
+        });
+      }
+      break;
+    }
+
+    case "final": {
+      const finalText = (message.text as string) || "";
+      if (!finalText.trim()) break;
+
+      const update: Partial<EngineState> = {};
+      if (message.translation_backend) {
+        update.activeTranslationBackend = message.translation_backend as string;
+      }
+
       set((state) => ({
+        ...update,
         entries: [
           ...state.entries,
           {
-            id: nextId(),
-            text: message.text as string,
+            id: (message.entry_id as string) || nextId(),
+            text: finalText,
             translation: (message.translation as string) ?? null,
             isFinal: true,
             timestamp: message.timestamp as number,
@@ -298,14 +337,75 @@ function handleMessage(
         partialTranslation: null,
       }));
       break;
+    }
+
+    case "translation_update": {
+      // Async translation update for a final entry
+      const translation = message.translation as string;
+      const sourceText = message.source_text as string;
+
+      if (!translation) break;
+
+      set((state) => {
+        // Strategy: Find the most recent entry with matching source text that has no translation
+        // or just update the last one if source text matches approximately.
+        // For robustness, we search from end to start.
+
+        const newEntries = [...state.entries];
+        let foundIndex = -1;
+
+        for (let i = newEntries.length - 1; i >= 0; i--) {
+          if (
+            newEntries[i].text === sourceText ||
+            (sourceText && newEntries[i].text.includes(sourceText))
+          ) {
+            foundIndex = i;
+            break;
+          }
+        }
+
+        if (foundIndex !== -1) {
+          newEntries[foundIndex] = {
+            ...newEntries[foundIndex],
+            translation: translation,
+          };
+          return { entries: newEntries };
+        }
+
+        // If not found (e.g. accumulator merged multiple entries),
+        // fallback: Update the very last entry if it has no translation
+        const lastIdx = newEntries.length - 1;
+        if (lastIdx >= 0 && !newEntries[lastIdx].translation) {
+          newEntries[lastIdx] = {
+            ...newEntries[lastIdx],
+            translation: translation,
+          };
+          return { entries: newEntries };
+        }
+
+        return {};
+      });
+      break;
+    }
 
     case "status":
       if (message.status === "started") {
-        set({ running: true, isToggling: false });
+        set({
+          running: true,
+          isToggling: false,
+          entries: [],
+          partialText: "",
+          partialTranslation: null,
+          activeTranslationBackend: null,
+        });
       } else if (message.status === "stopped") {
-        // Auto-save on stop
         get().saveCurrentSession();
-        set({ running: false, isToggling: false });
+        set({
+          running: false,
+          isToggling: false,
+          partialText: "",
+          partialTranslation: null,
+        });
       }
       break;
 

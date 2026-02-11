@@ -206,6 +206,31 @@ body,
   background-color: rgba(76, 175, 80, 0.1);
 }
 
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.btn-text:hover:not(:disabled) {
+  background-color: rgba(76, 154, 255, 0.1);
+}
+
+.btn-text:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ── Transcript ── */
 
 .transcript-panel {
@@ -228,6 +253,10 @@ body,
   border-radius: 3px;
 }
 
+.transcript-panel::-webkit-scrollbar-thumb:hover {
+  background-color: var(--bg-hover);
+}
+
 .transcript-empty {
   display: flex;
   flex-direction: column;
@@ -248,8 +277,23 @@ body,
   border-left: 3px solid var(--accent);
 }
 
+.transcript-final {
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .transcript-partial {
-  opacity: 0.6;
+  opacity: 0.7;
   border-left-color: var(--text-muted);
 }
 
@@ -275,6 +319,68 @@ body,
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-muted);
+}
+
+/* ── Typing Cursor ── */
+
+.typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background-color: var(--text-primary);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 0.8s step-end infinite;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ── Listening Indicator ── */
+
+.transcript-listening {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  opacity: 0.5;
+}
+
+.listening-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--text-muted);
+  animation: listening 1.4s ease-in-out infinite;
+}
+
+.listening-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.listening-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes listening {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.3);
+  }
 }
 
 /* ── Status Bar ── */
@@ -361,21 +467,25 @@ body,
 
 /* ── Settings & History Common ── */
 
-.settings-panel, .history-panel {
+.settings-panel,
+.history-panel {
   height: 100%;
   overflow-y: auto;
   padding: 24px;
 }
 
-.settings-panel::-webkit-scrollbar, .history-panel::-webkit-scrollbar {
+.settings-panel::-webkit-scrollbar,
+.history-panel::-webkit-scrollbar {
   width: 6px;
 }
 
-.settings-panel::-webkit-scrollbar-track, .history-panel::-webkit-scrollbar-track {
+.settings-panel::-webkit-scrollbar-track,
+.history-panel::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.settings-panel::-webkit-scrollbar-thumb, .history-panel::-webkit-scrollbar-thumb {
+.settings-panel::-webkit-scrollbar-thumb,
+.history-panel::-webkit-scrollbar-thumb {
   background-color: var(--bg-tertiary);
   border-radius: 3px;
 }
@@ -469,6 +579,50 @@ body,
   cursor: pointer;
 }
 
+/* ── Settings Field Group (input + button side by side) ── */
+
+.settings-field-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-group select,
+.settings-field-group input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Settings Note ── */
+
+.settings-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+/* ── Settings Status (runtime info) ── */
+
+.settings-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  margin-top: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+}
+
+.status-online {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.status-marian {
+  color: var(--warning);
+  font-weight: 600;
+}
+
 /* ── History List ── */
 
 .history-list {
@@ -491,7 +645,9 @@ body,
   background-color: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
 }
 
 .history-item:hover {
@@ -559,8 +715,12 @@ body,
 /* ── Loading Spinner ── */
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .spinner {
