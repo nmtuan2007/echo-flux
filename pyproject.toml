@@ -22,12 +22,16 @@ dependencies = [
 [project.optional-dependencies]
 gpu = [
     "faster-whisper>=1.0",
+    "ctranslate2>=4.0",
     "torch>=2.0",
     "transformers>=4.36",
     "sentencepiece>=0.1.99",
+    "nvidia-cublas-cu12>=12.1",
+    "nvidia-cudnn-cu12>=9.1",
 ]
 cpu = [
     "faster-whisper>=1.0",
+    "ctranslate2>=4.0",
     "transformers>=4.36",
     "sentencepiece>=0.1.99",
 ]

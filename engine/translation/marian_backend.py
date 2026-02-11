@@ -40,14 +40,25 @@ class MarianBackend(TranslationBackend):
         try:
             self._tokenizer = MarianTokenizer.from_pretrained(model_path)
             self._model = MarianMTModel.from_pretrained(model_path)
-            self._model.to(self._device)
-            self._model.eval()
         except Exception as e:
             self._model = None
             self._tokenizer = None
             raise ModelLoadError(f"Failed to load Marian model: {e}") from e
 
-        logger.info("Translation model loaded successfully")
+        try:
+            self._model.to(self._device)
+        except Exception as e:
+            if self._device == "cuda":
+                logger.warning(
+                    "Failed to move translation model to CUDA: %s. Falling back to CPU.", e
+                )
+                self._device = "cpu"
+                self._model.to(self._device)
+            else:
+                raise ModelLoadError(f"Failed to place model on {self._device}: {e}") from e
+
+        self._model.eval()
+        logger.info("Translation model loaded successfully (device=%s)", self._device)
 
     def translate(self, text: str, source_lang: str, target_lang: str) -> TranslationResult:
         if not self._model or not self._tokenizer:
@@ -101,8 +112,9 @@ class MarianBackend(TranslationBackend):
 
     @staticmethod
     def _resolve_device(device: str) -> str:
-        if device != "auto":
-            return device
+        if device == "cpu":
+            return "cpu"
+
         try:
             import torch
             if torch.cuda.is_available():
@@ -110,5 +122,14 @@ class MarianBackend(TranslationBackend):
                 return "cuda"
         except ImportError:
             pass
-        logger.info("Using CPU for translation")
+
+        if device == "cuda":
+            logger.warning(
+                "CUDA was explicitly requested but is not available. "
+                "Ensure PyTorch is installed with CUDA support (e.g. pip install torch --index-url "
+                "https://download.pytorch.org/whl/cu121). Falling back to CPU."
+            )
+        else:
+            logger.info("CUDA not available — using CPU for translation")
+
         return "cpu"

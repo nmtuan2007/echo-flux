@@ -16,16 +16,14 @@ class FasterWhisperBackend(ASRBackend):
     def __init__(self):
         self._model = None
         self._config: Optional[TranscriptionConfig] = None
-        
+
         self._sample_rate = 16000
         self._audio_buffer = np.array([], dtype=np.float32)
-        
-        # Speed Optimization: Run inference less often but effectively
-        self._inference_interval = 0.2 
+
+        self._inference_interval = 0.2
         self._last_inference_time = 0
-        
-        # Lower threshold for finalizing to keep UI snappy
-        self._finalization_threshold_seconds = 10.0 
+
+        self._finalization_threshold_seconds = 10.0
 
     def load_model(self, config: TranscriptionConfig) -> None:
         from faster_whisper import WhisperModel
@@ -34,23 +32,40 @@ class FasterWhisperBackend(ASRBackend):
         device = self._resolve_device(config.device)
         compute_type = config.compute_type
 
-        # Auto-optimization for CPU
-        if device == "cpu" and compute_type == "float16":
+        if device == "cpu" and compute_type in ("float16", "int8_float16"):
             compute_type = "int8"
-        
+            logger.info("Adjusted compute_type to '%s' for CPU", compute_type)
+
         model_path = config.model_path or config.model_size
         logger.info(
             "Loading model: %s (device=%s, compute_type=%s)",
             model_path, device, compute_type,
         )
-        
-        self._model = WhisperModel(
-            model_path, 
-            device=device, 
-            compute_type=compute_type,
-            cpu_threads=4 
-        )
-        logger.info("Model loaded successfully")
+
+        try:
+            self._model = WhisperModel(
+                model_path,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=4,
+            )
+        except Exception as e:
+            if device == "cuda":
+                logger.warning(
+                    "Failed to load model on CUDA: %s. Falling back to CPU.", e
+                )
+                device = "cpu"
+                compute_type = "int8"
+                self._model = WhisperModel(
+                    model_path,
+                    device=device,
+                    compute_type=compute_type,
+                    cpu_threads=4,
+                )
+            else:
+                raise
+
+        logger.info("Model loaded successfully (device=%s, compute_type=%s)", device, compute_type)
 
     @property
     def is_loaded(self) -> bool:
@@ -70,46 +85,36 @@ class FasterWhisperBackend(ASRBackend):
         if not self._model:
             return None
 
-        # 1. Append Audio
         new_samples = self._bytes_to_float32(audio_chunk)
         self._audio_buffer = np.concatenate((self._audio_buffer, new_samples))
 
-        # 2. Timing Throttling
         now = time.time()
         if now - self._last_inference_time < self._inference_interval:
             return None
         self._last_inference_time = now
 
-        # Only run if we have enough audio (approx 0.3s)
         if len(self._audio_buffer) < 4800:
             return None
 
-        # 3. FAST Inference
-        # Key optimizations:
-        # - beam_size=1 (Greedy decoding, fastest)
-        # - vad_filter=False (DISABLE internal VAD, saves CPU, we rely on Silero outside)
-        # - condition_on_previous_text=False (Prevents hallucination loops, faster)
         segments_gen, info = self._model.transcribe(
             self._audio_buffer,
             language=self._config.language,
-            beam_size=1, 
+            beam_size=1,
             best_of=1,
             temperature=0.0,
-            vad_filter=False, # CRITICAL OPTIMIZATION: We already use Silero VAD
-            condition_on_previous_text=False
+            vad_filter=False,
+            condition_on_previous_text=False,
         )
-        
+
         segments = list(segments_gen)
         if not segments:
             return None
 
-        # 4. Smart Finalization
         buffer_duration = len(self._audio_buffer) / self._sample_rate
         final_text_parts = []
         cut_off_time = 0.0
-        
+
         should_finalize = False
-        # Aggressive finalization: if >1 segments, finalize immediately
         if len(segments) > 1:
             should_finalize = True
             segments_to_finalize = segments[:-1]
@@ -124,22 +129,19 @@ class FasterWhisperBackend(ASRBackend):
                 if seg.text.strip():
                     final_text_parts.append(seg.text.strip())
                 cut_off_time = seg.end
-            
+
             cut_samples = int(cut_off_time * self._sample_rate)
             cut_samples = min(cut_samples, len(self._audio_buffer))
-            
-            # Commit the cut
             self._audio_buffer = self._audio_buffer[cut_samples:]
-            
+
             if final_text_parts:
                 final_text = " ".join(final_text_parts)
                 return TranscriptResult(
                     text=final_text,
                     is_final=True,
-                    language=info.language
+                    language=info.language,
                 )
 
-        # 5. Partial Result
         full_text = " ".join([s.text.strip() for s in segments if s.text.strip()])
         if not full_text:
             return None
@@ -147,25 +149,25 @@ class FasterWhisperBackend(ASRBackend):
         return TranscriptResult(
             text=full_text,
             is_final=False,
-            language=info.language
+            language=info.language,
         )
 
     def finalize_current(self) -> Optional[TranscriptResult]:
-        if len(self._audio_buffer) == 0:
+        if not self._model or len(self._audio_buffer) == 0:
             return None
-        
+
         segments_gen, info = self._model.transcribe(
             self._audio_buffer,
             language=self._config.language,
             beam_size=1,
             vad_filter=False,
-            condition_on_previous_text=False
+            condition_on_previous_text=False,
         )
         segments = list(segments_gen)
         text = " ".join([s.text.strip() for s in segments if s.text.strip()])
-        
+
         self.reset_stream()
-        
+
         if text:
             return TranscriptResult(text=text, is_final=True, language=info.language)
         return None
@@ -179,12 +181,34 @@ class FasterWhisperBackend(ASRBackend):
 
     @staticmethod
     def _resolve_device(device_str: str) -> str:
-        if device_str == "auto":
+        if device_str == "cpu":
+            return "cpu"
+
+        # For "cuda" or "auto", probe actual CUDA availability via CTranslate2
+        cuda_available = False
+        try:
+            import ctranslate2
+            cuda_available = "cuda" in ctranslate2.get_supported_compute_types("cuda")
+        except Exception:
+            # CTranslate2 probe failed; try torch as secondary check
             try:
                 import torch
-                if torch.cuda.is_available():
-                    return "cuda"
+                cuda_available = torch.cuda.is_available()
             except ImportError:
                 pass
-            return "cpu"
-        return device_str
+
+        if cuda_available:
+            logger.info("CUDA is available — using GPU for ASR")
+            return "cuda"
+
+        if device_str == "cuda":
+            logger.warning(
+                "CUDA was explicitly requested but is not available. "
+                "Common causes: missing CUDA Toolkit, missing cuBLAS/cuDNN libraries "
+                "(nvidia-cublas-cu12, nvidia-cudnn-cu12), or incompatible driver. "
+                "Falling back to CPU."
+            )
+        else:
+            logger.info("CUDA not available — using CPU for ASR")
+
+        return "cpu"

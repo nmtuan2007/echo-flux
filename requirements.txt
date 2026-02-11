@@ -5,12 +5,19 @@ pyaudio>=0.2.14
 
 # ASR
 faster-whisper>=1.0
+ctranslate2>=4.0
 
 # Translation
 torch>=2.0
 transformers>=4.36
 sentencepiece>=0.1.99
 sacremoses>=0.0.53
+
+# CUDA runtime libraries (required for GPU acceleration)
+# These provide cuBLAS and cuDNN that CTranslate2/faster-whisper need.
+# Skip these if running CPU-only or install CUDA Toolkit system-wide instead.
+nvidia-cublas-cu12>=12.1; sys_platform != 'darwin'
+nvidia-cudnn-cu12>=9.1; sys_platform != 'darwin'
 
 # VAD & Audio Processing
 onnxruntime>=1.16.0

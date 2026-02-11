@@ -5,6 +5,7 @@ Set-Location $ProjectRoot
 
 $PythonMinVersion = [version]"3.10"
 $VenvDir = ".venv"
+$VenvPython = "$VenvDir\Scripts\python.exe"
 
 # --- Find Python ---
 function Find-Python {
@@ -36,7 +37,7 @@ Write-Host "Using: $PythonVersion ($PythonCmd)"
 # --- Create venv ---
 if (Test-Path $VenvDir) {
     $confirm = Read-Host "Virtual environment exists. Recreate? (y/N)"
-    if ($confirm -eq "y" -or $confirm -eq "Y") {
+    if ($confirm -match "^[Yy]$") {
         Remove-Item -Recurse -Force $VenvDir
         & $PythonCmd -m venv $VenvDir
         Write-Host "Virtual environment recreated."
@@ -46,26 +47,31 @@ if (Test-Path $VenvDir) {
     Write-Host "Virtual environment created at $VenvDir"
 }
 
-# --- Activate and install ---
-& "$VenvDir\Scripts\Activate.ps1"
+# --- Ensure venv python exists ---
+if (-not (Test-Path $VenvPython)) {
+    Write-Error "Virtual environment python not found."
+    exit 1
+}
 
-pip install --upgrade pip setuptools wheel
+# --- Upgrade packaging tools safely ---
+& $VenvPython -m pip install --upgrade pip setuptools wheel
 
+# --- Install dependencies ---
 $Mode = if ($args.Count -gt 0) { $args[0] } else { "dev" }
 
 switch ($Mode) {
     "prod" {
         Write-Host "Installing production dependencies..."
-        pip install -r requirements.txt
+        & $VenvPython -m pip install -r requirements.txt
     }
     "dev" {
         Write-Host "Installing development dependencies..."
-        pip install -r requirements-dev.txt
+        & $VenvPython -m pip install -r requirements-dev.txt
     }
     "gpu" {
         Write-Host "Installing GPU dependencies..."
-        pip install -r requirements.txt
-        pip install "torch>=2.0"
+        & $VenvPython -m pip install -r requirements.txt
+        & $VenvPython -m pip install "torch>=2.0"
     }
     default {
         Write-Error "Unknown mode: $Mode (use: dev, prod, gpu)"
@@ -74,7 +80,7 @@ switch ($Mode) {
 }
 
 # --- Install project in editable mode ---
-pip install -e .
+& $VenvPython -m pip install -e .
 
 # --- Create .env if missing ---
 if (-not (Test-Path ".env")) {
