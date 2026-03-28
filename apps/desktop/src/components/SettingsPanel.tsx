@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { EngineConfig, useEngineStore } from "../store/engineStore";
+import { useEffect, useState } from "react";
+import { AudioDeviceInfo, EngineConfig, useEngineStore } from "../store/engineStore";
 
 const MODEL_SIZES = ["tiny", "base", "small", "medium", "large"];
 const DEVICES = ["auto", "cpu", "cuda"];
@@ -68,20 +68,143 @@ function getPresetModels(sourceLang: string, targetLang: string) {
   return PRESET_MODELS[key] || [{ id: "", label: "Default (auto-detect)" }];
 }
 
+const AUDIO_SOURCES: { value: EngineConfig["audioSource"]; label: string }[] = [
+  { value: "microphone", label: "Microphone only" },
+  { value: "system", label: "Speaker / System audio only" },
+  { value: "both", label: "Both (Mic + Speaker)" },
+];
+
+function DeviceSelect({
+  id,
+  value,
+  devices,
+  placeholder,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  value: string;
+  devices: AudioDeviceInfo[];
+  placeholder: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <select id={id} value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+      <option value="">{placeholder}</option>
+      {devices.map((d) => (
+        <option key={d.id} value={d.id}>
+          {d.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export function SettingsPanel() {
-  const { config, updateConfig, running, activeTranslationBackend } = useEngineStore();
+  const {
+    config,
+    updateConfig,
+    running,
+    activeTranslationBackend,
+    connected,
+    availableMics,
+    availableSpeakers,
+    requestDeviceList,
+  } = useEngineStore();
   const [showCustomModel, setShowCustomModel] = useState(false);
+
+  // Auto-fetch device list when the panel mounts and we're connected.
+  useEffect(() => {
+    if (connected) {
+      requestDeviceList();
+    }
+  }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const presetModels = getPresetModels(config.sourceLang || config.language, config.targetLang);
 
   const isCustomModel =
     config.translationModel !== "" && !presetModels.some((m) => m.id === config.translationModel);
 
+  const showMicSelect = config.audioSource === "microphone" || config.audioSource === "both";
+  const showSpeakerSelect = config.audioSource === "system" || config.audioSource === "both";
+
   return (
     <div className="settings-panel">
       <h2 className="settings-title">Settings</h2>
       {running && <p className="settings-warning">Stop the pipeline before changing settings.</p>}
 
+      {/* ── Audio Input ──────────────────────────────────────────────── */}
+      <section className="settings-section">
+        <h3 className="settings-section-title">Audio Input</h3>
+
+        <div className="settings-field">
+          <label htmlFor="audio-source">Source</label>
+          <select
+            id="audio-source"
+            value={config.audioSource}
+            onChange={(e) => {
+              updateConfig({ audioSource: e.target.value as EngineConfig["audioSource"] });
+            }}
+            disabled={running}
+          >
+            {AUDIO_SOURCES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {showMicSelect && (
+          <div className="settings-field">
+            <label htmlFor="mic-device">Microphone</label>
+            <DeviceSelect
+              id="mic-device"
+              value={config.micDeviceId}
+              devices={availableMics}
+              placeholder="Default microphone"
+              onChange={(v) => updateConfig({ micDeviceId: v })}
+              disabled={running}
+            />
+          </div>
+        )}
+
+        {showSpeakerSelect && (
+          <div className="settings-field">
+            <label htmlFor="speaker-device">Speaker (Loopback)</label>
+            <DeviceSelect
+              id="speaker-device"
+              value={config.speakerDeviceId}
+              devices={availableSpeakers}
+              placeholder="Default speaker loopback"
+              onChange={(v) => updateConfig({ speakerDeviceId: v })}
+              disabled={running}
+            />
+          </div>
+        )}
+
+        <div className="settings-field settings-field-row">
+          <label>Device List</label>
+          <button
+            className="btn-text"
+            onClick={requestDeviceList}
+            disabled={running || !connected}
+            title={!connected ? "Connect the engine first" : "Re-enumerate audio devices"}
+          >
+            ↻ Refresh
+          </button>
+        </div>
+
+        {config.audioSource === "both" && (
+          <p className="settings-note">
+            Both mic and speaker audio are mixed at 50% gain each before being sent to Whisper.
+            Make sure both devices are selected correctly to avoid clipping.
+          </p>
+        )}
+      </section>
+
+      {/* ── Speech Recognition ───────────────────────────────────────── */}
       <section className="settings-section">
         <h3 className="settings-section-title">Speech Recognition</h3>
 
@@ -147,6 +270,7 @@ export function SettingsPanel() {
         </div>
       </section>
 
+      {/* ── Translation ──────────────────────────────────────────────── */}
       <section className="settings-section">
         <h3 className="settings-section-title">Translation</h3>
 
@@ -274,6 +398,7 @@ export function SettingsPanel() {
         )}
       </section>
 
+      {/* ── Connection ───────────────────────────────────────────────── */}
       <section className="settings-section">
         <h3 className="settings-section-title">Connection</h3>
 

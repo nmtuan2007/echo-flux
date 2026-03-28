@@ -342,6 +342,60 @@ body,
   color: var(--text-muted);
 }
 
+/* ── Source Badges ── */
+
+.transcript-entry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.source-badge-mic {
+  background-color: rgba(76, 154, 255, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(76, 154, 255, 0.3);
+}
+
+.source-badge-system {
+  background-color: rgba(149, 91, 255, 0.15);
+  color: #9b6dff;
+  border: 1px solid rgba(149, 91, 255, 0.3);
+}
+
+.source-badge-both {
+  background-color: rgba(245, 166, 35, 0.12);
+  color: var(--warning);
+  border: 1px solid rgba(245, 166, 35, 0.28);
+}
+
+/* Per-source left-border accent on final entries */
+.transcript-source-mic {
+  border-left-color: var(--accent);
+}
+
+.transcript-source-system {
+  border-left-color: #9b6dff;
+}
+
+.transcript-source-both {
+  border-left-color: var(--warning);
+}
+
 /* ── Typing Cursor ── */
 
 .typing-cursor {

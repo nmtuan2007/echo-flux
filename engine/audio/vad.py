@@ -99,7 +99,6 @@ class VAD:
         # Append to internal buffer
         self._buffer = np.concatenate((self._buffer, audio_float32))
 
-        # Process in chunks of WINDOW_SIZE_SAMPLES (512)
         has_speech_in_chunk = False
 
         while len(self._buffer) >= WINDOW_SIZE_SAMPLES:
@@ -109,11 +108,9 @@ class VAD:
             prob = self._inference(window)
             
             if prob > self._threshold:
-                self._is_speech = True
                 has_speech_in_chunk = True
-            else:
-                pass 
         
+        self._is_speech = has_speech_in_chunk
         return self._is_speech
 
     def _inference(self, window: np.ndarray) -> float:

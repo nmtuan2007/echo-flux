@@ -9,6 +9,7 @@ class TranscriptResult:
     is_final: bool
     confidence: float = 0.0
     language: Optional[str] = None
+    stream_id: str = "default"
 
 
 class ASRBackend(ABC):
@@ -18,11 +19,15 @@ class ASRBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def transcribe_stream(self, audio_chunk: bytes) -> TranscriptResult:
+    def transcribe_stream(self, audio_chunk: bytes, stream_id: str = "default") -> TranscriptResult:
         raise NotImplementedError
 
     @abstractmethod
-    def reset_stream(self) -> None:
+    def finalize_current(self, stream_id: str = "default") -> Optional[TranscriptResult]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def reset_stream(self, stream_id: str = "default") -> None:
         raise NotImplementedError
 
     @abstractmethod

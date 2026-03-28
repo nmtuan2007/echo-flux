@@ -1,8 +1,32 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useEngineStore } from "../store/engineStore";
+import { TranscriptEntry, useEngineStore } from "../store/engineStore";
+
+type AudioSource = TranscriptEntry["source"];
+
+const SOURCE_LABELS: Record<NonNullable<AudioSource>, { icon: string; label: string; cls: string }> = {
+  mic:    { icon: "🎤", label: "Mic",     cls: "source-badge-mic" },
+  system: { icon: "🔊", label: "Speaker", cls: "source-badge-system" },
+  both:   { icon: "🔄", label: "Both",    cls: "source-badge-both" },
+};
+
+function SourceBadge({ source }: { source: AudioSource }) {
+  if (!source) return null;
+  const meta = SOURCE_LABELS[source];
+  if (!meta) return null;
+  return (
+    <span className={`source-badge ${meta.cls}`}>
+      {meta.icon} {meta.label}
+    </span>
+  );
+}
+
+function sourceBorderClass(source: AudioSource): string {
+  if (!source) return "";
+  return `transcript-source-${source}`;
+}
 
 export function TranscriptPanel() {
-  const { entries, partialText, partialTranslation, config, running } = useEngineStore();
+  const { entries, partials, config, running } = useEngineStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
 
@@ -17,9 +41,10 @@ export function TranscriptPanel() {
     if (isNearBottom.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [entries, partialText]);
+  }, [entries, partials]);
 
-  const hasContent = entries.length > 0 || partialText;
+  const activePartials = Object.values(partials);
+  const hasContent = entries.length > 0 || activePartials.length > 0;
 
   return (
     <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
@@ -33,7 +58,15 @@ export function TranscriptPanel() {
       )}
 
       {entries.map((entry) => (
-        <div key={entry.id} className="transcript-entry transcript-final">
+        <div
+          key={entry.id}
+          className={`transcript-entry transcript-final ${sourceBorderClass(entry.source)}`}
+        >
+          {entry.source && (
+            <div className="transcript-entry-header">
+              <SourceBadge source={entry.source} />
+            </div>
+          )}
           <div className="transcript-text">{entry.text}</div>
           {config.translationEnabled && entry.translation && (
             <div className="transcript-translation">{entry.translation}</div>
@@ -42,19 +75,24 @@ export function TranscriptPanel() {
         </div>
       ))}
 
-      {partialText && (
-        <div className="transcript-entry transcript-partial">
+      {activePartials.map((partial, idx) => (
+        <div key={`partial-${idx}`} className={`transcript-entry transcript-partial ${sourceBorderClass(partial.source)}`}>
+          {partial.source && (
+            <div className="transcript-entry-header">
+              <SourceBadge source={partial.source} />
+            </div>
+          )}
           <div className="transcript-text">
-            {partialText}
+            {partial.text}
             <span className="typing-cursor" />
           </div>
-          {config.translationEnabled && partialTranslation && (
-            <div className="transcript-translation">{partialTranslation}</div>
+          {config.translationEnabled && partial.translation && (
+            <div className="transcript-translation">{partial.translation}</div>
           )}
         </div>
-      )}
+      ))}
 
-      {running && !partialText && entries.length > 0 && (
+      {running && activePartials.length === 0 && entries.length > 0 && (
         <div className="transcript-listening">
           <span className="listening-dot" />
           <span className="listening-dot" />

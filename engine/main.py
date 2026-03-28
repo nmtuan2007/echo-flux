@@ -97,21 +97,20 @@ class EchoFluxEngine:
             port=int(os.getenv("ECHOFLUX_PORT", "8765")),
         )
 
-        self._audio_input = None
+        self._inputs = {}
+        self._vads = {}
+        self._audio_queues = {}
+        
         self._asr_backend = None
         self._translation_backend = None
-        self._vad = None
-
-        # REMOVED: SentenceAccumulator to prevent delay
 
         self._running = False
 
-        self._audio_queue = Queue(maxsize=500)
         self._translation_queue = Queue(maxsize=100)
         self._result_queue = Queue()
 
-        self._capture_thread: Optional[threading.Thread] = None
-        self._process_thread: Optional[threading.Thread] = None
+        self._capture_threads = []
+        self._process_threads = []
         self._translation_thread: Optional[threading.Thread] = None
         self._result_task: Optional[asyncio.Task] = None
 
@@ -166,24 +165,47 @@ class EchoFluxEngine:
         }
 
         # 1. Audio Source
-        audio_source = os.getenv("ECHOFLUX_AUDIO_SOURCE", "microphone")
-        device_id = os.getenv("ECHOFLUX_AUDIO_DEVICE_ID")
+        # Prefer settings dict (sent by the UI), fall back to env for CLI usage.
+        audio_source = settings.get("audio.source", os.getenv("ECHOFLUX_AUDIO_SOURCE", "microphone"))
+        mic_id_str = settings.get("audio.mic_device_id") or os.getenv("ECHOFLUX_MIC_DEVICE_ID")
+        spk_id_str = settings.get("audio.speaker_device_id") or os.getenv("ECHOFLUX_SPEAKER_DEVICE_ID")
+        # Legacy single-device env var (still supported for backwards-compat)
+        legacy_device_id = os.getenv("ECHOFLUX_AUDIO_DEVICE_ID")
 
-        if audio_source == "system":
+        self._inputs.clear()
+        if audio_source == "both":
+            from engine.audio.microphone import MicrophoneInput
             from engine.audio.system_audio import SystemAudioInput
-            self._audio_input = SystemAudioInput(audio_config, device_id=device_id)
+            mic_dev = int(mic_id_str) if mic_id_str else None
+            self._inputs["mic"] = MicrophoneInput(audio_config, device_id=mic_dev)
+            self._inputs["system"] = SystemAudioInput(audio_config, device_id=spk_id_str)
+            logger.info(
+                "Audio source: True Dual Stream (mic_device=%s, speaker_device=%s)",
+                mic_id_str or "default",
+                spk_id_str or "default",
+            )
+        elif audio_source == "system":
+            from engine.audio.system_audio import SystemAudioInput
+            device_id = spk_id_str or legacy_device_id
+            self._inputs["system"] = SystemAudioInput(audio_config, device_id=device_id)
         else:
             from engine.audio.microphone import MicrophoneInput
-            dev_id = int(device_id) if device_id else None
-            self._audio_input = MicrophoneInput(audio_config, device_id=dev_id)
+            raw_id = mic_id_str or legacy_device_id
+            dev_id = int(raw_id) if raw_id else None
+            self._inputs["mic"] = MicrophoneInput(audio_config, device_id=dev_id)
 
-        # 2. VAD
+        # 2. VAD & Queues
         from engine.audio.vad import VAD
-        self._vad = VAD({
-            "enabled": settings.get("vad.enabled", True),
-            "threshold": settings.get("vad.threshold", 0.5),
-            "sample_rate": sample_rate,
-        })
+        self._vads.clear()
+        self._audio_queues.clear()
+        
+        for stream_id in self._inputs:
+            self._audio_queues[stream_id] = Queue(maxsize=500)
+            self._vads[stream_id] = VAD({
+                "enabled": settings.get("vad.enabled", True),
+                "threshold": settings.get("vad.threshold", 0.5),
+                "sample_rate": sample_rate,
+            })
 
         # 3. ASR Backend
         from engine.asr.faster_whisper_backend import FasterWhisperBackend
@@ -229,23 +251,48 @@ class EchoFluxEngine:
 
     def _start_threads(self):
         self._running = True
+        self._ws_server.is_capturing = True
 
         # Clear queues
-        with self._audio_queue.mutex:
-            self._audio_queue.queue.clear()
+        for q in self._audio_queues.values():
+            with q.mutex:
+                q.queue.clear()
+                
         with self._translation_queue.mutex:
             self._translation_queue.queue.clear()
         with self._result_queue.mutex:
             self._result_queue.queue.clear()
 
-        # Threads
-        self._capture_thread = threading.Thread(target=self._capture_loop, name="CaptureThread")
-        self._capture_thread.daemon = True
-        self._capture_thread.start()
+        # Start audio streams sequentially to avoid PortAudio concurrency issues
+        for stream_id, audio_input in self._inputs.items():
+            try:
+                audio_input.start()
+            except Exception as e:
+                logger.error("Failed to start audio input %s: %s", stream_id, e)
+                raise
 
-        self._process_thread = threading.Thread(target=self._process_loop, name="ProcessThread")
-        self._process_thread.daemon = True
-        self._process_thread.start()
+        # Threads
+        self._capture_threads = []
+        self._process_threads = []
+
+        for stream_id, audio_input in self._inputs.items():
+            ct = threading.Thread(
+                target=self._capture_loop, 
+                args=(stream_id, audio_input, self._audio_queues[stream_id]),
+                name=f"Capture-{stream_id}"
+            )
+            ct.daemon = True
+            ct.start()
+            self._capture_threads.append(ct)
+
+            pt = threading.Thread(
+                target=self._process_loop,
+                args=(stream_id, self._audio_queues[stream_id], self._vads[stream_id]),
+                name=f"Process-{stream_id}"
+            )
+            pt.daemon = True
+            pt.start()
+            self._process_threads.append(pt)
 
         if self._translation_backend:
             self._translation_thread = threading.Thread(target=self._translation_loop, name="TranslationThread")
@@ -260,15 +307,16 @@ class EchoFluxEngine:
 
         logger.info("Stopping pipeline...")
         self._running = False
+        self._ws_server.is_capturing = False
 
-        if self._audio_input:
-            self._audio_input.stop()
+        for inp in self._inputs.values():
+            inp.stop()
 
-        if self._capture_thread:
-            self._capture_thread.join(timeout=1.0)
-
-        if self._process_thread:
-            self._process_thread.join(timeout=2.0)
+        for ct in self._capture_threads:
+            ct.join(timeout=1.0)
+            
+        for pt in self._process_threads:
+            pt.join(timeout=2.0)
 
         if self._translation_thread:
             self._translation_thread.join(timeout=2.0)
@@ -281,9 +329,10 @@ class EchoFluxEngine:
                 pass
 
         if self._asr_backend:
-            result = self._asr_backend.finalize_current()
-            if result:
-                self._enqueue_asr_result(result)
+            for stream_id in self._inputs.keys():
+                result = self._asr_backend.finalize_current(stream_id)
+                if result:
+                    self._enqueue_asr_result(result)
             self._asr_backend.unload_model()
             self._asr_backend = None
 
@@ -291,28 +340,35 @@ class EchoFluxEngine:
             self._translation_backend.unload_model()
             self._translation_backend = None
 
-        self._audio_input = None
-        self._vad = None
+        self._inputs.clear()
+        self._vads.clear()
+        self._audio_queues.clear()
         logger.info("Pipeline stopped.")
 
-    def _capture_loop(self):
-        logger.info("Capture thread started.")
+    def _capture_loop(self, stream_id: str, audio_input, audio_queue: Queue):
+        logger.info("Capture thread [%s] started.", stream_id)
+        chunk_count = 0
         try:
-            self._audio_input.start()
             while self._running:
-                chunk = self._audio_input.read_chunk()
+                chunk = audio_input.read_chunk()
                 if chunk:
-                    if not self._audio_queue.full():
-                        self._audio_queue.put(chunk)
+                    chunk_count += 1
+                    if chunk_count % 100 == 0:
+                        logger.debug("Capture [%s]: Read 100 chunks. Current queue size: %d", stream_id, audio_queue.qsize())
+                    
+                    if not audio_queue.full():
+                        audio_queue.put(chunk)
+                    else:
+                        logger.warning("Capture [%s]: Queue is full! Dropping chunk", stream_id)
                 else:
                     time.sleep(0.005)
         except Exception as e:
-            logger.error("Capture thread error: %s", e, exc_info=True)
+            logger.error("Capture thread [%s] error: %s", stream_id, e, exc_info=True)
         finally:
-            logger.info("Capture thread ended.")
+            logger.info("Capture thread [%s] ended.", stream_id)
 
-    def _process_loop(self):
-        logger.info("Processing thread started.")
+    def _process_loop(self, stream_id: str, audio_queue: Queue, vad):
+        logger.info("Processing thread [%s] started.", stream_id)
         was_speech = False
         silence_start_time = None
         has_pending_audio = False
@@ -321,49 +377,56 @@ class EchoFluxEngine:
             while self._running:
                 chunks = []
                 try:
-                    first = self._audio_queue.get(timeout=0.1)
+                    first = audio_queue.get(timeout=0.1)
                     chunks.append(first)
-                    while not self._audio_queue.empty() and len(chunks) < 10:
+                    while not audio_queue.empty() and len(chunks) < 10:
                         try:
-                            chunks.append(self._audio_queue.get_nowait())
+                            chunks.append(audio_queue.get_nowait())
                         except Empty:
                             break
                 except Empty:
                     if has_pending_audio and silence_start_time is not None:
                         elapsed = time.time() - silence_start_time
                         if elapsed >= SILENCE_FINALIZE_DELAY:
-                            self._do_finalize()
+                            self._do_finalize(stream_id)
                             has_pending_audio = False
                             silence_start_time = None
                             was_speech = False
                     continue
 
                 combined_audio = b"".join(chunks)
-                is_speech = self._vad.process(combined_audio)
+                is_speech = vad.process(combined_audio)
 
                 if is_speech:
+                    if not was_speech:
+                        logger.info("Process [%s]: SPEECH STARTED", stream_id)
                     silence_start_time = None
                     has_pending_audio = True
                     was_speech = True
-                    result = self._asr_backend.transcribe_stream(combined_audio)
+                    
+                    result = self._asr_backend.transcribe_stream(combined_audio, stream_id)
                     if result:
+                        logger.debug("Process [%s]: Received ASR Result -> '%s' (is_final=%s)", stream_id, result.text, result.is_final)
                         self._enqueue_asr_result(result)
                 else:
                     if was_speech and silence_start_time is None:
+                        logger.info("Process [%s]: SPEECH ENDED. Entering silence countdown.", stream_id)
                         silence_start_time = time.time()
+                    
                     if silence_start_time is not None:
                         elapsed = time.time() - silence_start_time
                         if elapsed >= SILENCE_FINALIZE_DELAY and has_pending_audio:
-                            self._do_finalize()
+                            logger.info("Process [%s]: SILENCE TIMEOUT REACHED (%.2fs). Finalizing...", stream_id, elapsed)
+                            self._do_finalize(stream_id)
                             has_pending_audio = False
                             silence_start_time = None
                             was_speech = False
-                            self._vad.reset()
+                            vad.reset()
 
         except Exception as e:
-            logger.error("Processing thread error: %s", e, exc_info=True)
+            logger.error("Processing thread [%s] error: %s", stream_id, e, exc_info=True)
         finally:
-            logger.info("Processing thread ended.")
+            logger.info("Processing thread [%s] ended.", stream_id)
 
     def _translation_loop(self):
         logger.info("Translation thread started.")
@@ -404,8 +467,8 @@ class EchoFluxEngine:
 
         logger.info("Translation thread ended.")
 
-    def _do_finalize(self):
-        result = self._asr_backend.finalize_current()
+    def _do_finalize(self, stream_id: str = "default"):
+        result = self._asr_backend.finalize_current(stream_id)
         if result:
             self._enqueue_asr_result(result)
 
@@ -420,6 +483,9 @@ class EchoFluxEngine:
         if self._translation_backend and hasattr(self._translation_backend, "active_backend"):
             active_backend = self._translation_backend.active_backend
 
+        # True Dual Stream automatically tags every result with its originating stream_id
+        audio_source = asr_result.stream_id if asr_result.stream_id in ["mic", "system"] else None
+
         # Send ASR (English) to UI
         msg = {
             "type": "partial" if not asr_result.is_final else "final",
@@ -428,6 +494,9 @@ class EchoFluxEngine:
             "is_final": asr_result.is_final,
             "timestamp": time.time(),
         }
+
+        if audio_source:
+            msg["source"] = audio_source
 
         if asr_result.is_final:
             msg["entry_id"] = f"e-{time.time()}"

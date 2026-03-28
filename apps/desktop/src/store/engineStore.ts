@@ -7,6 +7,7 @@ export interface TranscriptEntry {
   translation: string | null;
   isFinal: boolean;
   timestamp: number;
+  source?: "mic" | "system" | "both" | null;
 }
 
 export interface Conversation {
@@ -14,6 +15,11 @@ export interface Conversation {
   name: string;
   date: number;
   entries: TranscriptEntry[];
+}
+
+export interface AudioDeviceInfo {
+  id: string;
+  name: string;
 }
 
 export interface EngineConfig {
@@ -28,6 +34,10 @@ export interface EngineConfig {
   sourceLang: string;
   targetLang: string;
   vadEnabled: boolean;
+  // Dual audio capture
+  audioSource: "microphone" | "system" | "both";
+  micDeviceId: string;
+  speakerDeviceId: string;
 }
 
 export type AppView = "transcript" | "settings" | "history";
@@ -43,8 +53,11 @@ interface EngineState {
 
   // Transcript
   entries: TranscriptEntry[];
-  partialText: string;
-  partialTranslation: string | null;
+  partials: Record<string, {
+    text: string;
+    translation: string | null;
+    source: "mic" | "system" | "both" | null;
+  }>;
 
   // Translation status
   activeTranslationBackend: string | null;
@@ -59,6 +72,10 @@ interface EngineState {
   // Config
   config: EngineConfig;
 
+  // Audio device lists (populated via list_devices round-trip)
+  availableMics: AudioDeviceInfo[];
+  availableSpeakers: AudioDeviceInfo[];
+
   // Actions
   connect: () => void;
   disconnect: () => void;
@@ -68,6 +85,7 @@ interface EngineState {
   setActiveView: (view: AppView) => void;
   setTheme: (theme: "dark" | "light") => void;
   updateConfig: (partial: Partial<EngineConfig>) => void;
+  requestDeviceList: () => void;
 
   // History Actions
   renameConversation: (id: string, name: string) => void;
@@ -88,6 +106,9 @@ const DEFAULT_CONFIG: EngineConfig = {
   sourceLang: "en",
   targetLang: "vi",
   vadEnabled: true,
+  audioSource: "microphone",
+  micDeviceId: "",
+  speakerDeviceId: "",
 };
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,13 +127,14 @@ export const useEngineStore = create<EngineState>()(
       running: false,
       isToggling: false,
       entries: [],
-      partialText: "",
-      partialTranslation: null,
+      partials: {},
       activeTranslationBackend: null,
       history: [],
       activeView: "transcript",
       theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
       config: { ...DEFAULT_CONFIG },
+      availableMics: [],
+      availableSpeakers: [],
 
       connect: () => {
         const { config, socket } = get();
@@ -195,6 +217,9 @@ export const useEngineStore = create<EngineState>()(
               "translation.source_lang": config.sourceLang,
               "translation.target_lang": config.targetLang,
               "vad.enabled": config.vadEnabled,
+              "audio.source": config.audioSource,
+              "audio.mic_device_id": config.micDeviceId || undefined,
+              "audio.speaker_device_id": config.speakerDeviceId || undefined,
             },
           }),
         );
@@ -209,7 +234,7 @@ export const useEngineStore = create<EngineState>()(
       },
 
       clearTranscript: () => {
-        set({ entries: [], partialText: "", partialTranslation: null });
+        set({ entries: [], partials: {} });
       },
 
       setActiveView: (view) => {
@@ -224,6 +249,12 @@ export const useEngineStore = create<EngineState>()(
         set((state) => ({
           config: { ...state.config, ...partial },
         }));
+      },
+
+      requestDeviceList: () => {
+        const { socket, connected } = get();
+        if (!socket || !connected) return;
+        socket.send(JSON.stringify({ type: "list_devices" }));
       },
 
       saveCurrentSession: () => {
@@ -271,8 +302,7 @@ export const useEngineStore = create<EngineState>()(
           set({
             entries: [...target.entries],
             activeView: "transcript",
-            partialText: "",
-            partialTranslation: null,
+            partials: {},
           });
         }
       },
@@ -297,31 +327,39 @@ function handleMessage(
   switch (message.type) {
     case "partial": {
       const newPartial = (message.text as string) || "";
-      const currentPartial = get().partialText;
+      const streamId = (message.source as string) || "default";
+      const currentPartial = get().partials[streamId]?.text || "";
 
-      // Update active backend if present
+      // Update active backend and source if present
       const extra: Partial<EngineState> = {};
       if (message.translation_backend) {
         extra.activeTranslationBackend = message.translation_backend as string;
       }
 
-      // Simple heuristic to prevent flickering: update only if longer or significant change
+      // Simple heuristic to prevent flickering on *this* specific stream
       if (
         newPartial.length >= currentPartial.length ||
         newPartial.length >= currentPartial.length * 0.6 ||
         currentPartial === ""
       ) {
-        set({
-          partialText: newPartial,
-          partialTranslation: (message.translation as string) ?? null,
+        set((state) => ({
+          partials: {
+            ...state.partials,
+            [streamId]: {
+              text: newPartial,
+              translation: (message.translation as string) ?? null,
+              source: (message.source as TranscriptEntry["source"]) ?? null,
+            },
+          },
           ...extra,
-        });
+        }));
       }
       break;
     }
 
     case "final": {
       const finalText = (message.text as string) || "";
+      const streamId = (message.source as string) || "default";
       if (!finalText.trim()) break;
 
       const update: Partial<EngineState> = {};
@@ -329,21 +367,27 @@ function handleMessage(
         update.activeTranslationBackend = message.translation_backend as string;
       }
 
-      set((state) => ({
-        ...update,
-        entries: [
-          ...state.entries,
-          {
-            id: (message.entry_id as string) || nextId(),
-            text: finalText,
-            translation: (message.translation as string) ?? null,
-            isFinal: true,
-            timestamp: message.timestamp as number,
-          },
-        ],
-        partialText: "",
-        partialTranslation: null,
-      }));
+      set((state) => {
+        // Remove this stream's partial now that it's final
+        const newPartials = { ...state.partials };
+        delete newPartials[streamId];
+
+        return {
+          ...update,
+          entries: [
+            ...state.entries,
+            {
+              id: (message.entry_id as string) || nextId(),
+              text: finalText,
+              translation: (message.translation as string) ?? null,
+              isFinal: true,
+              timestamp: message.timestamp as number,
+              source: (message.source as TranscriptEntry["source"]) ?? null,
+            },
+          ],
+          partials: newPartials,
+        };
+      });
       break;
     }
 
@@ -402,8 +446,7 @@ function handleMessage(
           running: true,
           isToggling: false,
           entries: [],
-          partialText: "",
-          partialTranslation: null,
+          partials: {},
           activeTranslationBackend: null,
         });
       } else if (message.status === "stopped") {
@@ -411,8 +454,7 @@ function handleMessage(
         set({
           running: false,
           isToggling: false,
-          partialText: "",
-          partialTranslation: null,
+          partials: {},
         });
       }
       break;
@@ -420,6 +462,13 @@ function handleMessage(
     case "error":
       console.error("Engine error:", message.message);
       set({ isToggling: false });
+      break;
+
+    case "devices_list":
+      set({
+        availableMics: (message.microphones as AudioDeviceInfo[]) ?? [],
+        availableSpeakers: (message.speakers as AudioDeviceInfo[]) ?? [],
+      });
       break;
   }
 }

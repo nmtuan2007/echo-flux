@@ -18,6 +18,8 @@ _DEFAULT_CONFIG = {
         "chunk_ms": 20,
         "format": "int16",
         "device_id": None,
+        "mic_device_id": None,
+        "speaker_device_id": None,
     },
     "asr": {
         "backend": "faster_whisper",
@@ -52,6 +54,8 @@ _ENV_MAP = {
     "ECHOFLUX_SAMPLE_RATE":           ("audio.sample_rate",        int),
     "ECHOFLUX_CHUNK_MS":              ("audio.chunk_ms",           int),
     "ECHOFLUX_AUDIO_DEVICE_ID":       ("audio.device_id",          str),
+    "ECHOFLUX_MIC_DEVICE_ID":         ("audio.mic_device_id",      str),
+    "ECHOFLUX_SPEAKER_DEVICE_ID":     ("audio.speaker_device_id",  str),
     "ECHOFLUX_ASR_BACKEND":           ("asr.backend",              str),
     "ECHOFLUX_MODEL_SIZE":            ("asr.model_size",           str),
     "ECHOFLUX_LANGUAGE":              ("asr.language",             str),

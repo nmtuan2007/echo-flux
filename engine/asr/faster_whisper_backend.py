@@ -33,13 +33,22 @@ class FasterWhisperBackend(ASRBackend):
         self._config: Optional[TranscriptionConfig] = None
 
         self._sample_rate = 16000
-        self._audio_buffer = np.array([], dtype=np.float32)
+        
+        # Dictionary of streams to keep independent buffers and timers 
+        # (e.g. {"mic": {...}, "system": {...}})
+        self._streams = {}
 
         self._inference_interval = 0.3
         self._max_buffer_duration = 4.0
-        self._last_inference_time = 0.0
 
-        self._last_final_text = ""
+    def _get_stream(self, stream_id: str) -> dict:
+        if stream_id not in self._streams:
+            self._streams[stream_id] = {
+                "audio_buffer": np.array([], dtype=np.float32),
+                "last_inference_time": 0.0,
+                "last_final_text": ""
+            }
+        return self._streams[stream_id]
 
     def load_model(self, config: TranscriptionConfig) -> None:
         from faster_whisper import WhisperModel
@@ -87,52 +96,54 @@ class FasterWhisperBackend(ASRBackend):
         if self._model:
             del self._model
         self._model = None
-        self.reset_stream()
+        self._streams.clear()
 
-    def reset_stream(self) -> None:
-        self._audio_buffer = np.array([], dtype=np.float32)
-        self._last_inference_time = 0.0
-        self._last_final_text = ""
+    def reset_stream(self, stream_id: str = "default") -> None:
+        if stream_id in self._streams:
+            del self._streams[stream_id]
 
-    def transcribe_stream(self, audio_chunk: bytes) -> Optional[TranscriptResult]:
+    def transcribe_stream(self, audio_chunk: bytes, stream_id: str = "default") -> Optional[TranscriptResult]:
         if not self._model:
             return None
 
+        stream = self._get_stream(stream_id)
         new_samples = self._bytes_to_float32(audio_chunk)
-        self._audio_buffer = np.concatenate((self._audio_buffer, new_samples))
+        stream["audio_buffer"] = np.concatenate((stream["audio_buffer"], new_samples))
 
         max_samples = int(self._max_buffer_duration * self._sample_rate)
 
-        if len(self._audio_buffer) > max_samples:
-            return self._run_finalize()
+        if len(stream["audio_buffer"]) > max_samples:
+            logger.debug("ASR [%s]: Buffer exceeded max_samples, forcing finalize.", stream_id)
+            return self._run_finalize(stream_id, stream)
 
         now = time.time()
-        if now - self._last_inference_time < self._inference_interval:
+        if now - stream["last_inference_time"] < self._inference_interval:
             return None
-        self._last_inference_time = now
+        stream["last_inference_time"] = now
 
-        if len(self._audio_buffer) < int(0.4 * self._sample_rate):
-            return None
-
-        return self._run_inference(is_final=False)
-
-    def finalize_current(self) -> Optional[TranscriptResult]:
-        return self._run_finalize()
-
-    def _run_finalize(self) -> Optional[TranscriptResult]:
-        if not self._model or len(self._audio_buffer) == 0:
+        if len(stream["audio_buffer"]) < int(0.4 * self._sample_rate):
             return None
 
-        result = self._run_inference(is_final=True)
-        self._audio_buffer = np.array([], dtype=np.float32)
+        return self._run_inference(stream_id, stream, is_final=False)
+
+    def finalize_current(self, stream_id: str = "default") -> Optional[TranscriptResult]:
+        return self._run_finalize(stream_id, self._get_stream(stream_id))
+
+    def _run_finalize(self, stream_id: str, stream: dict) -> Optional[TranscriptResult]:
+        if not self._model or len(stream["audio_buffer"]) == 0:
+            return None
+
+        logger.debug("ASR [%s]: Running finalize against %.2fs buffer.", stream_id, len(stream["audio_buffer"])/self._sample_rate)
+        result = self._run_inference(stream_id, stream, is_final=True)
+        stream["audio_buffer"] = np.array([], dtype=np.float32)
         return result
 
-    def _run_inference(self, is_final: bool) -> Optional[TranscriptResult]:
-        buffer_duration = len(self._audio_buffer) / self._sample_rate
+    def _run_inference(self, stream_id: str, stream: dict, is_final: bool) -> Optional[TranscriptResult]:
+        buffer_duration = len(stream["audio_buffer"]) / self._sample_rate
 
         # Fixed parameter name: log_prob_threshold instead of logprob_threshold
         segments_gen, info = self._model.transcribe(
-            self._audio_buffer,
+            stream["audio_buffer"],
             language=self._config.language,
             beam_size=1,
             best_of=1,
@@ -161,30 +172,34 @@ class FasterWhisperBackend(ASRBackend):
 
         # Advanced Hallucination Filter
         if self._is_hallucination(raw_text, buffer_duration):
+            logger.debug("ASR [%s]: Dropped due to hallucination filter: '%s'", stream_id, raw_text)
             if is_final:
-                self._audio_buffer = np.array([], dtype=np.float32)
+                stream["audio_buffer"] = np.array([], dtype=np.float32)
             return None
 
         # Inter-segment repetition check (stuck buffer loop)
         clean_text = raw_text.strip()
-        if clean_text == self._last_final_text:
+        if clean_text == stream["last_final_text"]:
+             logger.debug("ASR [%s]: Dropped due to repetition matching last text: '%s'", stream_id, clean_text)
              if is_final:
-                self._audio_buffer = np.array([], dtype=np.float32)
+                stream["audio_buffer"] = np.array([], dtype=np.float32)
              return None
 
         if is_final:
-            self._last_final_text = clean_text
-            self._audio_buffer = np.array([], dtype=np.float32)
+            stream["last_final_text"] = clean_text
+            stream["audio_buffer"] = np.array([], dtype=np.float32)
             return TranscriptResult(
                 text=clean_text,
                 is_final=True,
                 language=info.language,
+                stream_id=stream_id
             )
 
         return TranscriptResult(
             text=clean_text,
             is_final=False,
             language=info.language,
+            stream_id=stream_id
         )
 
     def _validate_segment(self, segment) -> bool:

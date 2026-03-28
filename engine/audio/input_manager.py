@@ -11,6 +11,7 @@ logger = get_logger("audio.input")
 class AudioSourceType(Enum):
     MICROPHONE = "microphone"
     SYSTEM = "system"
+    BOTH = "both"
 
 
 @dataclass

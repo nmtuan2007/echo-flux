@@ -10,11 +10,15 @@ logger = get_logger("server.websocket")
 
 class WebSocketServer:
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
         self._host = host
         self._port = port
         self._server = None
-        self._clients: Set = set()
+        self._clients = set()
+        self._running = False
+        self.is_capturing = False
+        self._cached_devices = None
+
         self._on_start: Optional[Callable[[dict], Awaitable[None]]] = None
         self._on_stop: Optional[Callable[[], Awaitable[None]]] = None
         self._running = False
@@ -110,12 +114,90 @@ class WebSocketServer:
                 await self._on_stop()
             await websocket.send(json.dumps({"type": "status", "status": "stopped"}))
 
+        elif msg_type == "list_devices":
+            logger.info("Received list_devices request")
+            await websocket.send(json.dumps(await self._list_devices()))
+
         else:
             logger.warning("Unknown message type: %s", msg_type)
             await websocket.send(json.dumps({
                 "type": "error",
                 "message": f"Unknown type: {msg_type}",
             }))
+
+    async def _list_devices(self) -> dict:
+        """Enumerate available microphone and speaker (loopback) devices.
+
+        Runs blocking PyAudio calls in a thread executor to avoid blocking the
+        event loop. Prevents PyAudio crashes by using cached devices or a 
+        placeholder when the engine is actively capturing.
+        """
+        if self.is_capturing:
+            if self._cached_devices:
+                return self._cached_devices
+            return {
+                "type": "devices_list",
+                "microphones": [{"id": "default", "name": "Stop Engine to safely refresh"}],
+                "speakers": [{"id": "default", "name": "Stop Engine to safely refresh"}],
+            }
+
+        loop = asyncio.get_event_loop()
+
+        def _blocking_enumerate():
+            mics = []
+            speakers = []
+
+            # -- Microphones (pyaudio) --
+            try:
+                import pyaudio
+                pa = pyaudio.PyAudio()
+                try:
+                    default_host_api = pa.get_default_host_api_info()["index"]
+                    for i in range(pa.get_device_count()):
+                        info = pa.get_device_info_by_index(i)
+                        if info.get("hostApi") == default_host_api and info.get("maxInputChannels", 0) > 0:
+                            mics.append({"id": str(i), "name": info.get("name", f"Device {i}")})
+                finally:
+                    pa.terminate()
+            except Exception as e:
+                logger.warning("Failed to enumerate microphones: %s", e)
+
+            # -- Speakers / loopback devices (pyaudiowpatch) --
+            try:
+                import pyaudiowpatch as pawp
+                pa2 = pawp.PyAudio()
+                try:
+                    wasapi_info = pa2.get_host_api_info_by_type(pawp.paWASAPI)
+                    for i in range(pa2.get_device_count()):
+                        info = pa2.get_device_info_by_index(i)
+                        if info["hostApi"] != wasapi_info["index"]:
+                            continue
+                        if info.get("isLoopbackDevice", False):
+                            speakers.append({
+                                "id": str(info["index"]),
+                                "name": f"{info['name']} (Loopback)",
+                            })
+                except Exception as e:
+                    logger.warning("Failed to enumerate loopback devices: %s", e)
+                finally:
+                    pa2.terminate()
+            except Exception as e:
+                logger.warning("pyaudiowpatch not available: %s", e)
+
+            return mics, speakers
+
+        try:
+            mics, speakers = await loop.run_in_executor(None, _blocking_enumerate)
+        except Exception as e:
+            logger.error("Device enumeration failed: %s", e)
+            mics, speakers = [], []
+
+        self._cached_devices = {
+            "type": "devices_list",
+            "microphones": mics,
+            "speakers": speakers,
+        }
+        return self._cached_devices
 
     @property
     def is_running(self) -> bool:
