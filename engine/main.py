@@ -20,33 +20,46 @@ SILENCE_FINALIZE_DELAY = 0.8
 
 
 def _setup_cuda_paths():
-    """
-    On Windows, manually add the NVIDIA library paths from the venv site-packages to PATH.
-    This fixes 'cublas64_12.dll not found' errors with CTranslate2/Faster-Whisper.
-    """
     if sys.platform != "win32":
         return
 
-    # Typical paths where pip installs nvidia libs in venv
+    # Use sys.prefix to find the current venv root dynamically
     venv_base = Path(sys.prefix)
-    site_packages = venv_base / "Lib" / "site-packages"
+    nvidia_path = venv_base / "Lib" / "site-packages" / "nvidia"
 
-    nvidia_libs = [
-        site_packages / "nvidia" / "cublas" / "bin",
-        site_packages / "nvidia" / "cudnn" / "bin",
-        site_packages / "nvidia" / "cuda_runtime" / "bin",
-        site_packages / "nvidia" / "cuda_nvrtc" / "bin",
+    # Standard locations for pip-installed nvidia binaries
+    targets = [
+        nvidia_path / "cublas" / "bin",
+        nvidia_path / "cudnn" / "bin",
+        nvidia_path / "cuda_runtime" / "bin",
     ]
 
-    added_count = 0
-    for lib_path in nvidia_libs:
-        if lib_path.exists():
+    for target in targets:
+        if target.exists():
+            # Windows requires absolute paths for DLL loading
+            abs_path = str(target.resolve())
+
             try:
-                os.add_dll_directory(str(lib_path))
+                os.add_dll_directory(abs_path)
             except Exception:
                 pass
-            os.environ["PATH"] = str(lib_path) + os.pathsep + os.environ["PATH"]
-            added_count += 1
+
+            # Prepend to PATH so CTranslate2 finds these first
+            os.environ["PATH"] = abs_path + os.pathsep + os.environ["PATH"]
+
+    # Check for the manual dependency zlibwapi.dll
+    # It's not in pip packages, usually in System32 or project root
+    zlib_found = False
+    for p in os.environ["PATH"].split(os.pathsep):
+        if p and (Path(p) / "zlibwapi.dll").exists():
+            zlib_found = True
+            break
+
+    if not zlib_found and (Path.cwd() / "zlibwapi.dll").exists():
+        zlib_found = True
+
+    if not zlib_found:
+        logger.warning("zlibwapi.dll not found. CUDA might fail. Check System32.")
 
 
 def _load_dotenv():

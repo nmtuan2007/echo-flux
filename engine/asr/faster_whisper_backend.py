@@ -1,9 +1,8 @@
-"""FasterWhisper ASR backend – Optimized streaming with anti-hallucination."""
-
 import logging
 import time
-from collections import Counter
-from typing import Optional
+import zlib
+import re
+from typing import Optional, List
 
 import numpy as np
 
@@ -28,10 +27,6 @@ _MODEL_MAX_BUFFER = {
     "large": 3.0,
 }
 
-# Approximate max words per second of audio (generous upper bound)
-MAX_WORDS_PER_SECOND = 5.0
-
-
 class FasterWhisperBackend(ASRBackend):
     def __init__(self):
         self._model = None
@@ -43,56 +38,46 @@ class FasterWhisperBackend(ASRBackend):
         self._inference_interval = 0.3
         self._max_buffer_duration = 4.0
         self._last_inference_time = 0.0
-        self._last_stable_text = ""
+
+        self._last_final_text = ""
 
     def load_model(self, config: TranscriptionConfig) -> None:
         from faster_whisper import WhisperModel
 
         self._config = config
-        device = self._resolve_device(config.device)
+        target_device = config.device
+        if target_device == "auto":
+             target_device = "cuda"
+
         compute_type = config.compute_type
-
-        if device == "cpu" and compute_type in ("float16", "int8_float16"):
-            compute_type = "int8"
-            logger.info("Adjusted compute_type to '%s' for CPU", compute_type)
-
         model_path = config.model_path or config.model_size
         model_size = config.model_size
 
         self._inference_interval = _MODEL_INFERENCE_INTERVAL.get(model_size, 0.3)
         self._max_buffer_duration = _MODEL_MAX_BUFFER.get(model_size, 4.0)
 
-        logger.info(
-            "Loading model: %s (device=%s, compute_type=%s, "
-            "inference_interval=%.2fs, max_buffer=%.1fs)",
-            model_path, device, compute_type,
-            self._inference_interval, self._max_buffer_duration,
-        )
-
-        try:
-            self._model = WhisperModel(
-                model_path,
-                device=device,
-                compute_type=compute_type,
-                cpu_threads=4,
-            )
-        except Exception as e:
-            if device == "cuda":
-                logger.warning(
-                    "Failed to load model on CUDA: %s. Falling back to CPU.", e
-                )
-                device = "cpu"
-                compute_type = "int8"
+        if target_device == "cuda":
+            logger.info("Loading Faster-Whisper on CUDA (compute_type=%s)...", compute_type)
+            try:
                 self._model = WhisperModel(
                     model_path,
-                    device=device,
+                    device="cuda",
                     compute_type=compute_type,
                     cpu_threads=4,
                 )
-            else:
-                raise
+                logger.info("Faster-Whisper loaded successfully on CUDA.")
+                return
+            except Exception as e:
+                logger.warning("Failed on CUDA: %s. Fallback to CPU.", e)
 
-        logger.info("Model loaded successfully (device=%s, compute_type=%s)", device, compute_type)
+        logger.info("Loading Faster-Whisper on CPU (int8)...")
+        self._model = WhisperModel(
+            model_path,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=4,
+        )
+        logger.info("Faster-Whisper loaded successfully on CPU.")
 
     @property
     def is_loaded(self) -> bool:
@@ -107,7 +92,7 @@ class FasterWhisperBackend(ASRBackend):
     def reset_stream(self) -> None:
         self._audio_buffer = np.array([], dtype=np.float32)
         self._last_inference_time = 0.0
-        self._last_stable_text = ""
+        self._last_final_text = ""
 
     def transcribe_stream(self, audio_chunk: bytes) -> Optional[TranscriptResult]:
         if not self._model:
@@ -117,17 +102,16 @@ class FasterWhisperBackend(ASRBackend):
         self._audio_buffer = np.concatenate((self._audio_buffer, new_samples))
 
         max_samples = int(self._max_buffer_duration * self._sample_rate)
+
         if len(self._audio_buffer) > max_samples:
-            result = self._run_finalize()
-            if result:
-                return result
+            return self._run_finalize()
 
         now = time.time()
         if now - self._last_inference_time < self._inference_interval:
             return None
         self._last_inference_time = now
 
-        if len(self._audio_buffer) < int(0.3 * self._sample_rate):
+        if len(self._audio_buffer) < int(0.4 * self._sample_rate):
             return None
 
         return self._run_inference(is_final=False)
@@ -141,176 +125,108 @@ class FasterWhisperBackend(ASRBackend):
 
         result = self._run_inference(is_final=True)
         self._audio_buffer = np.array([], dtype=np.float32)
-        self._last_stable_text = ""
         return result
 
     def _run_inference(self, is_final: bool) -> Optional[TranscriptResult]:
         buffer_duration = len(self._audio_buffer) / self._sample_rate
 
+        # Fixed parameter name: log_prob_threshold instead of logprob_threshold
         segments_gen, info = self._model.transcribe(
             self._audio_buffer,
             language=self._config.language,
             beam_size=1,
             best_of=1,
             temperature=0.0,
-            vad_filter=False,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
             condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
         )
 
         segments = list(segments_gen)
         if not segments:
             return None
 
-        raw_text = " ".join([s.text.strip() for s in segments if s.text.strip()])
-        if not raw_text:
+        valid_segments = []
+        for s in segments:
+            if self._validate_segment(s):
+                valid_segments.append(s.text.strip())
+
+        if not valid_segments:
             return None
 
-        # Layer 1: Remove repetitions
-        cleaned_text = self._remove_repetitions(raw_text)
+        raw_text = " ".join(valid_segments)
 
-        # Layer 2: Length sanity check based on audio duration
-        cleaned_text = self._enforce_length_limit(cleaned_text, buffer_duration)
-
-        if not cleaned_text.strip():
+        # Advanced Hallucination Filter
+        if self._is_hallucination(raw_text, buffer_duration):
+            if is_final:
+                self._audio_buffer = np.array([], dtype=np.float32)
             return None
 
-        # Layer 3: Detect if hallucination occurred — force finalize
-        is_hallucination = len(cleaned_text) < len(raw_text) * 0.7
-        if is_hallucination:
-            logger.warning(
-                "Hallucination detected: raw=%d chars, cleaned=%d chars. Forcing finalize.",
-                len(raw_text), len(cleaned_text),
-            )
-            is_final = True
-            self._audio_buffer = np.array([], dtype=np.float32)
+        # Inter-segment repetition check (stuck buffer loop)
+        clean_text = raw_text.strip()
+        if clean_text == self._last_final_text:
+             if is_final:
+                self._audio_buffer = np.array([], dtype=np.float32)
+             return None
 
         if is_final:
-            self._last_stable_text = ""
+            self._last_final_text = clean_text
             self._audio_buffer = np.array([], dtype=np.float32)
             return TranscriptResult(
-                text=cleaned_text,
+                text=clean_text,
                 is_final=True,
                 language=info.language,
             )
 
-        self._last_stable_text = cleaned_text
         return TranscriptResult(
-            text=cleaned_text,
+            text=clean_text,
             is_final=False,
             language=info.language,
         )
 
-    @staticmethod
-    def _remove_repetitions(text: str) -> str:
-        if len(text) < 10:
-            return text
+    def _validate_segment(self, segment) -> bool:
+        # 1. No Speech Probability
+        if segment.no_speech_prob > 0.6:
+            return False
 
-        words = text.split()
-        if len(words) < 3:
-            return text
+        # 2. Average Log Probability (Confidence)
+        if segment.avg_logprob < -1.0:
+            return False
 
-        # Pass 1: Single word consecutive repeats
-        # "positive positive positive positive" → "positive"
-        deduplicated = [words[0]]
-        repeat_count = 1
-        for i in range(1, len(words)):
-            if words[i].lower() == words[i - 1].lower():
-                repeat_count += 1
-                if repeat_count <= 2:
-                    deduplicated.append(words[i])
-            else:
-                repeat_count = 1
-                deduplicated.append(words[i])
+        # 3. Compression Ratio (Internal Whisper Metric)
+        if segment.compression_ratio > 2.4:
+            return False
 
-        words = deduplicated
+        return True
 
-        if len(words) < 4:
-            return " ".join(words)
+    def _is_hallucination(self, text: str, duration: float) -> bool:
+        text_len = len(text)
+        if text_len == 0:
+            return True
 
-        # Pass 2: N-gram consecutive repeats (n = 2..10)
-        # "work with humans and work with humans and" → "work with humans and"
-        result = list(words)
-        found = True
-        while found:
-            found = False
-            for n in range(2, min(11, len(result) // 2 + 1)):
-                i = 0
-                new_result = []
-                while i < len(result):
-                    if i + n * 2 <= len(result):
-                        pattern = result[i:i + n]
-                        next_block = result[i + n:i + n * 2]
-                        pattern_lower = [w.lower() for w in pattern]
-                        next_lower = [w.lower() for w in next_block]
+        # 1. Speech Rate Physics Check
+        # 40 chars/sec is a very generous upper bound for human speech
+        chars_per_sec = text_len / duration
+        if chars_per_sec > 40.0:
+            return True
 
-                        if pattern_lower == next_lower:
-                            # Found repeat — keep pattern, skip all consecutive repeats
-                            new_result.extend(pattern)
-                            pos = i + n
-                            while pos + n <= len(result):
-                                candidate = [w.lower() for w in result[pos:pos + n]]
-                                if candidate == pattern_lower:
-                                    pos += n
-                                else:
-                                    break
-                            # Append everything after the repeated block
-                            new_result.extend(result[pos:])
-                            found = True
-                            result = new_result
-                            break
-                        else:
-                            new_result.append(result[i])
-                            i += 1
-                    else:
-                        new_result.append(result[i])
-                        i += 1
-                else:
-                    result = new_result
-                if found:
-                    break
+        # 2. Entropy / Compression Check (Zlib)
+        compressed = zlib.compress(text.encode("utf-8"))
+        compression_ratio = len(text) / len(compressed)
 
-        if len(result) < 2:
-            return " ".join(result)
+        # Real speech rarely exceeds 3.0 compression ratio unless repetitive
+        if text_len > 10 and compression_ratio > 3.0:
+            return True
 
-        # Pass 3: Dominant word check
-        # If a single word makes up >40% of all words, likely hallucination
-        word_counts = Counter(w.lower() for w in result)
-        total = len(result)
-        for word, count in word_counts.most_common(1):
-            if count > total * 0.4 and total > 5:
-                # Keep only words up to the point where dominance starts
-                trimmed = []
-                seen_count = 0
-                for w in result:
-                    if w.lower() == word:
-                        seen_count += 1
-                    if seen_count > 3:
-                        break
-                    trimmed.append(w)
-                logger.debug(
-                    "Dominant word '%s' (%d/%d). Trimmed output.",
-                    word, count, total,
-                )
-                result = trimmed
-                break
+        # 3. Character Repetition (Regex)
+        # Detects patterns like "......." or "?????"
+        if re.search(r'([^\w\s])\1{3,}', text):
+            return True
 
-        return " ".join(result)
-
-    @staticmethod
-    def _enforce_length_limit(text: str, audio_duration: float) -> str:
-        """Trim output if it's unreasonably long for the given audio duration."""
-        words = text.split()
-        max_words = int(audio_duration * MAX_WORDS_PER_SECOND)
-        max_words = max(max_words, 5)
-
-        if len(words) > max_words:
-            logger.debug(
-                "Output too long (%d words for %.1fs audio, max %d). Trimming.",
-                len(words), audio_duration, max_words,
-            )
-            return " ".join(words[:max_words])
-
-        return text
+        return False
 
     @staticmethod
     def _bytes_to_float32(raw_bytes: bytes) -> np.ndarray:
@@ -318,35 +234,3 @@ class FasterWhisperBackend(ASRBackend):
             return np.array([], dtype=np.float32)
         int16_arr = np.frombuffer(raw_bytes, dtype=np.int16)
         return int16_arr.astype(np.float32) / 32768.0
-
-    @staticmethod
-    def _resolve_device(device_str: str) -> str:
-        if device_str == "cpu":
-            return "cpu"
-
-        cuda_available = False
-        try:
-            import ctranslate2
-            cuda_available = "cuda" in ctranslate2.get_supported_compute_types("cuda")
-        except Exception:
-            try:
-                import torch
-                cuda_available = torch.cuda.is_available()
-            except ImportError:
-                pass
-
-        if cuda_available:
-            logger.info("CUDA is available — using GPU for ASR")
-            return "cuda"
-
-        if device_str == "cuda":
-            logger.warning(
-                "CUDA was explicitly requested but is not available. "
-                "Common causes: missing CUDA Toolkit, missing cuBLAS/cuDNN libraries "
-                "(nvidia-cublas-cu12, nvidia-cudnn-cu12), or incompatible driver. "
-                "Falling back to CPU."
-            )
-        else:
-            logger.info("CUDA not available — using CPU for ASR")
-
-        return "cpu"
