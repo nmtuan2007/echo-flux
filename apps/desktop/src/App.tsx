@@ -7,7 +7,11 @@ import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useEngineStore } from "./store/engineStore";
 
 export default function App() {
-  const { activeView, connect, disconnect } = useEngineStore();
+  const { activeView, connect, disconnect, theme } = useEngineStore();
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     connect();

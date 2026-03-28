@@ -29,6 +29,27 @@
   --status-bar-height: 32px;
 }
 
+[data-theme='light'] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f7f8;
+  --bg-tertiary: #ebebeb;
+  --bg-hover: #e0e0e0;
+  --bg-input: #ffffff;
+
+  --text-primary: #111111;
+  --text-secondary: #555555;
+  --text-muted: #888888;
+
+  --accent: #2b7af0;
+  --accent-hover: #1c62c9;
+  --danger: #d93030;
+  --danger-hover: #bd2222;
+  --success: #388e3c;
+  --warning: #f57c00;
+
+  --border: #dddddd;
+}
+
 * {
   margin: 0;
   padding: 0;

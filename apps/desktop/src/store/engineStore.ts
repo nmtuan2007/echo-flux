@@ -54,6 +54,7 @@ interface EngineState {
 
   // UI
   activeView: AppView;
+  theme: "dark" | "light";
 
   // Config
   config: EngineConfig;
@@ -65,6 +66,7 @@ interface EngineState {
   stopPipeline: () => void;
   clearTranscript: () => void;
   setActiveView: (view: AppView) => void;
+  setTheme: (theme: "dark" | "light") => void;
   updateConfig: (partial: Partial<EngineConfig>) => void;
 
   // History Actions
@@ -109,6 +111,7 @@ export const useEngineStore = create<EngineState>()(
       activeTranslationBackend: null,
       history: [],
       activeView: "transcript",
+      theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
       config: { ...DEFAULT_CONFIG },
 
       connect: () => {
@@ -213,6 +216,10 @@ export const useEngineStore = create<EngineState>()(
         set({ activeView: view });
       },
 
+      setTheme: (theme) => {
+        set({ theme });
+      },
+
       updateConfig: (partial) => {
         set((state) => ({
           config: { ...state.config, ...partial },
@@ -276,6 +283,7 @@ export const useEngineStore = create<EngineState>()(
       partialize: (state) => ({
         config: state.config,
         history: state.history,
+        theme: state.theme,
       }),
     },
   ),
