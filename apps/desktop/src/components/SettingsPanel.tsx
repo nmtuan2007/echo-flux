@@ -398,6 +398,75 @@ export function SettingsPanel() {
         )}
       </section>
 
+      {/* ── AI Assistant ─────────────────────────────────────────────── */}
+      <section className="settings-section settings-section-ai">
+        <h3 className="settings-section-title">🤖 AI Assistant</h3>
+
+        <div className="settings-field settings-field-row">
+          <label htmlFor="llm-enabled">Enable AI Assistant</label>
+          <input
+            id="llm-enabled"
+            type="checkbox"
+            checked={config.llmEnabled}
+            onChange={(e) => updateConfig({ llmEnabled: e.target.checked })}
+            disabled={running}
+          />
+        </div>
+
+        {config.llmEnabled && (
+          <>
+            <div className="settings-field">
+              <label htmlFor="llm-provider-url">Provider URL</label>
+              <input
+                id="llm-provider-url"
+                type="text"
+                value={config.llmProviderUrl}
+                onChange={(e) => updateConfig({ llmProviderUrl: e.target.value })}
+                placeholder="https://openrouter.ai/api/v1"
+                disabled={running}
+              />
+            </div>
+
+            <div className="settings-field">
+              <label htmlFor="llm-api-key">API Key</label>
+              <input
+                id="llm-api-key"
+                type="password"
+                value={config.llmApiKey}
+                onChange={(e) => updateConfig({ llmApiKey: e.target.value })}
+                placeholder="sk-or-... / sk-..."
+                disabled={running}
+                className="settings-api-key-input"
+              />
+            </div>
+
+            <div className="settings-field">
+              <label htmlFor="llm-model">Model Name</label>
+              <input
+                id="llm-model"
+                type="text"
+                value={config.llmModel}
+                onChange={(e) => updateConfig({ llmModel: e.target.value })}
+                placeholder="openai/gpt-4o-mini, claude-3.5-sonnet, llama-3..."
+                disabled={running}
+              />
+            </div>
+
+            <p className="settings-note">
+              Compatible with <strong>OpenAI</strong>, <strong>OpenRouter</strong>, <strong>Ollama</strong>,{" "}
+              <strong>LM Studio</strong>, and any OpenAI-compatible API.
+              For local models, set Provider URL to <code>http://localhost:11434/v1</code>.
+            </p>
+          </>
+        )}
+
+        {!config.llmEnabled && (
+          <p className="settings-note">
+            Enable to get inline reply suggestions and meeting summarization powered by any LLM.
+          </p>
+        )}
+      </section>
+
       {/* ── Connection ───────────────────────────────────────────────── */}
       <section className="settings-section">
         <h3 className="settings-section-title">Connection</h3>

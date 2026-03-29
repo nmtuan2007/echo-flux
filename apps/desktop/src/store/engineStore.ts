@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+export interface SuggestionOption {
+  strategy: string;
+  text: string;
+}
+
+export interface SuggestionResult {
+  options?: SuggestionOption[];
+  error?: string;
+}
+
 export interface TranscriptEntry {
   id: string;
   text: string;
@@ -8,6 +18,7 @@ export interface TranscriptEntry {
   isFinal: boolean;
   timestamp: number;
   source?: "mic" | "system" | "both" | null;
+  suggestions?: SuggestionResult; // persisted with the entry
 }
 
 export interface Conversation {
@@ -15,6 +26,7 @@ export interface Conversation {
   name: string;
   date: number;
   entries: TranscriptEntry[];
+  summary?: string; // persisted meeting summary
 }
 
 export interface AudioDeviceInfo {
@@ -38,6 +50,11 @@ export interface EngineConfig {
   audioSource: "microphone" | "system" | "both";
   micDeviceId: string;
   speakerDeviceId: string;
+  // LLM / AI Assistant
+  llmEnabled: boolean;
+  llmProviderUrl: string;
+  llmApiKey: string;
+  llmModel: string;
 }
 
 export type AppView = "transcript" | "settings" | "history";
@@ -69,6 +86,7 @@ interface EngineState {
 
   // History
   history: Conversation[];
+  activeConversationId: string | null;
 
   // UI
   activeView: AppView;
@@ -77,9 +95,17 @@ interface EngineState {
   // Config
   config: EngineConfig;
 
-  // Audio device lists (populated via list_devices round-trip)
+  // Audio device lists
   availableMics: AudioDeviceInfo[];
   availableSpeakers: AudioDeviceInfo[];
+
+  // LLM — suggestion loading (ephemeral, not persisted)
+  suggestionLoading: Record<string, boolean>;
+
+  // LLM — summary (summaryText is the live buffer / current session summary)
+  summaryText: string;
+  summaryLoading: boolean;
+  summaryVisible: boolean;
 
   // Actions
   connect: () => void;
@@ -91,6 +117,12 @@ interface EngineState {
   setTheme: (theme: "dark" | "light") => void;
   updateConfig: (partial: Partial<EngineConfig>) => void;
   requestDeviceList: () => void;
+
+  // LLM Actions
+  requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
+  requestSummary: () => void;
+  openSummary: () => void;
+  closeSummary: () => void;
 
   // History Actions
   renameConversation: (id: string, name: string) => void;
@@ -114,6 +146,10 @@ const DEFAULT_CONFIG: EngineConfig = {
   audioSource: "microphone",
   micDeviceId: "",
   speakerDeviceId: "",
+  llmEnabled: false,
+  llmProviderUrl: "https://openrouter.ai/api/v1",
+  llmApiKey: "",
+  llmModel: "openai/gpt-4o-mini",
 };
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -140,9 +176,14 @@ export const useEngineStore = create<EngineState>()(
       history: [],
       activeView: "transcript",
       theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
+      activeConversationId: null,
       config: { ...DEFAULT_CONFIG },
       availableMics: [],
       availableSpeakers: [],
+      suggestionLoading: {},
+      summaryText: "",
+      summaryLoading: false,
+      summaryVisible: false,
 
       connect: () => {
         const { config, socket } = get();
@@ -234,6 +275,10 @@ export const useEngineStore = create<EngineState>()(
               "audio.source": config.audioSource,
               "audio.mic_device_id": config.micDeviceId || undefined,
               "audio.speaker_device_id": config.speakerDeviceId || undefined,
+              "llm.enabled": config.llmEnabled,
+              "llm.provider_url": config.llmProviderUrl || undefined,
+              "llm.api_key": config.llmApiKey || undefined,
+              "llm.model": config.llmModel || undefined,
             },
           }),
         );
@@ -248,7 +293,14 @@ export const useEngineStore = create<EngineState>()(
       },
 
       clearTranscript: () => {
-        set({ entries: [], partials: {} });
+        set({
+          entries: [],
+          partials: {},
+          suggestionLoading: {},
+          summaryText: "",
+          summaryVisible: false,
+          activeConversationId: null,
+        });
       },
 
       setActiveView: (view) => {
@@ -271,9 +323,66 @@ export const useEngineStore = create<EngineState>()(
         socket.send(JSON.stringify({ type: "list_devices" }));
       },
 
+      requestSuggestion: (entryId, targetText, context) => {
+        const { socket, connected, config } = get();
+        if (!socket || !connected) return;
+
+        set((state) => ({
+          suggestionLoading: { ...state.suggestionLoading, [entryId]: true },
+        }));
+
+        socket.send(JSON.stringify({
+          type: "request_suggestion",
+          entry_id: entryId,
+          target_text: targetText,
+          context,
+          llm_config: {
+            api_key: config.llmApiKey,
+            model: config.llmModel,
+            provider_url: config.llmProviderUrl || undefined,
+          },
+        }));
+      },
+
+      requestSummary: () => {
+        const { socket, connected, entries, config } = get();
+        if (!socket || !connected || entries.length === 0) return;
+
+        set({ summaryText: "", summaryLoading: true, summaryVisible: true });
+
+        socket.send(JSON.stringify({
+          type: "request_summary",
+          entries: entries.map((e) => ({ text: e.text, source: e.source ?? "speaker" })),
+          llm_config: {
+            api_key: config.llmApiKey,
+            model: config.llmModel,
+            provider_url: config.llmProviderUrl || undefined,
+          },
+        }));
+      },
+
+      openSummary: () => {
+        set({ summaryVisible: true });
+      },
+
+      closeSummary: () => {
+        set({ summaryVisible: false, summaryLoading: false });
+      },
+
       saveCurrentSession: () => {
-        const { entries } = get();
+        const { entries, summaryText, activeConversationId } = get();
         if (entries.length === 0) return;
+
+        if (activeConversationId) {
+          set((state) => ({
+            history: state.history.map((c) =>
+              c.id === activeConversationId
+                ? { ...c, entries: [...entries], summary: summaryText || c.summary }
+                : c
+            ),
+          }));
+          return;
+        }
 
         const timestamp = Date.now();
         const dateStr = new Date(timestamp).toLocaleString();
@@ -283,14 +392,17 @@ export const useEngineStore = create<EngineState>()(
           name = entries[0].text.slice(0, 30) + (entries[0].text.length > 30 ? "..." : "");
         }
 
+        const newId = `conv-${timestamp}`;
         const conversation: Conversation = {
-          id: `conv-${timestamp}`,
-          name: name,
+          id: newId,
+          name,
           date: timestamp,
           entries: [...entries],
+          summary: summaryText || undefined,
         };
 
         set((state) => ({
+          activeConversationId: newId,
           history: [conversation, ...state.history],
         }));
       },
@@ -302,9 +414,13 @@ export const useEngineStore = create<EngineState>()(
       },
 
       deleteConversation: (id) => {
-        set((state) => ({
-          history: state.history.filter((c) => c.id !== id),
-        }));
+        set((state) => {
+          const newHistory = state.history.filter((c) => c.id !== id);
+          return {
+            history: newHistory,
+            activeConversationId: state.activeConversationId === id ? null : state.activeConversationId,
+          };
+        });
       },
 
       loadConversation: (id) => {
@@ -317,6 +433,11 @@ export const useEngineStore = create<EngineState>()(
             entries: [...target.entries],
             activeView: "transcript",
             partials: {},
+            suggestionLoading: {},
+            summaryText: target.summary || "",
+            summaryVisible: false,
+            summaryLoading: false,
+            activeConversationId: id,
           });
         }
       },
@@ -344,13 +465,11 @@ function handleMessage(
       const streamId = (message.source as string) || "default";
       const currentPartial = get().partials[streamId]?.text || "";
 
-      // Update active backend and source if present
       const extra: Partial<EngineState> = {};
       if (message.translation_backend) {
         extra.activeTranslationBackend = message.translation_backend as string;
       }
 
-      // Simple heuristic to prevent flickering on *this* specific stream
       if (
         newPartial.length >= currentPartial.length ||
         newPartial.length >= currentPartial.length * 0.6 ||
@@ -382,7 +501,6 @@ function handleMessage(
       }
 
       set((state) => {
-        // Remove this stream's partial now that it's final
         const newPartials = { ...state.partials };
         delete newPartials[streamId];
 
@@ -406,17 +524,12 @@ function handleMessage(
     }
 
     case "translation_update": {
-      // Async translation update for a final entry
       const translation = message.translation as string;
       const sourceText = message.source_text as string;
 
       if (!translation) break;
 
       set((state) => {
-        // Strategy: Find the most recent entry with matching source text that has no translation
-        // or just update the last one if source text matches approximately.
-        // For robustness, we search from end to start.
-
         const newEntries = [...state.entries];
         let foundIndex = -1;
 
@@ -431,21 +544,13 @@ function handleMessage(
         }
 
         if (foundIndex !== -1) {
-          newEntries[foundIndex] = {
-            ...newEntries[foundIndex],
-            translation: translation,
-          };
+          newEntries[foundIndex] = { ...newEntries[foundIndex], translation };
           return { entries: newEntries };
         }
 
-        // If not found (e.g. accumulator merged multiple entries),
-        // fallback: Update the very last entry if it has no translation
         const lastIdx = newEntries.length - 1;
         if (lastIdx >= 0 && !newEntries[lastIdx].translation) {
-          newEntries[lastIdx] = {
-            ...newEntries[lastIdx],
-            translation: translation,
-          };
+          newEntries[lastIdx] = { ...newEntries[lastIdx], translation };
           return { entries: newEntries };
         }
 
@@ -474,10 +579,14 @@ function handleMessage(
           isToggling: false,
           entries: [],
           partials: {},
+          suggestionLoading: {},
+          summaryText: "",
+          summaryVisible: false,
           activeTranslationBackend: null,
           downloading: false,
           downloadModel: "",
           downloadPercent: 0,
+          activeConversationId: null,
         });
       } else if (message.status === "stopped") {
         get().saveCurrentSession();
@@ -503,5 +612,44 @@ function handleMessage(
         availableSpeakers: (message.speakers as AudioDeviceInfo[]) ?? [],
       });
       break;
+
+    case "suggestion_result": {
+      const entryId = message.entry_id as string;
+      if (!entryId) break;
+
+      set((state) => {
+        // Remove loading flag
+        const newLoading = { ...state.suggestionLoading };
+        delete newLoading[entryId];
+
+        // Store result inside the matching TranscriptEntry (persisted with session)
+        const newEntries = state.entries.map((e) => {
+          if (e.id !== entryId) return e;
+          return {
+            ...e,
+            suggestions: {
+              options: (message.options as SuggestionOption[]) ?? undefined,
+              error: (message.error as string) ?? undefined,
+            } as SuggestionResult,
+          };
+        });
+
+        return { suggestionLoading: newLoading, entries: newEntries };
+      });
+      get().saveCurrentSession();
+      break;
+    }
+
+    case "llm_chunk": {
+      const text = (message.text as string) || "";
+      set((state) => ({ summaryText: state.summaryText + text }));
+      break;
+    }
+
+    case "llm_done": {
+      set({ summaryLoading: false });
+      get().saveCurrentSession();
+      break;
+    }
   }
 }

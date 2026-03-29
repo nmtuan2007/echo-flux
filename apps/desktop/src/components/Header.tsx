@@ -7,11 +7,16 @@ export function Header() {
     isToggling, 
     activeView,
     theme,
+    entries,
+    config,
+    summaryText,
     startPipeline, 
     stopPipeline, 
     clearTranscript, 
     setActiveView,
-    setTheme
+    setTheme,
+    requestSummary,
+    openSummary,
   } = useEngineStore();
 
   const handleStartStop = () => {
@@ -34,6 +39,9 @@ export function Header() {
   const toggleTheme = () => {
     setTheme(theme === "light" ? "dark" : "light");
   };
+
+  const canSummarize = config.llmEnabled && entries.length > 0 && connected;
+  const hasSummary = !!summaryText;
 
   return (
     <header className="header">
@@ -67,6 +75,31 @@ export function Header() {
         >
           Clear
         </button>
+
+        <button
+          className={`btn btn-summarize ${!canSummarize ? "btn-summarize-disabled" : ""}`}
+          onClick={requestSummary}
+          disabled={!canSummarize}
+          title={
+            !config.llmEnabled
+              ? "Enable AI Assistant in Settings first"
+              : entries.length === 0
+              ? "Start a meeting to summarize"
+              : "Summarize this meeting with AI"
+          }
+        >
+          📝 Summarize
+        </button>
+
+        {hasSummary && (
+          <button
+            className="btn btn-view-summary"
+            onClick={openSummary}
+            title="View saved meeting summary"
+          >
+            📋 View Summary
+          </button>
+        )}
       </div>
 
       <div className="header-right">

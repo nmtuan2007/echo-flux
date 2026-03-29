@@ -117,6 +117,7 @@ class EchoFluxEngine:
 
         self._client = None
         self._current_config = {}
+        self._llm_assistant = None  # Created on each pipeline start if LLM is enabled
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
@@ -130,6 +131,8 @@ class EchoFluxEngine:
 
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
+        self._ws_server.on_suggestion(self._on_suggestion_request)
+        self._ws_server.on_summary(self._on_summary_request)
 
         logger.info("EchoFlux Engine starting...")
         await self._ws_server.start()
@@ -259,6 +262,25 @@ class EchoFluxEngine:
             self._translation_backend = FallbackTranslationBackend()
             self._translation_backend.load_model(translation_config)
 
+        # 5. LLM Assistant
+        if settings.get("llm.enabled", False):
+            from engine.llm.assistant import LLMAssistant
+            api_key = settings.get("llm.api_key", "")
+            model = settings.get("llm.model", "openai/gpt-4o-mini")
+            provider_url = settings.get("llm.provider_url") or None
+            if api_key and model:
+                self._llm_assistant = LLMAssistant(
+                    api_key=api_key,
+                    model=model,
+                    base_url=provider_url,
+                )
+                logger.info("LLM assistant initialized: model=%s", model)
+            else:
+                logger.warning("LLM enabled but api_key or model not set — skipping")
+                self._llm_assistant = None
+        else:
+            self._llm_assistant = None
+
     def _start_threads(self):
         self._running = True
         self._ws_server.is_capturing = True
@@ -349,6 +371,11 @@ class EchoFluxEngine:
         if self._translation_backend:
             self._translation_backend.unload_model()
             self._translation_backend = None
+
+        # NOTE: _llm_assistant is intentionally NOT cleared here.
+        # It holds no audio resources and must remain available so the
+        # "Summarize Meeting" button works after the pipeline has stopped.
+        # It will be re-created on the next pipeline start if config changes.
 
         self._inputs.clear()
         self._vads.clear()
@@ -542,6 +569,110 @@ class EchoFluxEngine:
             except Exception as e:
                 logger.error("Broadcast error: %s", e)
                 await asyncio.sleep(1)
+
+    def _ensure_llm_assistant(self, message: dict) -> bool:
+        """
+        Ensure _llm_assistant is initialized and available.
+        If it's not set (pipeline never started or already stopped),
+        try to create one from the llm_config embedded in the request message.
+        Returns True if the assistant is ready, False otherwise.
+        """
+        if self._llm_assistant and self._llm_assistant.is_available():
+            return True
+
+        llm_cfg = message.get("llm_config", {})
+        api_key = llm_cfg.get("api_key", "")
+        model = llm_cfg.get("model", "")
+        provider_url = llm_cfg.get("provider_url") or None
+
+        if not api_key or not model:
+            return False
+
+        try:
+            from engine.llm.assistant import LLMAssistant
+            self._llm_assistant = LLMAssistant(
+                api_key=api_key,
+                model=model,
+                base_url=provider_url,
+            )
+            logger.info("LLM assistant initialized on-demand: model=%s", model)
+            return self._llm_assistant.is_available()
+        except Exception as e:
+            logger.error("Failed to initialize LLM assistant on-demand: %s", e)
+            return False
+
+    async def _on_suggestion_request(self, message: dict, websocket):
+        """Handle request_suggestion from UI — calls LLM on a thread and forwards result."""
+        if not self._ensure_llm_assistant(message):
+            await websocket.send(json.dumps({
+                "type": "suggestion_result",
+                "entry_id": message.get("entry_id", ""),
+                "error": "AI Assistant is not configured. Please add your API key in Settings.",
+            }))
+            return
+
+        entry_id = message.get("entry_id", "")
+        target_text = message.get("target_text", "")
+        context = message.get("context", [])
+
+        def _callback(result: dict):
+            msg = {
+                "type": "suggestion_result",
+                **result,
+            }
+            asyncio.run_coroutine_threadsafe(
+                websocket.send(json.dumps(msg)), self._loop
+            )
+
+        self._llm_assistant.request_suggestion(
+            entry_id=entry_id,
+            target_text=target_text,
+            context=context,
+            callback=_callback,
+        )
+
+    async def _on_summary_request(self, message: dict, websocket):
+        """Handle request_summary from UI — streams LLM output back as llm_chunk messages."""
+        if not self._ensure_llm_assistant(message):
+            await websocket.send(json.dumps({
+                "type": "llm_chunk",
+                "text": "**Error:** AI Assistant is not configured. Please add your API key in Settings.",
+            }))
+            await websocket.send(json.dumps({"type": "llm_done"}))
+            return
+
+        entries = message.get("entries", [])
+        transcript_text = "\n".join(
+            f"[{e.get('source', 'speaker').upper()}] {e.get('text', '')}"
+            for e in entries
+            if e.get("text", "").strip()
+        )
+
+        if not transcript_text.strip():
+            await websocket.send(json.dumps({
+                "type": "llm_chunk",
+                "text": "**Error:** Transcript is empty — nothing to summarize.",
+            }))
+            await websocket.send(json.dumps({"type": "llm_done"}))
+            return
+
+        def _chunk_cb(text: str):
+            asyncio.run_coroutine_threadsafe(
+                websocket.send(json.dumps({"type": "llm_chunk", "text": text})),
+                self._loop,
+            )
+
+        def _done_cb():
+            asyncio.run_coroutine_threadsafe(
+                websocket.send(json.dumps({"type": "llm_done"})),
+                self._loop,
+            )
+
+        self._llm_assistant.request_summary(
+            transcript_text=transcript_text,
+            chunk_callback=_chunk_cb,
+            done_callback=_done_cb,
+        )
 
 
 def run_engine(config_path=None):

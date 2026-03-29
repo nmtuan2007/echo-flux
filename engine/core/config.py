@@ -40,6 +40,12 @@ _DEFAULT_CONFIG = {
         "enabled": True,
         "threshold": 0.5,
     },
+    "llm": {
+        "enabled": False,
+        "provider_url": "https://openrouter.ai/api/v1",
+        "api_key": "",
+        "model": "openai/gpt-4o-mini",
+    },
     "logging": {
         "level": "INFO",
         "max_bytes": 10_485_760,
@@ -69,6 +75,10 @@ _ENV_MAP = {
     "ECHOFLUX_TRANSLATION_MODEL_PATH":("translation.model_path",   str),
     "ECHOFLUX_VAD_ENABLED":           ("vad.enabled",              lambda v: str(v).lower() in ("true", "1", "yes")),
     "ECHOFLUX_VAD_THRESHOLD":         ("vad.threshold",            float),
+    "ECHOFLUX_LLM_ENABLED":          ("llm.enabled",              lambda v: str(v).lower() in ("true", "1", "yes")),
+    "ECHOFLUX_LLM_PROVIDER_URL":     ("llm.provider_url",         str),
+    "ECHOFLUX_LLM_API_KEY":          ("llm.api_key",              str),
+    "ECHOFLUX_LLM_MODEL":            ("llm.model",                str),
     "ECHOFLUX_LOG_LEVEL":             ("logging.level",            str),
 }
 

@@ -21,6 +21,8 @@ class WebSocketServer:
 
         self._on_start: Optional[Callable[[dict], Awaitable[None]]] = None
         self._on_stop: Optional[Callable[[], Awaitable[None]]] = None
+        self._on_suggestion: Optional[Callable[[dict, object], Awaitable[None]]] = None
+        self._on_summary: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._running = False
 
     def on_start(self, handler: Callable[[dict], Awaitable[None]]):
@@ -28,6 +30,12 @@ class WebSocketServer:
 
     def on_stop(self, handler: Callable[[], Awaitable[None]]):
         self._on_stop = handler
+
+    def on_suggestion(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_suggestion = handler
+
+    def on_summary(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_summary = handler
 
     async def start(self):
         try:
@@ -117,6 +125,26 @@ class WebSocketServer:
         elif msg_type == "list_devices":
             logger.info("Received list_devices request")
             await websocket.send(json.dumps(await self._list_devices()))
+
+        elif msg_type == "request_suggestion":
+            logger.info("Received request_suggestion for entry_id=%s", message.get("entry_id"))
+            if self._on_suggestion:
+                await self._on_suggestion(message, websocket)
+            else:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "message": "LLM not configured.",
+                }))
+
+        elif msg_type == "request_summary":
+            logger.info("Received request_summary")
+            if self._on_summary:
+                await self._on_summary(message, websocket)
+            else:
+                await websocket.send(json.dumps({
+                    "type": "error",
+                    "message": "LLM not configured.",
+                }))
 
         else:
             logger.warning("Unknown message type: %s", msg_type)
