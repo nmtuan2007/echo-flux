@@ -26,7 +26,7 @@ function sourceBorderClass(source: AudioSource): string {
 }
 
 export function TranscriptPanel() {
-  const { entries, partials, config, running } = useEngineStore();
+  const { entries, partials, config, running, downloading, downloadModel, downloadPercent } = useEngineStore();
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
 
@@ -48,7 +48,22 @@ export function TranscriptPanel() {
 
   return (
     <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
-      {!hasContent && (
+      {downloading && (
+        <div className="download-progress-overlay">
+          <div className="download-progress-card">
+            <h4>Downloading AI model for the first time...</h4>
+            <p>{downloadModel}</p>
+            <div className="progress-bar-bg">
+              <div className="progress-bar-fill" style={{ width: `${downloadPercent}%` }}></div>
+            </div>
+            <div className="progress-text-container">
+              <span className="progress-text">{downloadPercent}%</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!hasContent && !downloading && (
         <div className="transcript-empty">
           <p>No transcript yet.</p>
           <p>
@@ -56,6 +71,7 @@ export function TranscriptPanel() {
           </p>
         </div>
       )}
+
 
       {entries.map((entry) => (
         <div

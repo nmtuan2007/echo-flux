@@ -62,6 +62,11 @@ interface EngineState {
   // Translation status
   activeTranslationBackend: string | null;
 
+  // Downloads
+  downloading: boolean;
+  downloadModel: string;
+  downloadPercent: number;
+
   // History
   history: Conversation[];
 
@@ -129,6 +134,9 @@ export const useEngineStore = create<EngineState>()(
       entries: [],
       partials: {},
       activeTranslationBackend: null,
+      downloading: false,
+      downloadModel: "",
+      downloadPercent: 0,
       history: [],
       activeView: "transcript",
       theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
@@ -167,6 +175,9 @@ export const useEngineStore = create<EngineState>()(
             running: false,
             isToggling: false,
             activeTranslationBackend: null,
+            downloading: false,
+            downloadModel: "",
+            downloadPercent: 0,
           });
           reconnectTimer = setTimeout(() => {
             get().connect();
@@ -195,6 +206,9 @@ export const useEngineStore = create<EngineState>()(
           running: false,
           isToggling: false,
           activeTranslationBackend: null,
+          downloading: false,
+          downloadModel: "",
+          downloadPercent: 0,
         });
       },
 
@@ -440,6 +454,19 @@ function handleMessage(
       break;
     }
 
+    case "download_progress": {
+      if (message.percent === 100) {
+        set({ downloading: false, downloadModel: "", downloadPercent: 0 });
+      } else {
+        set({
+          downloading: true,
+          downloadModel: (message.model as string) || "AI Model",
+          downloadPercent: (message.percent as number) || 0,
+        });
+      }
+      break;
+    }
+
     case "status":
       if (message.status === "started") {
         set({
@@ -448,6 +475,9 @@ function handleMessage(
           entries: [],
           partials: {},
           activeTranslationBackend: null,
+          downloading: false,
+          downloadModel: "",
+          downloadPercent: 0,
         });
       } else if (message.status === "stopped") {
         get().saveCurrentSession();
@@ -455,6 +485,9 @@ function handleMessage(
           running: false,
           isToggling: false,
           partials: {},
+          downloading: false,
+          downloadModel: "",
+          downloadPercent: 0,
         });
       }
       break;

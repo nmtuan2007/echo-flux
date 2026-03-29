@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 
 from engine.core.config import TranscriptionConfig
+from engine.core.progress import install_progress_hijack, set_progress_callback
 from engine.server.websocket_server import WebSocketServer
 
 logger = logging.getLogger("echoflux.engine")
@@ -118,6 +119,15 @@ class EchoFluxEngine:
         self._current_config = {}
 
     async def start(self):
+        self._loop = asyncio.get_running_loop()
+        
+        def _progress_cb(model_name: str, percent: int):
+            if self._client:
+                msg = {"type": "download_progress", "model": model_name, "percent": percent}
+                asyncio.run_coroutine_threadsafe(self._client.send(json.dumps(msg)), self._loop)
+                
+        set_progress_callback(_progress_cb)
+
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
 
@@ -138,7 +148,7 @@ class EchoFluxEngine:
             await self._stop_pipeline()
 
         try:
-            self._initialize_pipeline(config)
+            await asyncio.to_thread(self._initialize_pipeline, config)
             self._start_threads()
         except Exception as e:
             logger.error("Failed to start pipeline: %s", e, exc_info=True)
@@ -538,6 +548,8 @@ def run_engine(config_path=None):
     _load_dotenv()
     _setup_cuda_paths()
     _setup_logging()
+    
+    install_progress_hijack()
 
     engine = EchoFluxEngine()
     try:
