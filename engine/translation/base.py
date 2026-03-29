@@ -57,36 +57,27 @@ class TranslationBackend(ABC):
 
     @staticmethod
     def split_sentences(text: str, max_length: int = 200) -> List[str]:
-        """Split text into sentence-sized chunks for better translation quality."""
-        if len(text) <= max_length:
-            return [text]
+        """Split text into sentence-sized chunks for better translation quality.
 
-        # Split on sentence boundaries
-        parts = re.split(r'(?<=[.!?;])\s+', text)
+        Always splits on sentence-ending punctuation first so that multi-sentence
+        inputs are never fed as a single block to sentence-level models (e.g. Marian).
+        Individual sentences are then further chunked if they exceed max_length.
+        """
+        # Step 1: Always split on sentence boundaries
+        raw_parts = re.split(r'(?<=[.!?;])\s+', text.strip())
 
-        sentences = []
-        current = ""
-
-        for part in parts:
-            if not part.strip():
+        # Step 2: For each sentence, further split if it's still too long
+        final: List[str] = []
+        for part in raw_parts:
+            part = part.strip()
+            if not part:
                 continue
 
-            if current and len(current) + len(part) + 1 > max_length:
-                sentences.append(current.strip())
-                current = part
+            if len(part) <= max_length:
+                final.append(part)
             else:
-                current = f"{current} {part}".strip() if current else part
-
-        if current.strip():
-            sentences.append(current.strip())
-
-        # If any sentence is still too long, split on commas
-        final = []
-        for s in sentences:
-            if len(s) <= max_length:
-                final.append(s)
-            else:
-                comma_parts = re.split(r',\s*', s)
+                # Split on comma boundaries for long sentences
+                comma_parts = re.split(r',\s*', part)
                 chunk = ""
                 for cp in comma_parts:
                     if chunk and len(chunk) + len(cp) + 2 > max_length:

@@ -133,7 +133,7 @@ function FinalEntry({ entry, index }: {
 
           {/* Not loading, no suggestion yet → Get button */}
           {!isLoading && !hasSuggestion && (
-            <button className="suggest-btn" onClick={handleSuggest} title="Get AI reply suggestions">
+            <button className="suggest-btn" onClick={handleSuggest} title="Get AI reply suggestions (Ctrl+Shift+S)">
               💡 Suggest Reply
             </button>
           )}
@@ -150,7 +150,7 @@ function FinalEntry({ entry, index }: {
               <button
                 className="suggest-btn suggest-btn-refresh"
                 onClick={handleSuggest}
-                title="Refresh suggestions"
+                title="Refresh suggestions (Ctrl+Shift+S)"
               >
                 ↺
               </button>

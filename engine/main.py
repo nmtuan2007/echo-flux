@@ -477,6 +477,7 @@ class EchoFluxEngine:
                 continue
 
             text = task.get("text", "")
+            entry_id = task.get("entry_id")
 
             if not text:
                 continue
@@ -488,7 +489,7 @@ class EchoFluxEngine:
 
                     msg = {
                         "type": "translation_update",
-                        "text": None,
+                        "entry_id": entry_id,
                         "source_text": text,
                         "translation": trans_res.translated_text,
                         "timestamp": time.time(),
@@ -498,7 +499,7 @@ class EchoFluxEngine:
                         msg["translation_backend"] = active_backend
 
                     self._result_queue.put(msg)
-                    logger.debug("Translated: '%s' -> '%s'", text, trans_res.translated_text)
+                    logger.debug("Translated [%s]: '%s' -> '%s'", entry_id, text, trans_res.translated_text)
             except Exception as e:
                 logger.error("Translation loop error: %s", e)
 
@@ -512,8 +513,8 @@ class EchoFluxEngine:
     def _enqueue_asr_result(self, asr_result):
         """
         Handle ASR result.
-        IMPROVEMENT: Removed sentence accumulation.
-        Every FINAL ASR segment is sent to translation queue immediately.
+        Every FINAL ASR segment is sent to translation queue immediately,
+        with a stable entry_id so the translation result can be matched precisely.
         """
 
         active_backend = None
@@ -522,6 +523,9 @@ class EchoFluxEngine:
 
         # True Dual Stream automatically tags every result with its originating stream_id
         audio_source = asr_result.stream_id if asr_result.stream_id in ["mic", "system"] else None
+
+        # Generate a stable entry_id for this segment so translation can reference it
+        entry_id = f"e-{time.time()}" if asr_result.is_final else None
 
         # Send ASR (English) to UI
         msg = {
@@ -535,20 +539,21 @@ class EchoFluxEngine:
         if audio_source:
             msg["source"] = audio_source
 
-        if asr_result.is_final:
-            msg["entry_id"] = f"e-{time.time()}"
+        if entry_id:
+            msg["entry_id"] = entry_id
 
         if active_backend:
             msg["translation_backend"] = active_backend
 
         self._result_queue.put(msg)
 
-        # Translation Logic: Queue immediately if FINAL
+        # Translation Logic: Queue immediately if FINAL, carry the same entry_id
         if self._translation_backend and self._translation_backend.is_loaded:
             if asr_result.is_final and asr_result.text.strip():
                 try:
                     self._translation_queue.put({
                         "text": asr_result.text,
+                        "entry_id": entry_id,
                         "is_final": True
                     }, timeout=0.5)
                 except Full:

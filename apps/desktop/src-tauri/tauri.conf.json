@@ -53,6 +53,9 @@
         "all": false,
         "save": true,
         "open": false
+      },
+      "globalShortcut": {
+        "all": true
       }
     },
     "bundle": {

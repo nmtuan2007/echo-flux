@@ -1,4 +1,5 @@
 import { useEngineStore } from "../store/engineStore";
+import { invoke } from "@tauri-apps/api/tauri";
 
 export function Header() {
   const { 
@@ -56,6 +57,7 @@ export function Header() {
           className={`btn ${running ? "btn-stop" : "btn-start"}`} 
           onClick={handleStartStop} 
           disabled={!connected || isToggling}
+          title={running ? "Stop Transcription (Ctrl+Shift+M)" : "Start Transcription (Ctrl+Shift+M)"}
         >
           {isToggling ? (
             <>
@@ -65,6 +67,19 @@ export function Header() {
           ) : (
             running ? "Stop" : "Start"
           )}
+        </button>
+
+        <button
+          className="btn btn-secondary"
+          onClick={() => {
+            console.log("[DEBUG] PiP Overlay button clicked!");
+            invoke("toggle_overlay_window")
+              .then(() => console.log("[DEBUG] toggle_overlay_window succeeded"))
+              .catch(e => console.error("[DEBUG] toggle_overlay_window failed:", e));
+          }}
+          title="Toggle Floating Overlay (Ctrl+Shift+O)"
+        >
+          PiP Overlay
         </button>
         
         <button 

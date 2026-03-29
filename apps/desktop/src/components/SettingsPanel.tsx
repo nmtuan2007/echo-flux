@@ -398,6 +398,23 @@ export function SettingsPanel() {
         )}
       </section>
 
+      {/* ── Invisible/Pro UI ──────────────────────────────────────────────── */}
+      <section className="settings-section">
+         <h3 className="settings-section-title">✨ Pro UX Experience</h3>
+         <div className="settings-field settings-field-row">
+            <label htmlFor="stealth-mode">Hide from Screen Share (Stealth Mode)</label>
+            <input
+               id="stealth-mode"
+               type="checkbox"
+               checked={config.stealthMode}
+               onChange={(e) => updateConfig({ stealthMode: e.target.checked })}
+            />
+         </div>
+         <p className="settings-note">
+            When enabled, the Overlay Window will be invisible to OBS, Zoom, and Teams screen captures.
+         </p>
+      </section>
+
       {/* ── AI Assistant ─────────────────────────────────────────────── */}
       <section className="settings-section settings-section-ai">
         <h3 className="settings-section-title">🤖 AI Assistant</h3>

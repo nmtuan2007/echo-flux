@@ -157,26 +157,36 @@ class MarianBackend(TranslationBackend):
             return TranslationResult(text, "", source_lang, target_lang)
 
         try:
-            sentences = self.split_sentences(text, max_length=200)
+            # Marian / opus-mt models are trained on single short sentences.
+            # Always split on sentence boundaries first (max 120 chars per chunk)
+            # so the model never sees multi-sentence input as one block.
+            sentences = self.split_sentences(text, max_length=120)
 
-            source_tokens = [
-                self._tokenizer.convert_ids_to_tokens(self._tokenizer.encode(s))
-                for s in sentences
-            ]
+            source_tokens = []
+            for s in sentences:
+                # Use max_length guard so the tokenizer never silently truncates
+                ids = self._tokenizer.encode(
+                    s,
+                    max_length=512,
+                    truncation=True,
+                )
+                source_tokens.append(self._tokenizer.convert_ids_to_tokens(ids))
 
             results = self._translator.translate_batch(
                 source_tokens,
                 batch_type="tokens",
                 max_batch_size=2048,
-                beam_size=2,
+                beam_size=4,
             )
 
             translated_sentences = []
             for res in results:
                 decoded = self._tokenizer.decode(
-                    self._tokenizer.convert_tokens_to_ids(res.hypotheses[0])
+                    self._tokenizer.convert_tokens_to_ids(res.hypotheses[0]),
+                    skip_special_tokens=True,
                 )
-                translated_sentences.append(decoded)
+                if decoded.strip():
+                    translated_sentences.append(decoded.strip())
 
             translated_text = " ".join(translated_sentences)
 

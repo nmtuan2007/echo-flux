@@ -55,6 +55,7 @@ export interface EngineConfig {
   llmProviderUrl: string;
   llmApiKey: string;
   llmModel: string;
+  stealthMode: boolean;
 }
 
 export type AppView = "transcript" | "settings" | "history";
@@ -112,6 +113,7 @@ interface EngineState {
   disconnect: () => void;
   startPipeline: () => void;
   stopPipeline: () => void;
+  togglePipeline: () => void;
   clearTranscript: () => void;
   setActiveView: (view: AppView) => void;
   setTheme: (theme: "dark" | "light") => void;
@@ -150,6 +152,7 @@ const DEFAULT_CONFIG: EngineConfig = {
   llmProviderUrl: "https://openrouter.ai/api/v1",
   llmApiKey: "",
   llmModel: "openai/gpt-4o-mini",
+  stealthMode: false,
 };
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -292,6 +295,15 @@ export const useEngineStore = create<EngineState>()(
         socket.send(JSON.stringify({ type: "stop" }));
       },
 
+      togglePipeline: () => {
+        const { running } = get();
+        if (running) {
+          get().stopPipeline();
+        } else {
+          get().startPipeline();
+        }
+      },
+
       clearTranscript: () => {
         set({
           entries: [],
@@ -323,9 +335,18 @@ export const useEngineStore = create<EngineState>()(
         socket.send(JSON.stringify({ type: "list_devices" }));
       },
 
-      requestSuggestion: (entryId, targetText, context) => {
+      requestSuggestion: async (entryId, targetText, context) => {
         const { socket, connected, config } = get();
-        if (!socket || !connected) return;
+
+        // If we don't have a direct socket connection (like in the overlay window),
+        // we relay the request to the main window via Tauri events.
+        if (!socket || !connected) {
+          if (typeof window !== "undefined" && window.__TAURI__) {
+             const { emit } = await import("@tauri-apps/api/event");
+             await emit("relay_request_suggestion", { entryId, targetText, context });
+          }
+          return;
+        }
 
         set((state) => ({
           suggestionLoading: { ...state.suggestionLoading, [entryId]: true },
@@ -525,22 +546,37 @@ function handleMessage(
 
     case "translation_update": {
       const translation = message.translation as string;
+      const entryId = message.entry_id as string | undefined;
       const sourceText = message.source_text as string;
 
       if (!translation) break;
+
+      // ES2021-compatible reverse linear search helper
+      const findLast = (arr: TranscriptEntry[], pred: (e: TranscriptEntry) => boolean) => {
+        for (let i = arr.length - 1; i >= 0; i--) {
+          if (pred(arr[i])) return i;
+        }
+        return -1;
+      };
 
       set((state) => {
         const newEntries = [...state.entries];
         let foundIndex = -1;
 
-        for (let i = newEntries.length - 1; i >= 0; i--) {
-          if (
-            newEntries[i].text === sourceText ||
-            (sourceText && newEntries[i].text.includes(sourceText))
-          ) {
-            foundIndex = i;
-            break;
-          }
+        // 1. Prefer exact entry_id match — precise
+        if (entryId) {
+          foundIndex = findLast(newEntries, (e) => e.id === entryId);
+        }
+
+        // 2. Fall back to exact text match (legacy messages without entry_id)
+        if (foundIndex === -1 && sourceText) {
+          foundIndex = findLast(newEntries, (e) => e.text === sourceText);
+        }
+
+        // 3. Last resort: prefix match on entries that don't yet have a translation
+        if (foundIndex === -1 && sourceText) {
+          const prefix = sourceText.slice(0, 30);
+          foundIndex = findLast(newEntries, (e) => !e.translation && e.text.includes(prefix));
         }
 
         if (foundIndex !== -1) {
@@ -548,12 +584,7 @@ function handleMessage(
           return { entries: newEntries };
         }
 
-        const lastIdx = newEntries.length - 1;
-        if (lastIdx >= 0 && !newEntries[lastIdx].translation) {
-          newEntries[lastIdx] = { ...newEntries[lastIdx], translation };
-          return { entries: newEntries };
-        }
-
+        // If no match at all, discard — do NOT blindly attach to the last entry
         return {};
       });
       break;
