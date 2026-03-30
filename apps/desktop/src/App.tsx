@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Header } from "./components/Header";
 import { HistoryPanel } from "./components/HistoryPanel";
+import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { OverlayPanel } from "./components/OverlayPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StatusBar } from "./components/StatusBar";
@@ -115,6 +116,7 @@ export default function App() {
       <Header />
       <main className="app-content" style={{ position: "relative" }}>
         {activeView === "settings" && <SettingsPanel />}
+        {activeView === "model_manager" && <ModelManagerPanel />}
         {activeView === "history" && <HistoryPanel />}
         {activeView === "transcript" && <TranscriptPanel />}
         {/* Summary modal overlays any active view */}

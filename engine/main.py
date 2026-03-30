@@ -123,9 +123,8 @@ class EchoFluxEngine:
         self._loop = asyncio.get_running_loop()
         
         def _progress_cb(model_name: str, percent: int):
-            if self._client:
-                msg = {"type": "download_progress", "model": model_name, "percent": percent}
-                asyncio.run_coroutine_threadsafe(self._client.send(json.dumps(msg)), self._loop)
+            msg = {"type": "download_progress", "model": model_name, "percent": percent}
+            asyncio.run_coroutine_threadsafe(self._ws_server.broadcast(msg), self._loop)
                 
         set_progress_callback(_progress_cb)
 
@@ -133,6 +132,9 @@ class EchoFluxEngine:
         self._ws_server.on_stop(self._on_client_stop)
         self._ws_server.on_suggestion(self._on_suggestion_request)
         self._ws_server.on_summary(self._on_summary_request)
+        self._ws_server.on_request_models_list(self._on_request_models_list)
+        self._ws_server.on_download_model(self._on_download_model)
+        self._ws_server.on_delete_model(self._on_delete_model)
 
         logger.info("EchoFlux Engine starting...")
         await self._ws_server.start()
@@ -678,6 +680,76 @@ class EchoFluxEngine:
             chunk_callback=_chunk_cb,
             done_callback=_done_cb,
         )
+
+    async def _on_request_models_list(self, message: dict, websocket):
+        from engine.core.model_manager import get_models_list
+        from engine.core.config import Config
+        try:
+            config = Config()
+            models = get_models_list(config)
+            await websocket.send(json.dumps({
+                "type": "models_list",
+                "asr": models["asr"],
+                "translation": models["translation"]
+            }))
+        except Exception as e:
+            logger.error("Error getting models list: %s", e, exc_info=True)
+
+    async def _on_delete_model(self, message: dict, websocket):
+        from engine.core.model_manager import delete_model
+        from engine.core.config import Config
+        model_id = message.get("model_id")
+        model_type = message.get("model_type")
+        success = False
+        error = None
+        try:
+            config = Config()
+            delete_model(model_id, model_type, config)
+            success = True
+        except Exception as e:
+            logger.error("Error deleting model: %s", e, exc_info=True)
+            error = str(e)
+            
+        await websocket.send(json.dumps({
+            "type": "model_action_result",
+            "action": "delete",
+            "model_id": model_id,
+            "success": success,
+            "error": error
+        }))
+
+    async def _on_download_model(self, message: dict, websocket):
+        model_id = message.get("model_id")
+        model_type = message.get("model_type")
+
+        # Must be in daemon thread
+        def _download_task():
+            from engine.core.model_manager import download_model
+            from engine.core.config import Config
+            success = False
+            error = None
+            try:
+                config = Config()
+                download_model(model_id, model_type, config)
+                success = True
+            except Exception as e:
+                logger.error("Error downloading model: %s", e, exc_info=True)
+                error = str(e)
+
+            result_msg = {
+                "type": "model_action_result",
+                "action": "download",
+                "model_id": model_id,
+                "success": success,
+                "error": error
+            }
+            asyncio.run_coroutine_threadsafe(
+                self._ws_server.broadcast(result_msg),
+                self._loop
+            )
+
+        t = threading.Thread(target=_download_task, daemon=True)
+        t.start()
 
 
 def run_engine(config_path=None):

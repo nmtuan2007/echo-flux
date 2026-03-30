@@ -1,13 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { AudioDeviceInfo, EngineConfig, useEngineStore } from "../store/engineStore";
-
-const MODEL_SIZES = ["tiny", "base", "small", "medium", "large"];
 const DEVICES = ["auto", "cpu", "cuda"];
-
-const TRANSLATION_BACKENDS = [
-  { value: "online", label: "Online (Google Translate) → Marian fallback" },
-  { value: "marian", label: "Local only (MarianMT)" },
-];
 
 const LANGUAGES = [
   { code: "en", label: "English" },
@@ -27,46 +20,7 @@ const LANGUAGES = [
   { code: "pl", label: "Polish" },
 ];
 
-// Preset Marian models for common language pairs
-const PRESET_MODELS: Record<string, { id: string; label: string }[]> = {
-  "en-vi": [
-    { id: "", label: "Default (opus-mt-en-vi)" },
-    { id: "Helsinki-NLP/opus-mt-en-vi", label: "Helsinki opus-mt-en-vi" },
-  ],
-  "en-zh": [
-    { id: "", label: "Default (opus-mt-en-zh)" },
-    { id: "Helsinki-NLP/opus-mt-en-zh", label: "Helsinki opus-mt-en-zh" },
-  ],
-  "en-ja": [
-    { id: "", label: "Default (opus-mt-en-jap)" },
-    { id: "Helsinki-NLP/opus-mt-en-jap", label: "Helsinki opus-mt-en-jap" },
-  ],
-  "en-ko": [
-    { id: "", label: "Default (opus-mt-tc-big-en-ko)" },
-    { id: "Helsinki-NLP/opus-mt-tc-big-en-ko", label: "Helsinki opus-mt-tc-big-en-ko" },
-  ],
-  "en-de": [
-    { id: "", label: "Default (opus-mt-en-de)" },
-    { id: "Helsinki-NLP/opus-mt-en-de", label: "Helsinki opus-mt-en-de" },
-  ],
-  "en-fr": [
-    { id: "", label: "Default (opus-mt-en-fr)" },
-    { id: "Helsinki-NLP/opus-mt-en-fr", label: "Helsinki opus-mt-en-fr" },
-  ],
-  "en-es": [
-    { id: "", label: "Default (opus-mt-en-es)" },
-    { id: "Helsinki-NLP/opus-mt-en-es", label: "Helsinki opus-mt-en-es" },
-  ],
-  "en-ru": [
-    { id: "", label: "Default (opus-mt-en-ru)" },
-    { id: "Helsinki-NLP/opus-mt-en-ru", label: "Helsinki opus-mt-en-ru" },
-  ],
-};
 
-function getPresetModels(sourceLang: string, targetLang: string) {
-  const key = `${sourceLang}-${targetLang}`;
-  return PRESET_MODELS[key] || [{ id: "", label: "Default (auto-detect)" }];
-}
 
 const AUDIO_SOURCES: { value: EngineConfig["audioSource"]; label: string }[] = [
   { value: "microphone", label: "Microphone only" },
@@ -111,20 +65,27 @@ export function SettingsPanel() {
     availableMics,
     availableSpeakers,
     requestDeviceList,
+    setActiveView,
+    modelsList,
+    requestModelsList,
   } = useEngineStore();
-  const [showCustomModel, setShowCustomModel] = useState(false);
 
-  // Auto-fetch device list when the panel mounts and we're connected.
+  // Auto-fetch device and model lists when connected.
   useEffect(() => {
     if (connected) {
       requestDeviceList();
+      requestModelsList();
     }
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const presetModels = getPresetModels(config.sourceLang || config.language, config.targetLang);
+  const downloadedAsrModels = modelsList.asr.filter((m) => m.is_downloaded);
+  const downloadedTranslationModels = modelsList.translation.filter((m) => m.is_downloaded);
 
-  const isCustomModel =
-    config.translationModel !== "" && !presetModels.some((m) => m.id === config.translationModel);
+  // Dynamically disable marian if no models are downloaded
+  const translationBackends = [
+    { value: "online", label: "Online (Google Translate) → Marian fallback" },
+    { value: "marian", label: "Local only (MarianMT)", disabled: downloadedTranslationModels.length === 0 },
+  ];
 
   const showMicSelect = config.audioSource === "microphone" || config.audioSource === "both";
   const showSpeakerSelect = config.audioSource === "system" || config.audioSource === "both";
@@ -209,19 +170,35 @@ export function SettingsPanel() {
         <h3 className="settings-section-title">Speech Recognition</h3>
 
         <div className="settings-field">
-          <label htmlFor="model-size">Model Size</label>
-          <select
-            id="model-size"
-            value={config.modelSize}
-            onChange={(e) => updateConfig({ modelSize: e.target.value })}
-            disabled={running}
-          >
-            {MODEL_SIZES.map((size) => (
-              <option key={size} value={size}>
-                {size}
-              </option>
-            ))}
-          </select>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+            <label htmlFor="model-size" style={{ marginBottom: 0 }}>Transcription Model</label>
+            <button className="btn-text" onClick={() => setActiveView("model_manager")} disabled={running}>
+              Manage Models
+            </button>
+          </div>
+          {downloadedAsrModels.length > 0 ? (
+            <select
+              id="model-size"
+              value={config.modelSize}
+              onChange={(e) => updateConfig({ modelSize: e.target.value })}
+              disabled={running}
+            >
+              {downloadedAsrModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.id} ({m.size_mb} MB)
+                </option>
+              ))}
+              {!downloadedAsrModels.some((m) => m.id === config.modelSize) && (
+                <option value={config.modelSize}>
+                  {config.modelSize} (Pending Download)
+                </option>
+              )}
+            </select>
+          ) : (
+            <div style={{ flex: 1, padding: "8px 12px", background: "var(--bg-secondary)", borderRadius: "6px", fontSize: "13px", color: "var(--text-secondary)", fontStyle: "italic" }}>
+              No models downloaded. Go to Manage Models to download one, or start to auto-download the default model.
+            </div>
+          )}
         </div>
 
         <div className="settings-field">
@@ -299,8 +276,8 @@ export function SettingsPanel() {
                 }
                 disabled={running}
               >
-                {TRANSLATION_BACKENDS.map((b) => (
-                  <option key={b.value} value={b.value}>
+                {translationBackends.map((b) => (
+                  <option key={b.value} value={b.value} disabled={b.disabled}>
                     {b.label}
                   </option>
                 ))}
@@ -314,7 +291,6 @@ export function SettingsPanel() {
                 value={config.targetLang}
                 onChange={(e) => {
                   updateConfig({ targetLang: e.target.value, translationModel: "" });
-                  setShowCustomModel(false);
                 }}
                 disabled={running}
               >
@@ -327,53 +303,42 @@ export function SettingsPanel() {
             </div>
 
             <div className="settings-field">
-              <label htmlFor="translation-model">
-                Marian Model {showCustomModel || isCustomModel ? "(Custom)" : "(Preset)"}
-              </label>
-              {!showCustomModel && !isCustomModel ? (
-                <div className="settings-field-group">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                <label htmlFor="translation-model" style={{ marginBottom: 0 }}>
+                  Translation Model (MarianMT)
+                </label>
+                <button className="btn-text" onClick={() => setActiveView("model_manager")} disabled={running}>
+                  Manage Models
+                </button>
+              </div>
+              <div className="settings-field-group">
+                {downloadedTranslationModels.length > 0 ? (
                   <select
                     id="translation-model"
                     value={config.translationModel}
                     onChange={(e) => updateConfig({ translationModel: e.target.value })}
                     disabled={running}
                   >
-                    {presetModels.map((m) => (
+                    {downloadedTranslationModels.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {m.label}
+                        {m.name}
                       </option>
                     ))}
+                    {!downloadedTranslationModels.some((m) => m.id === config.translationModel) && config.translationModel !== "" && (
+                      <option value={config.translationModel}>
+                        {config.translationModel} (Not downloaded)
+                      </option>
+                    )}
+                    {config.translationModel === "" && (
+                      <option value="">-- Select a local model --</option>
+                    )}
                   </select>
-                  <button
-                    className="btn-text"
-                    onClick={() => setShowCustomModel(true)}
-                    disabled={running}
-                  >
-                    Custom
-                  </button>
-                </div>
-              ) : (
-                <div className="settings-field-group">
-                  <input
-                    id="translation-model-custom"
-                    type="text"
-                    value={config.translationModel}
-                    onChange={(e) => updateConfig({ translationModel: e.target.value })}
-                    placeholder="HuggingFace model ID or local path"
-                    disabled={running}
-                  />
-                  <button
-                    className="btn-text"
-                    onClick={() => {
-                      updateConfig({ translationModel: "" });
-                      setShowCustomModel(false);
-                    }}
-                    disabled={running}
-                  >
-                    Preset
-                  </button>
-                </div>
-              )}
+                ) : (
+                  <div style={{ flex: 1, padding: "8px 12px", background: "var(--bg-secondary)", borderRadius: "6px", fontSize: "13px", color: "var(--text-secondary)", fontStyle: "italic" }}>
+                    No local models downloaded. Go to Manage Models to download one.
+                  </div>
+                )}
+              </div>
             </div>
 
             {running && activeTranslationBackend && (

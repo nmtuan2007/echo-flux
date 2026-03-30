@@ -23,6 +23,9 @@ class WebSocketServer:
         self._on_stop: Optional[Callable[[], Awaitable[None]]] = None
         self._on_suggestion: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._on_summary: Optional[Callable[[dict, object], Awaitable[None]]] = None
+        self._on_request_models_list: Optional[Callable[[dict, object], Awaitable[None]]] = None
+        self._on_download_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
+        self._on_delete_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._running = False
 
     def on_start(self, handler: Callable[[dict], Awaitable[None]]):
@@ -36,6 +39,15 @@ class WebSocketServer:
 
     def on_summary(self, handler: Callable[[dict, object], Awaitable[None]]):
         self._on_summary = handler
+
+    def on_request_models_list(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_request_models_list = handler
+
+    def on_download_model(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_download_model = handler
+
+    def on_delete_model(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_delete_model = handler
 
     async def start(self):
         try:
@@ -145,6 +157,21 @@ class WebSocketServer:
                     "type": "error",
                     "message": "LLM not configured.",
                 }))
+
+        elif msg_type == "request_models_list":
+            logger.info("Received request_models_list")
+            if self._on_request_models_list:
+                await self._on_request_models_list(message, websocket)
+
+        elif msg_type == "download_model":
+            logger.info("Received download_model")
+            if self._on_download_model:
+                await self._on_download_model(message, websocket)
+
+        elif msg_type == "delete_model":
+            logger.info("Received delete_model")
+            if self._on_delete_model:
+                await self._on_delete_model(message, websocket)
 
         else:
             logger.warning("Unknown message type: %s", msg_type)

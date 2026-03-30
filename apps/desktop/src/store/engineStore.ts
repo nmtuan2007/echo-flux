@@ -34,6 +34,13 @@ export interface AudioDeviceInfo {
   name: string;
 }
 
+export interface ModelItem {
+  id: string;
+  name: string;
+  size_mb: number;
+  is_downloaded: boolean;
+}
+
 export interface EngineConfig {
   host: string;
   port: number;
@@ -58,7 +65,7 @@ export interface EngineConfig {
   stealthMode: boolean;
 }
 
-export type AppView = "transcript" | "settings" | "history";
+export type AppView = "transcript" | "settings" | "history" | "model_manager";
 
 interface EngineState {
   // Connection
@@ -84,6 +91,8 @@ interface EngineState {
   downloading: boolean;
   downloadModel: string;
   downloadPercent: number;
+
+  modelsList: { asr: ModelItem[]; translation: ModelItem[] };
 
   // History
   history: Conversation[];
@@ -119,6 +128,10 @@ interface EngineState {
   setTheme: (theme: "dark" | "light") => void;
   updateConfig: (partial: Partial<EngineConfig>) => void;
   requestDeviceList: () => void;
+
+  requestModelsList: () => void;
+  downloadModelById: (id: string, type: "asr" | "translation") => void;
+  deleteModelById: (id: string, type: "asr" | "translation") => void;
 
   // LLM Actions
   requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
@@ -180,6 +193,7 @@ export const useEngineStore = create<EngineState>()(
       activeView: "transcript",
       theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
       activeConversationId: null,
+      modelsList: { asr: [], translation: [] },
       config: { ...DEFAULT_CONFIG },
       availableMics: [],
       availableSpeakers: [],
@@ -222,6 +236,7 @@ export const useEngineStore = create<EngineState>()(
             downloading: false,
             downloadModel: "",
             downloadPercent: 0,
+            modelsList: { asr: [], translation: [] },
           });
           reconnectTimer = setTimeout(() => {
             get().connect();
@@ -253,6 +268,7 @@ export const useEngineStore = create<EngineState>()(
           downloading: false,
           downloadModel: "",
           downloadPercent: 0,
+          modelsList: { asr: [], translation: [] },
         });
       },
 
@@ -333,6 +349,25 @@ export const useEngineStore = create<EngineState>()(
         const { socket, connected } = get();
         if (!socket || !connected) return;
         socket.send(JSON.stringify({ type: "list_devices" }));
+      },
+
+      requestModelsList: () => {
+        const { socket, connected } = get();
+        if (!socket || !connected) return;
+        socket.send(JSON.stringify({ type: "request_models_list" }));
+      },
+
+      downloadModelById: (id, type) => {
+        const { socket, connected, downloading } = get();
+        if (!socket || !connected || downloading) return;
+        set({ downloading: true, downloadModel: id, downloadPercent: 0 });
+        socket.send(JSON.stringify({ type: "download_model", model_id: id, model_type: type }));
+      },
+
+      deleteModelById: (id, type) => {
+        const { socket, connected } = get();
+        if (!socket || !connected) return;
+        socket.send(JSON.stringify({ type: "delete_model", model_id: id, model_type: type }));
       },
 
       requestSuggestion: async (entryId, targetText, context) => {
@@ -593,12 +628,36 @@ function handleMessage(
     case "download_progress": {
       if (message.percent === 100) {
         set({ downloading: false, downloadModel: "", downloadPercent: 0 });
+        const { connected, socket } = get();
+        if (connected && socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "request_models_list" }));
+        }
       } else {
-        set({
+        set((state) => ({
           downloading: true,
-          downloadModel: (message.model as string) || "AI Model",
+          downloadModel: state.downloadModel || (message.model as string) || "AI Model",
           downloadPercent: (message.percent as number) || 0,
-        });
+        }));
+      }
+      break;
+    }
+
+    case "models_list": {
+      set({ 
+        modelsList: { 
+          asr: (message.asr as ModelItem[]) ?? [], 
+          translation: (message.translation as ModelItem[]) ?? [] 
+        } 
+      });
+      break;
+    }
+
+    case "model_action_result": {
+      set({ downloading: false, downloadModel: "", downloadPercent: 0 });
+      if (message.success) {
+        get().requestModelsList();
+      } else {
+        console.error("Model action failed:", message.error);
       }
       break;
     }

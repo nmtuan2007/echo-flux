@@ -29,7 +29,7 @@ export function Header() {
     }
   };
 
-  const toggleView = (view: "history" | "settings") => {
+  const toggleView = (view: "history" | "settings" | "model_manager") => {
     if (activeView === view) {
       setActiveView("transcript");
     } else {
@@ -126,6 +126,13 @@ export function Header() {
           {theme === "light" ? <MoonIcon /> : <SunIcon />}
         </button>
         <button 
+          className={`btn btn-icon ${activeView === "model_manager" ? "active" : ""}`}
+          onClick={() => toggleView("model_manager")} 
+          title="Model Manager"
+        >
+          <DatabaseIcon />
+        </button>
+        <button 
           className={`btn btn-icon ${activeView === "history" ? "active" : ""}`}
           onClick={() => toggleView("history")} 
           title="History"
@@ -201,6 +208,16 @@ function Spinner() {
       style={{ marginRight: "6px" }}
     >
       <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
+  );
+}
+
+function DatabaseIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
     </svg>
   );
 }

@@ -65,6 +65,9 @@ class FasterWhisperBackend(ASRBackend):
         self._inference_interval = _MODEL_INFERENCE_INTERVAL.get(model_size, 0.3)
         self._max_buffer_duration = _MODEL_MAX_BUFFER.get(model_size, 4.0)
 
+        from engine.core.config import Config
+        models_dir = str(Config().models_dir)
+
         if target_device == "cuda":
             logger.info("Loading Faster-Whisper on CUDA (compute_type=%s)...", compute_type)
             try:
@@ -73,6 +76,7 @@ class FasterWhisperBackend(ASRBackend):
                     device="cuda",
                     compute_type=compute_type,
                     cpu_threads=4,
+                    download_root=models_dir
                 )
                 logger.info("Faster-Whisper loaded successfully on CUDA.")
                 return
@@ -85,6 +89,7 @@ class FasterWhisperBackend(ASRBackend):
             device="cpu",
             compute_type="int8",
             cpu_threads=4,
+            download_root=models_dir
         )
         logger.info("Faster-Whisper loaded successfully on CPU.")
 
