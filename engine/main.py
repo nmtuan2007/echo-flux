@@ -135,6 +135,7 @@ class EchoFluxEngine:
         self._ws_server.on_request_models_list(self._on_request_models_list)
         self._ws_server.on_download_model(self._on_download_model)
         self._ws_server.on_delete_model(self._on_delete_model)
+        self._ws_server.on_search_hub(self._on_search_hub)
 
         logger.info("EchoFlux Engine starting...")
         await self._ws_server.start()
@@ -223,8 +224,7 @@ class EchoFluxEngine:
             })
 
         # 3. ASR Backend
-        from engine.asr.faster_whisper_backend import FasterWhisperBackend
-        self._asr_backend = FasterWhisperBackend()
+        from engine.asr import AutoModelAdapter
 
         asr_config = TranscriptionConfig(
             model_size=settings.get("asr.model_size", "small"),
@@ -232,6 +232,7 @@ class EchoFluxEngine:
             device=settings.get("asr.device", "auto"),
             compute_type=os.getenv("ECHOFLUX_COMPUTE_TYPE", "float16"),
         )
+        self._asr_backend = AutoModelAdapter.load(asr_config)
         self._asr_backend.load_model(asr_config)
 
         # 4. Translation Backend
@@ -693,7 +694,7 @@ class EchoFluxEngine:
                 "translation": models["translation"]
             }))
         except Exception as e:
-            logger.error("Error getting models list: %s", e, exc_info=True)
+            logger.error("Error getting models list: %s", e)
 
     async def _on_delete_model(self, message: dict, websocket):
         from engine.core.model_manager import delete_model
@@ -707,7 +708,7 @@ class EchoFluxEngine:
             delete_model(model_id, model_type, config)
             success = True
         except Exception as e:
-            logger.error("Error deleting model: %s", e, exc_info=True)
+            logger.error("Error deleting model: %s", e)
             error = str(e)
             
         await websocket.send(json.dumps({
@@ -721,6 +722,7 @@ class EchoFluxEngine:
     async def _on_download_model(self, message: dict, websocket):
         model_id = message.get("model_id")
         model_type = message.get("model_type")
+        hf_token = message.get("hf_token")
 
         # Must be in daemon thread
         def _download_task():
@@ -730,10 +732,10 @@ class EchoFluxEngine:
             error = None
             try:
                 config = Config()
-                download_model(model_id, model_type, config)
+                download_model(model_id, model_type, config, hf_token=hf_token)
                 success = True
             except Exception as e:
-                logger.error("Error downloading model: %s", e, exc_info=True)
+                logger.error("Error downloading model: %s", e)
                 error = str(e)
 
             result_msg = {
@@ -749,6 +751,29 @@ class EchoFluxEngine:
             )
 
         t = threading.Thread(target=_download_task, daemon=True)
+        t.start()
+
+    async def _on_search_hub(self, message: dict, websocket):
+        query = message.get("query", "")
+        task = message.get("task", "asr")
+        hf_token = message.get("hf_token")
+        
+        def _search_task():
+            from engine.core.model_manager import search_hub
+            try:
+                results = search_hub(query, task, hf_token=hf_token)
+                result_msg = {
+                    "type": "hub_search_results",
+                    "results": results
+                }
+                asyncio.run_coroutine_threadsafe(
+                    websocket.send(json.dumps(result_msg)),
+                    self._loop
+                )
+            except Exception as e:
+                logger.error("Error searching hub: %s", e)
+
+        t = threading.Thread(target=_search_task, daemon=True)
         t.start()
 
 

@@ -449,6 +449,28 @@ export function SettingsPanel() {
         )}
       </section>
 
+      {/* ── Hugging Face ─────────────────────────────────────────────── */}
+      <section className="settings-section">
+        <h3 className="settings-section-title">Hugging Face (Model Hub)</h3>
+
+        <div className="settings-field">
+          <label htmlFor="hf-token">Access Token</label>
+          <input
+            id="hf-token"
+            type="password"
+            value={config.hfToken}
+            onChange={(e) => updateConfig({ hfToken: e.target.value })}
+            placeholder="hf_..."
+            disabled={running}
+            className="settings-api-key-input"
+          />
+        </div>
+        <p className="settings-note">
+          Required for downloading restricted/gated models (e.g., Pyannote, Llama). 
+          Get your token from <strong>huggingface.co/settings/tokens</strong>.
+        </p>
+      </section>
+
       {/* ── Connection ───────────────────────────────────────────────── */}
       <section className="settings-section">
         <h3 className="settings-section-title">Connection</h3>

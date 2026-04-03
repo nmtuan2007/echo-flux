@@ -26,6 +26,7 @@ class WebSocketServer:
         self._on_request_models_list: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._on_download_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._on_delete_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
+        self._on_search_hub: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._running = False
 
     def on_start(self, handler: Callable[[dict], Awaitable[None]]):
@@ -48,6 +49,9 @@ class WebSocketServer:
 
     def on_delete_model(self, handler: Callable[[dict, object], Awaitable[None]]):
         self._on_delete_model = handler
+
+    def on_search_hub(self, handler: Callable[[dict, object], Awaitable[None]]):
+        self._on_search_hub = handler
 
     async def start(self):
         try:
@@ -172,6 +176,11 @@ class WebSocketServer:
             logger.info("Received delete_model")
             if self._on_delete_model:
                 await self._on_delete_model(message, websocket)
+
+        elif msg_type == "search_hub":
+            logger.info("Received search_hub")
+            if self._on_search_hub:
+                await self._on_search_hub(message, websocket)
 
         else:
             logger.warning("Unknown message type: %s", msg_type)

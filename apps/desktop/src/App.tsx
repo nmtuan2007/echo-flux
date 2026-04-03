@@ -14,6 +14,55 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { appWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 
+function ErrorToast() {
+  const { appError, clearAppError } = useEngineStore();
+
+  useEffect(() => {
+    if (appError) {
+      const t = setTimeout(() => clearAppError(), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [appError, clearAppError]);
+
+  if (!appError) return null;
+
+  return (
+    <div style={{
+      position: 'absolute',
+      bottom: '20px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      backgroundColor: 'var(--danger)',
+      color: '#fff',
+      padding: '12px 20px',
+      borderRadius: '8px',
+      boxShadow: '0 4px 12px rgba(220, 38, 38, 0.4)',
+      zIndex: 9999,
+      display: 'flex',
+      alignItems: 'center',
+      gap: '12px',
+      fontSize: '14px',
+      fontWeight: 500,
+      maxWidth: '80%',
+      animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
+    }}>
+      <style>{`
+        @keyframes slideUp {
+          from { opacity: 0; transform: translate(-50%, 20px); }
+          to { opacity: 1; transform: translate(-50%, 0); }
+        }
+      `}</style>
+      <span>⚠ {appError}</span>
+      <button 
+        onClick={clearAppError} 
+        style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '18px', padding: 0, opacity: 0.8 }}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function App() {
   const { activeView, connect, disconnect, theme } = useEngineStore();
   const isOverlay = appWindow.label === "overlay";
@@ -121,6 +170,7 @@ export default function App() {
         {activeView === "transcript" && <TranscriptPanel />}
         {/* Summary modal overlays any active view */}
         <SummaryModal />
+        <ErrorToast />
       </main>
       <StatusBar />
     </div>

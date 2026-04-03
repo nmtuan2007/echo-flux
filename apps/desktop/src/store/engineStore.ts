@@ -34,10 +34,18 @@ export interface AudioDeviceInfo {
   name: string;
 }
 
+export interface HubSearchResult {
+  id: string;
+  downloads: number;
+  tags: string[];
+  task: string;
+}
+
 export interface ModelItem {
   id: string;
   name: string;
   size_mb: number;
+  runtime?: string;
   is_downloaded: boolean;
 }
 
@@ -63,6 +71,7 @@ export interface EngineConfig {
   llmApiKey: string;
   llmModel: string;
   stealthMode: boolean;
+  hfToken: string;
 }
 
 export type AppView = "transcript" | "settings" | "history" | "model_manager";
@@ -87,10 +96,13 @@ interface EngineState {
   // Translation status
   activeTranslationBackend: string | null;
 
-  // Downloads
+  // Downloads & Hub
   downloading: boolean;
   downloadModel: string;
   downloadPercent: number;
+
+  hubSearchResults: HubSearchResult[];
+  searchingHub: boolean;
 
   modelsList: { asr: ModelItem[]; translation: ModelItem[] };
 
@@ -101,6 +113,9 @@ interface EngineState {
   // UI
   activeView: AppView;
   theme: "dark" | "light";
+
+  // Global Error Toast
+  appError: string | null;
 
   // Config
   config: EngineConfig;
@@ -128,10 +143,12 @@ interface EngineState {
   setTheme: (theme: "dark" | "light") => void;
   updateConfig: (partial: Partial<EngineConfig>) => void;
   requestDeviceList: () => void;
+  clearAppError: () => void;
 
   requestModelsList: () => void;
   downloadModelById: (id: string, type: "asr" | "translation") => void;
   deleteModelById: (id: string, type: "asr" | "translation") => void;
+  searchHub: (query: string, task: "asr" | "translation") => void;
 
   // LLM Actions
   requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
@@ -166,6 +183,7 @@ const DEFAULT_CONFIG: EngineConfig = {
   llmApiKey: "",
   llmModel: "openai/gpt-4o-mini",
   stealthMode: false,
+  hfToken: "",
 };
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -194,6 +212,8 @@ export const useEngineStore = create<EngineState>()(
       theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
       activeConversationId: null,
       modelsList: { asr: [], translation: [] },
+      hubSearchResults: [],
+      searchingHub: false,
       config: { ...DEFAULT_CONFIG },
       availableMics: [],
       availableSpeakers: [],
@@ -201,6 +221,7 @@ export const useEngineStore = create<EngineState>()(
       summaryText: "",
       summaryLoading: false,
       summaryVisible: false,
+      appError: null,
 
       connect: () => {
         const { config, socket } = get();
@@ -351,6 +372,10 @@ export const useEngineStore = create<EngineState>()(
         socket.send(JSON.stringify({ type: "list_devices" }));
       },
 
+      clearAppError: () => {
+        set({ appError: null });
+      },
+
       requestModelsList: () => {
         const { socket, connected } = get();
         if (!socket || !connected) return;
@@ -358,16 +383,23 @@ export const useEngineStore = create<EngineState>()(
       },
 
       downloadModelById: (id, type) => {
-        const { socket, connected, downloading } = get();
+        const { socket, connected, downloading, config } = get();
         if (!socket || !connected || downloading) return;
         set({ downloading: true, downloadModel: id, downloadPercent: 0 });
-        socket.send(JSON.stringify({ type: "download_model", model_id: id, model_type: type }));
+        socket.send(JSON.stringify({ type: "download_model", model_id: id, model_type: type, hf_token: config.hfToken }));
       },
 
       deleteModelById: (id, type) => {
         const { socket, connected } = get();
         if (!socket || !connected) return;
         socket.send(JSON.stringify({ type: "delete_model", model_id: id, model_type: type }));
+      },
+
+      searchHub: (query, task) => {
+        const { socket, connected, config } = get();
+        if (!socket || !connected) return;
+        set({ searchingHub: true, hubSearchResults: [] });
+        socket.send(JSON.stringify({ type: "search_hub", query, task, hf_token: config.hfToken }));
       },
 
       requestSuggestion: async (entryId, targetText, context) => {
@@ -652,12 +684,21 @@ function handleMessage(
       break;
     }
 
+    case "hub_search_results": {
+      set({
+        hubSearchResults: (message.results as HubSearchResult[]) ?? [],
+        searchingHub: false
+      });
+      break;
+    }
+
     case "model_action_result": {
       set({ downloading: false, downloadModel: "", downloadPercent: 0 });
       if (message.success) {
         get().requestModelsList();
       } else {
         console.error("Model action failed:", message.error);
+        set({ appError: `Model Error: ${message.error}` });
       }
       break;
     }
@@ -693,7 +734,7 @@ function handleMessage(
 
     case "error":
       console.error("Engine error:", message.message);
-      set({ isToggling: false });
+      set({ isToggling: false, appError: (message.message as string) });
       break;
 
     case "devices_list":
