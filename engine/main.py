@@ -8,6 +8,7 @@ import time
 from queue import Queue, Empty, Full
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from collections import deque
 
 from dotenv import load_dotenv
 
@@ -412,6 +413,7 @@ class EchoFluxEngine:
         was_speech = False
         silence_start_time = None
         has_pending_audio = False
+        pre_speech_buffer = deque(maxlen=3)  # Keep up to ~400-600ms of audio history
 
         try:
             while self._running:
@@ -440,6 +442,10 @@ class EchoFluxEngine:
                 if is_speech:
                     if not was_speech:
                         logger.info("Process [%s]: SPEECH STARTED", stream_id)
+                        if pre_speech_buffer:
+                            historical_audio = b"".join(pre_speech_buffer)
+                            combined_audio = historical_audio + combined_audio
+                            pre_speech_buffer.clear()
                     silence_start_time = None
                     has_pending_audio = True
                     was_speech = True
@@ -449,6 +455,7 @@ class EchoFluxEngine:
                         logger.debug("Process [%s]: Received ASR Result -> '%s' (is_final=%s)", stream_id, result.text, result.is_final)
                         self._enqueue_asr_result(result)
                 else:
+                    pre_speech_buffer.append(combined_audio)
                     if was_speech and silence_start_time is None:
                         logger.info("Process [%s]: SPEECH ENDED. Entering silence countdown.", stream_id)
                         silence_start_time = time.time()
