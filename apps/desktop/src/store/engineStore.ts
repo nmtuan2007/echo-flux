@@ -581,7 +581,6 @@ function handleMessage(
     case "final": {
       const finalText = (message.text as string) || "";
       const streamId = (message.source as string) || "default";
-      if (!finalText.trim()) break;
 
       const update: Partial<EngineState> = {};
       if (message.translation_backend) {
@@ -591,6 +590,13 @@ function handleMessage(
       set((state) => {
         const newPartials = { ...state.partials };
         delete newPartials[streamId];
+
+        if (!finalText.trim()) {
+          return {
+            ...update,
+            partials: newPartials,
+          };
+        }
 
         return {
           ...update,

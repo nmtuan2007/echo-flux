@@ -181,13 +181,8 @@ class FasterWhisperBackend(ASRBackend):
                 stream["audio_buffer"] = np.array([], dtype=np.float32)
             return None
 
-        # Inter-segment repetition check (stuck buffer loop)
+        # Record the last final text just in case we need it later, but DO NOT drop it simply because it matches.
         clean_text = raw_text.strip()
-        if clean_text == stream["last_final_text"]:
-             logger.debug("ASR [%s]: Dropped due to repetition matching last text: '%s'", stream_id, clean_text)
-             if is_final:
-                stream["audio_buffer"] = np.array([], dtype=np.float32)
-             return None
 
         if is_final:
             stream["last_final_text"] = clean_text
@@ -207,16 +202,19 @@ class FasterWhisperBackend(ASRBackend):
         )
 
     def _validate_segment(self, segment) -> bool:
+        # Relaxed Validation: VAD already ensures speech is present.
+        # We only drop absolute garbage that the hallucination filter might miss.
+        
         # 1. No Speech Probability
-        if segment.no_speech_prob > 0.6:
+        if segment.no_speech_prob > 0.95:
             return False
 
         # 2. Average Log Probability (Confidence)
-        if segment.avg_logprob < -1.0:
+        if segment.avg_logprob < -2.5:
             return False
 
         # 3. Compression Ratio (Internal Whisper Metric)
-        if segment.compression_ratio > 2.4:
+        if segment.compression_ratio > 3.2:
             return False
 
         return True

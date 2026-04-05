@@ -38,12 +38,25 @@ class AutoModelAdapter:
             local_dir = legacy_path
             
         # 2. Read runtime from manifest if available
-        if local_dir and (local_dir / "manifest.json").exists():
+        manifest_path = None
+        if local_dir:
+            if (local_dir / "manifest.json").exists():
+                manifest_path = local_dir / "manifest.json"
+            else:
+                # Check snapshots directory for Hugging Face cache structure
+                snapshots_dir = local_dir / "snapshots"
+                if snapshots_dir.exists() and snapshots_dir.is_dir():
+                    for snap in snapshots_dir.iterdir():
+                        if (snap / "manifest.json").exists():
+                            manifest_path = snap / "manifest.json"
+                            break
+
+        if manifest_path:
             try:
-                with open(local_dir / "manifest.json", "r", encoding="utf-8") as f:
+                with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
                     runtime = manifest.get("runtime", "ctranslate2")
-                    config.model_path = manifest.get("local_path", str(local_dir))
+                    config.model_path = manifest.get("local_path", str(manifest_path.parent))
             except Exception as e:
                 logger.warning(f"Failed to read manifest for {model_id}, defaulting to {runtime}. Error: {e}")
 

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from engine.core.config import TranscriptionConfig
 from engine.core.progress import install_progress_hijack, set_progress_callback
 from engine.server.websocket_server import WebSocketServer
+from engine.asr.base import TranscriptResult
 
 logger = logging.getLogger("echoflux.engine")
 
@@ -357,20 +358,30 @@ class EchoFluxEngine:
         if self._translation_thread:
             self._translation_thread.join(timeout=2.0)
 
+        if self._asr_backend:
+            for stream_id in self._inputs.keys():
+                result = self._asr_backend.finalize_current(stream_id)
+                if result:
+                    self._enqueue_asr_result(result)
+                else:
+                    self._enqueue_asr_result(TranscriptResult(
+                        text="",
+                        is_final=True,
+                        language="auto",
+                        stream_id=stream_id
+                    ))
+            self._asr_backend.unload_model()
+            self._asr_backend = None
+
+        # Give the broadcast loop a tiny moment to flush the final results
+        await asyncio.sleep(0.1)
+
         if self._result_task:
             self._result_task.cancel()
             try:
                 await self._result_task
             except asyncio.CancelledError:
                 pass
-
-        if self._asr_backend:
-            for stream_id in self._inputs.keys():
-                result = self._asr_backend.finalize_current(stream_id)
-                if result:
-                    self._enqueue_asr_result(result)
-            self._asr_backend.unload_model()
-            self._asr_backend = None
 
         if self._translation_backend:
             self._translation_backend.unload_model()
@@ -519,6 +530,13 @@ class EchoFluxEngine:
         result = self._asr_backend.finalize_current(stream_id)
         if result:
             self._enqueue_asr_result(result)
+        else:
+            self._enqueue_asr_result(TranscriptResult(
+                text="",
+                is_final=True,
+                language="auto",
+                stream_id=stream_id
+            ))
 
     def _enqueue_asr_result(self, asr_result):
         """
@@ -575,8 +593,8 @@ class EchoFluxEngine:
                 count = 0
                 while not self._result_queue.empty() and count < 10:
                     msg_dict = self._result_queue.get_nowait()
-                    if self._client:
-                        await self._client.send(json.dumps(msg_dict))
+                    if self._ws_server:
+                        await self._ws_server.broadcast(msg_dict)
                     count += 1
 
                 if count == 0:
@@ -786,8 +804,15 @@ class EchoFluxEngine:
 
 def run_engine(config_path=None):
     _load_dotenv()
-    _setup_cuda_paths()
     _setup_logging()
+    
+    # Eagerly initialize PyTorch cuDNN to prevent DLL collision with CTranslate2 later on Windows
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.nn.functional.conv2d(torch.zeros(1, 1, 1, 1, device="cuda"), torch.zeros(1, 1, 1, 1, device="cuda"))
+    except Exception:
+        pass
     
     install_progress_hijack()
 

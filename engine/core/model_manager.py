@@ -230,7 +230,7 @@ def download_model(model_id: str, model_type: str, config: Config, hf_token: str
         # Ignore heavy PyTorch/safetensors files if CT2 format is available
         ignore_patterns.extend(["*.safetensors", "pytorch_model.bin", "*.pt", "model.safetensors"])
     elif runtime == "transformers":
-        ignore_patterns.extend(["*.onnx", "onnx/*", "*.bin"])
+        ignore_patterns.extend(["*.onnx", "onnx/*", "model.bin"])
     elif runtime == "onnx":
         ignore_patterns.extend(["*.safetensors", "pytorch_model.bin", "*.pt"])
     
