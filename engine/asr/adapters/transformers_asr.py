@@ -81,7 +81,7 @@ class TransformersASRAdapter(ASRBackend):
     def _get_stream(self, stream_id: str) -> dict:
         if stream_id not in self._streams:
             self._streams[stream_id] = {
-                "audio_buffer": np.array([], dtype=np.float32),
+                "audio_buffer": bytearray(),
                 "last_inferred_len": 0
             }
         return self._streams[stream_id]
@@ -91,19 +91,22 @@ class TransformersASRAdapter(ASRBackend):
             return None
 
         stream = self._get_stream(stream_id)
-        new_samples = self._bytes_to_float32(audio_chunk)
-        stream["audio_buffer"] = np.concatenate((stream["audio_buffer"], new_samples))
+        stream["audio_buffer"].extend(audio_chunk)
 
         max_buffer_duration = 5.0
         max_samples = int(max_buffer_duration * 16000)
+        max_bytes = max_samples * 2
 
-        if len(stream["audio_buffer"]) > max_samples:
+        if len(stream["audio_buffer"]) > max_bytes:
             logger.debug(f"ASR [{stream_id}]: Buffer exceeded max_samples, forcing finalize.")
             return self.finalize_current(stream_id)
 
-        if len(stream["audio_buffer"]) - stream.get("last_inferred_len", 0) >= 16000:
-            audio_data = stream["audio_buffer"]
-            stream["last_inferred_len"] = len(audio_data)
+        current_samples = len(stream["audio_buffer"]) // 2
+        if current_samples - stream.get("last_inferred_len", 0) >= 16000:
+            stream["last_inferred_len"] = current_samples
+            
+            audio_int16 = np.frombuffer(stream["audio_buffer"], dtype=np.int16)
+            audio_data = audio_int16.astype(np.float32) / 32768.0
             
             logger.info(f"[Partial Inference] Triggering on {len(audio_data)} samples. "
                          f"Audio max={np.max(audio_data):.4f}, min={np.min(audio_data):.4f}, mean={np.mean(audio_data):.4f}")
@@ -166,7 +169,9 @@ class TransformersASRAdapter(ASRBackend):
         if len(stream["audio_buffer"]) == 0:
             return None
 
-        audio_data = stream["audio_buffer"]
+        audio_int16 = np.frombuffer(stream["audio_buffer"], dtype=np.int16)
+        audio_data = audio_int16.astype(np.float32) / 32768.0
+        
         logger.info(f"[Final Inference] Finalizing on {len(audio_data)/16000:.2f}s audio. "
                      f"Audio max={np.max(audio_data):.4f}, min={np.min(audio_data):.4f}, mean={np.mean(audio_data):.4f}")
         
@@ -211,7 +216,7 @@ class TransformersASRAdapter(ASRBackend):
             logger.error(f"Transformers pipeline error: {e}")
             text = ""
             
-        stream["audio_buffer"] = np.array([], dtype=np.float32)
+        stream["audio_buffer"] = bytearray()
         stream["last_inferred_len"] = 0
 
         if text:

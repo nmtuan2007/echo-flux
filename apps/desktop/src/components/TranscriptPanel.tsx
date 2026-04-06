@@ -1,4 +1,5 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { TranscriptEntry, SuggestionOption, useEngineStore } from "../store/engineStore";
 
 type AudioSource = TranscriptEntry["source"];
@@ -52,7 +53,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function SuggestionCards({ options, error }: { options?: SuggestionOption[]; error?: string }) {
+const SuggestionCards = React.memo(({ options, error }: { options?: SuggestionOption[]; error?: string }) => {
   if (error) {
     return <div className="suggestion-error">⚠ {error}</div>;
   }
@@ -74,17 +75,19 @@ function SuggestionCards({ options, error }: { options?: SuggestionOption[]; err
       })}
     </div>
   );
-}
+});
 
-function FinalEntry({ entry, index }: {
+const FinalEntry = React.memo(({ entry, index }: {
   entry: TranscriptEntry;
   index: number;
-}) {
-  const { config, suggestionLoading, requestSuggestion } = useEngineStore();
+}) => {
+  const translationEnabled = useEngineStore((state) => state.config.translationEnabled);
+  const llmEnabled = useEngineStore((state) => state.config.llmEnabled);
+  const isLoading = useEngineStore((state) => state.suggestionLoading[entry.id] ?? false);
+  const requestSuggestion = useEngineStore((state) => state.requestSuggestion);
   // Local UI state — expand/collapse, not persisted
   const [showSuggestions, setShowSuggestions] = useState(false);
 
-  const isLoading = suggestionLoading[entry.id] ?? false;
   const hasSuggestion = !!entry.suggestions;
 
   const handleSuggest = (e: React.MouseEvent) => {
@@ -113,13 +116,13 @@ function FinalEntry({ entry, index }: {
         </div>
       )}
       <div className="transcript-text">{entry.text}</div>
-      {config.translationEnabled && entry.translation && (
+      {translationEnabled && entry.translation && (
         <div className="transcript-translation">{entry.translation}</div>
       )}
       <span className="transcript-time">{formatTime(entry.timestamp)}</span>
 
       {/* AI Suggestion area */}
-      {config.llmEnabled && (
+      {llmEnabled && (
         <div className="suggest-action-row">
           {/* Loading state */}
           {isLoading && (
@@ -168,7 +171,12 @@ function FinalEntry({ entry, index }: {
       )}
     </div>
   );
-}
+}, (prev: { index: number; entry: TranscriptEntry }, next: { index: number; entry: TranscriptEntry }) => {
+  return prev.index === next.index &&
+         prev.entry.text === next.entry.text &&
+         prev.entry.translation === next.entry.translation &&
+         prev.entry.suggestions === next.entry.suggestions;
+});
 
 export function TranscriptPanel() {
   const { entries, partials, running, downloading, downloadModel, downloadPercent } = useEngineStore();
@@ -181,11 +189,18 @@ export function TranscriptPanel() {
     isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }, []);
 
+  const rowVirtualizer = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 150, // rough estimate in pixels per transcript card
+    overscan: 5, // pre-render 5 items before/after to avoid flicker
+  });
+
   useEffect(() => {
-    if (isNearBottom.current && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (isNearBottom.current && scrollRef.current && entries.length > 0) {
+       rowVirtualizer.scrollToIndex(entries.length - 1, { align: "end" });
     }
-  }, [entries, partials]);
+  }, [entries.length, partials, rowVirtualizer]);
 
   const activePartials = Object.values(partials);
   const hasContent = entries.length > 0 || activePartials.length > 0;
@@ -214,9 +229,35 @@ export function TranscriptPanel() {
         </div>
       )}
 
-      {entries.map((entry, index) => (
-        <FinalEntry key={entry.id} entry={entry} index={index} />
-      ))}
+      {entries.length > 0 && (
+        <div
+          style={{
+            height: `${rowVirtualizer.getTotalSize()}px`,
+            width: "100%",
+            position: "relative",
+          }}
+        >
+          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+            const entry = entries[virtualRow.index];
+            return (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={rowVirtualizer.measureElement}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
+              >
+                <FinalEntry entry={entry} index={virtualRow.index} />
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {activePartials.map((partial, idx) => (
         <div

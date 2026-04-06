@@ -30,7 +30,7 @@ class VAD:
         self._sample_rate = config.get("sample_rate", 16000)
 
         # Buffer for accumulating samples to match model window size
-        self._buffer = np.array([], dtype=np.float32)
+        self._buffer = bytearray()
         
         # ONNX Runtime session
         self._session: Optional[ort.InferenceSession] = None
@@ -92,18 +92,20 @@ class VAD:
         if not self._enabled or self._session is None:
             return True
 
-        # Convert bytes to float32 numpy array
-        audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
-        audio_float32 = audio_int16.astype(np.float32) / 32768.0
-
-        # Append to internal buffer
-        self._buffer = np.concatenate((self._buffer, audio_float32))
+        self._buffer.extend(audio_chunk)
 
         has_speech_in_chunk = False
+        
+        # WINDOW_SIZE_SAMPLES * 2 because int16 is 2 bytes
+        window_bytes = WINDOW_SIZE_SAMPLES * 2
 
-        while len(self._buffer) >= WINDOW_SIZE_SAMPLES:
-            window = self._buffer[:WINDOW_SIZE_SAMPLES]
-            self._buffer = self._buffer[WINDOW_SIZE_SAMPLES:]
+        while len(self._buffer) >= window_bytes:
+            window_data = self._buffer[:window_bytes]
+            del self._buffer[:window_bytes]
+
+            # Convert bytes to float32 numpy array
+            audio_int16 = np.frombuffer(window_data, dtype=np.int16)
+            window = audio_int16.astype(np.float32) / 32768.0
 
             prob = self._inference(window)
             
@@ -131,5 +133,5 @@ class VAD:
     def reset(self):
         self._h = np.zeros((2, 1, 64), dtype=np.float32)
         self._c = np.zeros((2, 1, 64), dtype=np.float32)
-        self._buffer = np.array([], dtype=np.float32)
+        self._buffer = bytearray()
         self._is_speech = False

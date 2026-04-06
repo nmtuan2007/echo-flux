@@ -1,538 +1,66 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
-export interface SuggestionOption {
-  strategy: string;
-  text: string;
+import { ConfigSlice, createConfigSlice } from "./slices/configSlice";
+import { TranscriptSlice, createTranscriptSlice } from "./slices/transcriptSlice";
+import { UISlice, createUISlice } from "./slices/uiSlice";
+import { WSSlice, createWSSlice } from "./slices/wsSlice";
+import { TranscriptEntry, SuggestionOption, SuggestionResult, AudioDeviceInfo, ModelItem, HubSearchResult } from "./types";
+import { Store } from "tauri-plugin-store-api";
+import { StateStorage } from "zustand/middleware";
+
+export * from "./types";
+
+const isTauri = typeof window !== "undefined" && window.__TAURI__;
+let tauriStore: Store | null = null;
+if (isTauri) {
+  tauriStore = new Store(".echoflux-settings.dat");
 }
 
-export interface SuggestionResult {
-  options?: SuggestionOption[];
-  error?: string;
-}
-
-export interface TranscriptEntry {
-  id: string;
-  text: string;
-  translation: string | null;
-  isFinal: boolean;
-  timestamp: number;
-  source?: "mic" | "system" | "both" | null;
-  suggestions?: SuggestionResult; // persisted with the entry
-}
-
-export interface Conversation {
-  id: string;
-  name: string;
-  date: number;
-  entries: TranscriptEntry[];
-  summary?: string; // persisted meeting summary
-}
-
-export interface AudioDeviceInfo {
-  id: string;
-  name: string;
-}
-
-export interface HubSearchResult {
-  id: string;
-  downloads: number;
-  tags: string[];
-  task: string;
-}
-
-export interface ModelItem {
-  id: string;
-  name: string;
-  size_mb: number;
-  runtime?: string;
-  is_downloaded: boolean;
-}
-
-export interface EngineConfig {
-  host: string;
-  port: number;
-  modelSize: string;
-  language: string;
-  device: string;
-  translationEnabled: boolean;
-  translationBackend: "online" | "marian";
-  translationModel: string;
-  sourceLang: string;
-  targetLang: string;
-  vadEnabled: boolean;
-  // Dual audio capture
-  audioSource: "microphone" | "system" | "both";
-  micDeviceId: string;
-  speakerDeviceId: string;
-  // LLM / AI Assistant
-  llmEnabled: boolean;
-  llmProviderUrl: string;
-  llmApiKey: string;
-  llmModel: string;
-  stealthMode: boolean;
-  hfToken: string;
-}
-
-export type AppView = "transcript" | "settings" | "history" | "model_manager";
-
-interface EngineState {
-  // Connection
-  connected: boolean;
-  socket: WebSocket | null;
-
-  // Pipeline
-  running: boolean;
-  isToggling: boolean;
-
-  // Transcript
-  entries: TranscriptEntry[];
-  partials: Record<string, {
-    text: string;
-    translation: string | null;
-    source: "mic" | "system" | "both" | null;
-  }>;
-
-  // Translation status
-  activeTranslationBackend: string | null;
-
-  // Downloads & Hub
-  downloading: boolean;
-  downloadModel: string;
-  downloadPercent: number;
-
-  hubSearchResults: HubSearchResult[];
-  searchingHub: boolean;
-
-  modelsList: { asr: ModelItem[]; translation: ModelItem[] };
-
-  // History
-  history: Conversation[];
-  activeConversationId: string | null;
-
-  // UI
-  activeView: AppView;
-  theme: "dark" | "light";
-
-  // Global Error Toast
-  appError: string | null;
-
-  // Config
-  config: EngineConfig;
-
-  // Audio device lists
-  availableMics: AudioDeviceInfo[];
-  availableSpeakers: AudioDeviceInfo[];
-
-  // LLM — suggestion loading (ephemeral, not persisted)
-  suggestionLoading: Record<string, boolean>;
-
-  // LLM — summary (summaryText is the live buffer / current session summary)
-  summaryText: string;
-  summaryLoading: boolean;
-  summaryVisible: boolean;
-
-  // Actions
-  connect: () => void;
-  disconnect: () => void;
-  startPipeline: () => void;
-  stopPipeline: () => void;
-  togglePipeline: () => void;
-  clearTranscript: () => void;
-  setActiveView: (view: AppView) => void;
-  setTheme: (theme: "dark" | "light") => void;
-  updateConfig: (partial: Partial<EngineConfig>) => void;
-  requestDeviceList: () => void;
-  clearAppError: () => void;
-
-  requestModelsList: () => void;
-  downloadModelById: (id: string, type: "asr" | "translation") => void;
-  deleteModelById: (id: string, type: "asr" | "translation") => void;
-  searchHub: (query: string, task: "asr" | "translation") => void;
-
-  // LLM Actions
-  requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
-  requestSummary: () => void;
-  openSummary: () => void;
-  closeSummary: () => void;
-
-  // History Actions
-  renameConversation: (id: string, name: string) => void;
-  deleteConversation: (id: string) => void;
-  saveCurrentSession: () => void;
-  loadConversation: (id: string) => void;
-}
-
-const DEFAULT_CONFIG: EngineConfig = {
-  host: "127.0.0.1",
-  port: 8765,
-  modelSize: "small",
-  language: "en",
-  device: "auto",
-  translationEnabled: true,
-  translationBackend: "online",
-  translationModel: "",
-  sourceLang: "en",
-  targetLang: "vi",
-  vadEnabled: true,
-  audioSource: "microphone",
-  micDeviceId: "",
-  speakerDeviceId: "",
-  llmEnabled: false,
-  llmProviderUrl: "https://openrouter.ai/api/v1",
-  llmApiKey: "",
-  llmModel: "openai/gpt-4o-mini",
-  stealthMode: false,
-  hfToken: "",
+const customStorage: StateStorage = {
+  getItem: async (name: string) => {
+    if (tauriStore) {
+      return (await tauriStore.get<string>(name)) || null;
+    }
+    return localStorage.getItem(name);
+  },
+  setItem: async (name: string, value: string) => {
+    if (tauriStore) {
+      await tauriStore.set(name, value);
+      await tauriStore.save();
+    } else {
+      localStorage.setItem(name, value);
+    }
+  },
+  removeItem: async (name: string) => {
+    if (tauriStore) {
+      await tauriStore.delete(name);
+      await tauriStore.save();
+    } else {
+      localStorage.removeItem(name);
+    }
+  },
 };
 
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let idCounter = 0;
-
 function nextId(): string {
   idCounter += 1;
   return `t-${Date.now()}-${idCounter}`;
 }
 
-export const useEngineStore = create<EngineState>()(
+export type StoreState = ConfigSlice & TranscriptSlice & UISlice & WSSlice;
+
+export const useEngineStore = create<StoreState>()(
   persist(
-    (set, get) => ({
-      connected: false,
-      socket: null,
-      running: false,
-      isToggling: false,
-      entries: [],
-      partials: {},
-      activeTranslationBackend: null,
-      downloading: false,
-      downloadModel: "",
-      downloadPercent: 0,
-      history: [],
-      activeView: "transcript",
-      theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
-      activeConversationId: null,
-      modelsList: { asr: [], translation: [] },
-      hubSearchResults: [],
-      searchingHub: false,
-      config: { ...DEFAULT_CONFIG },
-      availableMics: [],
-      availableSpeakers: [],
-      suggestionLoading: {},
-      summaryText: "",
-      summaryLoading: false,
-      summaryVisible: false,
-      appError: null,
-
-      connect: () => {
-        const { config, socket } = get();
-        if (socket && socket.readyState === WebSocket.OPEN) return;
-
-        const url = `ws://${config.host}:${config.port}`;
-        const ws = new WebSocket(url);
-
-        ws.onopen = () => {
-          set({ connected: true, socket: ws });
-          if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-          }
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
-            handleMessage(message, set, get);
-          } catch {
-            // Ignore malformed messages
-          }
-        };
-
-        ws.onclose = () => {
-          set({
-            connected: false,
-            socket: null,
-            running: false,
-            isToggling: false,
-            activeTranslationBackend: null,
-            downloading: false,
-            downloadModel: "",
-            downloadPercent: 0,
-            modelsList: { asr: [], translation: [] },
-          });
-          reconnectTimer = setTimeout(() => {
-            get().connect();
-          }, 3000);
-        };
-
-        ws.onerror = () => {
-          ws.close();
-        };
-
-        set({ socket: ws });
-      },
-
-      disconnect: () => {
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        const { socket } = get();
-        if (socket) {
-          socket.close();
-        }
-        set({
-          connected: false,
-          socket: null,
-          running: false,
-          isToggling: false,
-          activeTranslationBackend: null,
-          downloading: false,
-          downloadModel: "",
-          downloadPercent: 0,
-          modelsList: { asr: [], translation: [] },
-        });
-      },
-
-      startPipeline: () => {
-        const { socket, connected, config } = get();
-        if (!socket || !connected) return;
-
-        set({ isToggling: true, activeView: "transcript" });
-
-        socket.send(
-          JSON.stringify({
-            type: "start",
-            config: {
-              "asr.model_size": config.modelSize,
-              "asr.language": config.language,
-              "asr.device": config.device,
-              "translation.enabled": config.translationEnabled,
-              "translation.backend": config.translationBackend,
-              "translation.model": config.translationModel || undefined,
-              "translation.source_lang": config.sourceLang,
-              "translation.target_lang": config.targetLang,
-              "vad.enabled": config.vadEnabled,
-              "audio.source": config.audioSource,
-              "audio.mic_device_id": config.micDeviceId || undefined,
-              "audio.speaker_device_id": config.speakerDeviceId || undefined,
-              "llm.enabled": config.llmEnabled,
-              "llm.provider_url": config.llmProviderUrl || undefined,
-              "llm.api_key": config.llmApiKey || undefined,
-              "llm.model": config.llmModel || undefined,
-            },
-          }),
-        );
-      },
-
-      stopPipeline: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-
-        set({ isToggling: true });
-        socket.send(JSON.stringify({ type: "stop" }));
-      },
-
-      togglePipeline: () => {
-        const { running } = get();
-        if (running) {
-          get().stopPipeline();
-        } else {
-          get().startPipeline();
-        }
-      },
-
-      clearTranscript: () => {
-        set({
-          entries: [],
-          partials: {},
-          suggestionLoading: {},
-          summaryText: "",
-          summaryVisible: false,
-          activeConversationId: null,
-        });
-      },
-
-      setActiveView: (view) => {
-        set({ activeView: view });
-      },
-
-      setTheme: (theme) => {
-        set({ theme });
-      },
-
-      updateConfig: (partial) => {
-        set((state) => ({
-          config: { ...state.config, ...partial },
-        }));
-      },
-
-      requestDeviceList: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "list_devices" }));
-      },
-
-      clearAppError: () => {
-        set({ appError: null });
-      },
-
-      requestModelsList: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "request_models_list" }));
-      },
-
-      downloadModelById: (id, type) => {
-        const { socket, connected, downloading, config } = get();
-        if (!socket || !connected || downloading) return;
-        set({ downloading: true, downloadModel: id, downloadPercent: 0 });
-        socket.send(JSON.stringify({ type: "download_model", model_id: id, model_type: type, hf_token: config.hfToken }));
-      },
-
-      deleteModelById: (id, type) => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "delete_model", model_id: id, model_type: type }));
-      },
-
-      searchHub: (query, task) => {
-        const { socket, connected, config } = get();
-        if (!socket || !connected) return;
-        set({ searchingHub: true, hubSearchResults: [] });
-        socket.send(JSON.stringify({ type: "search_hub", query, task, hf_token: config.hfToken }));
-      },
-
-      requestSuggestion: async (entryId, targetText, context) => {
-        const { socket, connected, config } = get();
-
-        // If we don't have a direct socket connection (like in the overlay window),
-        // we relay the request to the main window via Tauri events.
-        if (!socket || !connected) {
-          if (typeof window !== "undefined" && window.__TAURI__) {
-             const { emit } = await import("@tauri-apps/api/event");
-             await emit("relay_request_suggestion", { entryId, targetText, context });
-          }
-          return;
-        }
-
-        set((state) => ({
-          suggestionLoading: { ...state.suggestionLoading, [entryId]: true },
-        }));
-
-        socket.send(JSON.stringify({
-          type: "request_suggestion",
-          entry_id: entryId,
-          target_text: targetText,
-          context,
-          llm_config: {
-            api_key: config.llmApiKey,
-            model: config.llmModel,
-            provider_url: config.llmProviderUrl || undefined,
-          },
-        }));
-      },
-
-      requestSummary: () => {
-        const { socket, connected, entries, config } = get();
-        if (!socket || !connected || entries.length === 0) return;
-
-        set({ summaryText: "", summaryLoading: true, summaryVisible: true });
-
-        socket.send(JSON.stringify({
-          type: "request_summary",
-          entries: entries.map((e) => ({ text: e.text, source: e.source ?? "speaker" })),
-          llm_config: {
-            api_key: config.llmApiKey,
-            model: config.llmModel,
-            provider_url: config.llmProviderUrl || undefined,
-          },
-        }));
-      },
-
-      openSummary: () => {
-        set({ summaryVisible: true });
-      },
-
-      closeSummary: () => {
-        set({ summaryVisible: false, summaryLoading: false });
-      },
-
-      saveCurrentSession: () => {
-        const { entries, summaryText, activeConversationId } = get();
-        if (entries.length === 0) return;
-
-        if (activeConversationId) {
-          set((state) => ({
-            history: state.history.map((c) =>
-              c.id === activeConversationId
-                ? { ...c, entries: [...entries], summary: summaryText || c.summary }
-                : c
-            ),
-          }));
-          return;
-        }
-
-        const timestamp = Date.now();
-        const dateStr = new Date(timestamp).toLocaleString();
-
-        let name = "Session " + dateStr;
-        if (entries[0] && entries[0].text) {
-          name = entries[0].text.slice(0, 30) + (entries[0].text.length > 30 ? "..." : "");
-        }
-
-        const newId = `conv-${timestamp}`;
-        const conversation: Conversation = {
-          id: newId,
-          name,
-          date: timestamp,
-          entries: [...entries],
-          summary: summaryText || undefined,
-        };
-
-        set((state) => ({
-          activeConversationId: newId,
-          history: [conversation, ...state.history],
-        }));
-      },
-
-      renameConversation: (id, name) => {
-        set((state) => ({
-          history: state.history.map((c) => (c.id === id ? { ...c, name } : c)),
-        }));
-      },
-
-      deleteConversation: (id) => {
-        set((state) => {
-          const newHistory = state.history.filter((c) => c.id !== id);
-          return {
-            history: newHistory,
-            activeConversationId: state.activeConversationId === id ? null : state.activeConversationId,
-          };
-        });
-      },
-
-      loadConversation: (id) => {
-        const { history, running } = get();
-        if (running) return;
-
-        const target = history.find((c) => c.id === id);
-        if (target) {
-          set({
-            entries: [...target.entries],
-            activeView: "transcript",
-            partials: {},
-            suggestionLoading: {},
-            summaryText: target.summary || "",
-            summaryVisible: false,
-            summaryLoading: false,
-            activeConversationId: id,
-          });
-        }
-      },
+    (...a) => ({
+      ...createConfigSlice(...a),
+      ...createTranscriptSlice(...a),
+      ...createUISlice(...a),
+      ...createWSSlice(handleMessage)(...a),
     }),
     {
       name: "echoflux-storage",
-      storage: createJSONStorage(() => localStorage),
+      storage: createJSONStorage(() => customStorage),
       partialize: (state) => ({
         config: state.config,
         history: state.history,
@@ -544,8 +72,8 @@ export const useEngineStore = create<EngineState>()(
 
 function handleMessage(
   message: Record<string, unknown>,
-  set: (partial: Partial<EngineState> | ((state: EngineState) => Partial<EngineState>)) => void,
-  get: () => EngineState,
+  set: (partial: Partial<StoreState> | ((state: StoreState) => Partial<StoreState>)) => void,
+  get: () => StoreState,
 ) {
   switch (message.type) {
     case "partial": {
@@ -553,7 +81,7 @@ function handleMessage(
       const streamId = (message.source as string) || "default";
       const currentPartial = get().partials[streamId]?.text || "";
 
-      const extra: Partial<EngineState> = {};
+      const extra: Partial<StoreState> = {};
       if (message.translation_backend) {
         extra.activeTranslationBackend = message.translation_backend as string;
       }
@@ -582,7 +110,7 @@ function handleMessage(
       const finalText = (message.text as string) || "";
       const streamId = (message.source as string) || "default";
 
-      const update: Partial<EngineState> = {};
+      const update: Partial<StoreState> = {};
       if (message.translation_backend) {
         update.activeTranslationBackend = message.translation_backend as string;
       }

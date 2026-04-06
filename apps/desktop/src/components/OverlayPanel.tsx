@@ -4,6 +4,8 @@ import { useEngineStore } from "../store/engineStore";
 import "../styles/global.css";
 import { TranscriptPanel } from "./TranscriptPanel";
 
+let shortcutURegistered = false;
+
 export const OverlayPanel: React.FC = () => {
   const { config } = useEngineStore();
   const [isLocked, setIsLocked] = useState(false);
@@ -24,6 +26,8 @@ export const OverlayPanel: React.FC = () => {
     let registered = false;
 
     const setupUnlock = async () => {
+      if (shortcutURegistered) return;
+      shortcutURegistered = true;
       try {
         const { register, unregister, isRegistered } = await import("@tauri-apps/api/globalShortcut");
         // Unregister first to avoid "already registered" error on hot-reload / re-mount
@@ -43,11 +47,7 @@ export const OverlayPanel: React.FC = () => {
     setupUnlock();
 
     return () => {
-      if (registered) {
-        import("@tauri-apps/api/globalShortcut").then(({ unregister }) => {
-          unregister(SHORTCUT).catch(() => {});
-        });
-      }
+      // Do not unregister to prevent StrictMode race conditions!
     };
   }, []);
 

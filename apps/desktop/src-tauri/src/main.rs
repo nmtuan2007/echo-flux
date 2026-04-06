@@ -105,7 +105,17 @@ fn set_ignore_cursor_events(window: tauri::Window, ignore: bool) -> Result<(), S
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let backtrace = std::backtrace::Backtrace::capture();
+        let msg = format!("Panic occurred: {}\nBacktrace:\n{:#?}", info, backtrace);
+        // Write to temp dir
+        let mut path = std::env::temp_dir();
+        path.push("echoflux_rust_crash.log");
+        std::fs::write(&path, msg).unwrap_or(());
+    }));
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             get_engine_url,
             create_overlay_window,
@@ -115,6 +125,12 @@ fn main() {
             set_stealth_mode,
             set_ignore_cursor_events,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app_handle, event| match event {
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                api.prevent_exit();
+            }
+            _ => {}
+        });
 }

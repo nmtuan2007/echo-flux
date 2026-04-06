@@ -13,9 +13,10 @@ class WebSocketServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 8765):
         self._host = host
         self._port = port
-        self._server = None
         self._clients = set()
+        self._authenticated_clients = set()
         self._running = False
+        self.is_capturing = False
         self.is_capturing = False
         self._cached_devices = None
 
@@ -75,6 +76,7 @@ class WebSocketServer:
             except Exception:
                 pass
         self._clients.clear()
+        self._authenticated_clients.clear()
 
         if self._server:
             self._server.close()
@@ -91,6 +93,8 @@ class WebSocketServer:
         disconnected = set()
 
         for client in self._clients:
+            if client not in self._authenticated_clients:
+                continue
             try:
                 await client.send(payload)
             except Exception:
@@ -110,6 +114,7 @@ class WebSocketServer:
             logger.debug("Client disconnected: %s (%s)", remote, e)
         finally:
             self._clients.discard(websocket)
+            self._authenticated_clients.discard(websocket)
             logger.info("Client removed: %s", remote)
 
     async def _process_message(self, raw: str, websocket):
@@ -124,6 +129,36 @@ class WebSocketServer:
             return
 
         msg_type = message.get("type")
+
+        if websocket not in self._authenticated_clients:
+            if msg_type == "auth":
+                expected_token = None
+                try:
+                    import os
+                    from pathlib import Path
+                    token_path = Path.home() / ".echoflux" / "ws_token.txt"
+                    if token_path.exists():
+                        expected_token = token_path.read_text(encoding="utf-8").strip()
+                except Exception as e:
+                    logger.error("Failed to read token file: %s", e)
+
+                if expected_token and message.get("token") == expected_token:
+                    logger.info("Client authenticated successfully.")
+                    self._authenticated_clients.add(websocket)
+                    await websocket.send(json.dumps({"type": "auth_success"}))
+                elif not expected_token:
+                    logger.warning("No token file found, allowing connection for backwards compatibility (not recommended).")
+                    self._authenticated_clients.add(websocket)
+                    await websocket.send(json.dumps({"type": "auth_success"}))
+                else:
+                    logger.warning("Client failed authentication! Expected %s", expected_token)
+                    await websocket.send(json.dumps({"type": "error", "message": "Authentication failed"}))
+                    await websocket.close()
+            else:
+                logger.warning("Unauthenticated client attempted to send %s", msg_type)
+                await websocket.send(json.dumps({"type": "error", "message": "Authentication required"}))
+                await websocket.close()
+            return
 
         if msg_type == "start":
             config = message.get("config", {})

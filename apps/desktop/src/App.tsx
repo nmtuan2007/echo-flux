@@ -63,6 +63,8 @@ function ErrorToast() {
   );
 }
 
+let globalShortcutsRegistered = false;
+
 export default function App() {
   const { activeView, connect, disconnect, theme } = useEngineStore();
   const isOverlay = appWindow.label === "overlay";
@@ -117,6 +119,8 @@ export default function App() {
       });
 
       const setupShortcuts = async () => {
+        if (globalShortcutsRegistered) return;
+        globalShortcutsRegistered = true;
         try {
           await unregisterAll();
           await register("CommandOrControl+Shift+O", async () => {
@@ -150,7 +154,7 @@ export default function App() {
       if (unlistenRelay) unlistenRelay();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
-        unregisterAll().catch(console.error);
+        // Not unregistering here to prevent HMR / StrictMode double-binding race conditions
         disconnect();
       }
     };
