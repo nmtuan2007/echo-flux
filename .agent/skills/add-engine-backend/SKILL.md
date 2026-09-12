@@ -14,18 +14,26 @@ To add a new AI backend to the EchoFlux engine:
 
 ## Step 2: Implement Abstract Methods
 
-For ASR:
+Implement EVERY abstract member, or the class cannot be instantiated.
+`tests/test_backend_contract.py` compares these signatures against the real ABCs.
+
+For ASR (`engine.asr.base.ASRBackend`) — 6 members:
 
 ```python
-def load_model(self, config: TranscriptionConfig) -> None: ...
-def transcribe_stream(self, audio_chunk: bytes) -> Optional[TranscriptResult]: ...
-def reset_stream(self) -> None: ...
+def load_model(self, config: dict) -> None: ...
+def transcribe_stream(self, audio_chunk: bytes, stream_id: str = "default") -> TranscriptResult: ...
+def finalize_current(self, stream_id: str = "default") -> Optional[TranscriptResult]: ...
+def reset_stream(self, stream_id: str = "default") -> None: ...
 def unload_model(self) -> None: ...
 @property
 def is_loaded(self) -> bool: ...
 ```
 
-For Translation:
+`stream_id` is not optional in practice — the engine runs dual streams (`mic` and
+`system`) concurrently, so a backend MUST keep per-stream state. `finalize_current`
+flushes the buffered audio for one stream and returns its last segment, or `None`.
+
+For Translation (`engine.translation.base.TranslationBackend`) — 5 members:
 
 ```python
 def load_model(self, config: dict) -> None: ...
@@ -36,6 +44,9 @@ def is_loaded(self) -> bool: ...
 @property
 def supported_pairs(self) -> list: ...
 ```
+
+Implement `translate_raw`, never `translate` — the base class's `translate()` wraps it
+with post-processing and empty-input handling.
 
 ## Step 3: Register the Backend
 

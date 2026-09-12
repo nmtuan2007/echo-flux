@@ -72,6 +72,11 @@ ignore = [
     "E501",
     "B008",
     "SIM108",
+    # PEP-604/585 modernization is deliberately off: the house style in
+    # .agent/rules/04-python-style.md mandates typing.Optional/List/Dict.
+    "UP006",
+    "UP035",
+    "UP045",
 ]
 
 [tool.ruff.lint.isort]
