@@ -1,0 +1,65 @@
+"""EchoFlux provider contracts and canonical domain types.
+
+Exposes dependency-light interfaces and normalized dataclasses/enums for STT,
+Translation, and Assistant capabilities.
+"""
+
+from engine.providers.contracts import (
+    AssistantProvider,
+    BaseProvider,
+    StreamingSTTProvider,
+    TranslationProvider,
+)
+from engine.providers.types import (
+    AssistQuestion,
+    AssistRequest,
+    AssistResult,
+    AssistSuggestion,
+    AudioFrame,
+    ContextProfileSnapshot,
+    ConversationMessage,
+    ProviderCapability,
+    ProviderError,
+    ProviderErrorCode,
+    ProviderException,
+    ProviderHealthCheck,
+    ProviderHealthStatus,
+    ProviderRuntimeError,
+    STTTranscriptResult,
+    SummaryChunk,
+    SummaryRequest,
+    SummaryResult,
+    SummaryWarning,
+    TranslationRequest,
+    TranslationResult,
+    WordTiming,
+)
+
+__all__ = [
+    "AssistQuestion",
+    "AssistRequest",
+    "AssistResult",
+    "AssistSuggestion",
+    "AssistantProvider",
+    "AudioFrame",
+    "BaseProvider",
+    "ContextProfileSnapshot",
+    "ConversationMessage",
+    "ProviderCapability",
+    "ProviderError",
+    "ProviderErrorCode",
+    "ProviderException",
+    "ProviderHealthCheck",
+    "ProviderHealthStatus",
+    "ProviderRuntimeError",
+    "STTTranscriptResult",
+    "StreamingSTTProvider",
+    "SummaryChunk",
+    "SummaryRequest",
+    "SummaryResult",
+    "SummaryWarning",
+    "TranslationProvider",
+    "TranslationRequest",
+    "TranslationResult",
+    "WordTiming",
+]
