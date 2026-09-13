@@ -16,6 +16,64 @@ single most damaging change you can make here; see `.agent/rules/03-architecture
 The message contract itself lives in `.agent/rules/03-architecture.md` and is pinned by
 `tests/test_ws_contract.py`. It is not repeated here.
 
+Everything below this section, except **Approved target state**, describes the **current
+runtime**. The target state is approved and being migrated to in stages; none of its
+security or provider features exist yet.
+
+## Approved target state
+
+A local-first meeting assistant with three independently configured services: realtime
+speech-to-text (STT), LLM translation, and an LLM Assistant (manual message assist and
+meeting summaries). Local STT and Local Translation are the defaults; Assistant is off
+until configured.
+
+```
+React (webview)          Tauri (Rust)                     Engine (Python)
+  Zustand slices ─ IPC ─> credential vault                  composition root
+  useEngineStore          engine process lifecycle           session orchestration
+                          ephemeral tokens                   provider adapters
+                          ── privileged control role ──────> control handler
+  <──────────── authenticated event plane (WebSocket) ────── events
+                                                             SQLite: conversations,
+                                                             context snapshots
+```
+
+### Ownership
+
+| Layer | Owns | Never |
+| --- | --- | --- |
+| React | Presentation, non-secret UI state, slices composed behind `useEngineStore` | Reads raw secrets, touches files, Python, or models |
+| Tauri | OS credential vault, engine process lifecycle, ephemeral process tokens, sensitive control forwarding | Session, provider, or transcript logic |
+| Python | Audio, provider adapters, provider/session orchestration, fallback, transcript reconciliation, context assembly, local SQLite persistence | Knows a UI exists |
+| Adapters | Normalized results and errors for one provider | Choose fallback, call UI code, emit UI-specific behavior |
+
+`EchoFluxEngine` becomes a composition root that wires services together instead of
+owning every behavior itself.
+
+### Provider and session concepts
+
+- **Service** — one of `stt`, `translation`, `assistant`, each with its own config section.
+- **Provider manifest** — registry entry declaring capability, protocol family, defaults,
+  field schema, secret metadata, and adapter factory. Custom STT reuses the OpenAI
+  Realtime- or Gemini Live-compatible protocol; custom Translation and Assistant use an
+  OpenAI-compatible text API.
+- **Service config** — `providerId`, editable `endpoint`, optional `modelOverride`, typed
+  `options`, `credentialRefs`, and validation metadata. Secrets are referenced, never stored.
+- **Session** — one Start-to-Stop run. It snapshots the resolved provider/model and the
+  attached Context Profiles. Providers cannot change while it runs.
+- **Fallback** — decided by orchestration, not adapters. A runtime failure of cloud STT or
+  Translation switches that service to Local for the rest of the session and emits a
+  visible event. Assistant failures are reported and never fall back.
+
+### Migration boundary
+
+- The current WebSocket contract and legacy runtime stay working until the task that
+  replaces each piece. New modes, adapters, and storage are added dormant first.
+- A message type enters `.agent/rules/03-architecture.md` only in the change that
+  implements it; the contract test enforces this.
+- Legacy pieces slated for removal once replaced: the universal Hugging Face model hub and
+  the unauthenticated online translation path.
+
 ## Thread model
 
 This is where the engine is easy to break. `engine/main.py` mixes `asyncio` (WebSocket

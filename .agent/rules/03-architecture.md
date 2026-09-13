@@ -7,13 +7,38 @@ globs: "**/*.py, **/*.ts, **/*.tsx"
 
 ## strict Decoupling
 
-EchoFlux uses a separated engine + UI architecture.
+EchoFlux uses a separated engine + UI architecture. These rules hold in both the current
+runtime and the approved target state.
 
-- The **Python Engine** knows NOTHING about the UI. It only broadcasts JSON over a WebSocket.
-- The **React App** knows NOTHING about the local filesystem, Python environment, or models. It only sends commands and receives JSON over a WebSocket.
+- The **Python Engine** knows NOTHING about the UI. It only emits JSON events.
+- The **React App** knows NOTHING about the local filesystem, Python environment, or models. It only sends commands and receives JSON.
 - Do NOT introduce tight coupling (e.g., the UI directly reading local Python files or executing Python scripts).
+- **Python** owns audio, provider adapters, provider/session orchestration, fallback, transcript reconciliation, context assembly, and local conversation persistence.
+- **Tauri** is an explicit secure broker: OS credential vault, engine process lifecycle, ephemeral process tokens, and forwarding of sensitive control commands. It owns no session, provider, or transcript logic.
+- **React** owns presentation and non-secret UI state only.
+- **Provider adapters** return normalized results and errors. They NEVER choose fallback, call UI code, or emit UI-specific behavior; orchestration in the engine decides fallback and the events that report it.
+
+## Current Runtime vs Approved Target State
+
+This is a staged migration. Do not describe target-state features as if they exist.
+
+| Concern | Current runtime | Approved target state |
+| --- | --- | --- |
+| Engine socket | Unauthenticated localhost WebSocket carrying every command and event | Authenticated event plane; clients present an ephemeral token issued at engine bootstrap |
+| Sensitive control | Sent over the WebSocket, including API keys in the `start` config | Travels React → Tauri IPC → privileged Tauri-to-engine control role; never over the event plane |
+| Secrets | LLM API key held in Zustand and persisted to `localStorage` | Windows Credential Manager / macOS Keychain via Tauri; the webview gets references and configured state only |
+| Engine lifecycle | Started separately from the desktop app | Launched and supervised by Tauri |
+| Providers | ASR/translation backends chosen from downloaded model manifests | Independent STT, Translation, and Assistant services, each selected from a provider registry |
+| Fallback | `FallbackTranslationBackend` wraps the configured backend | Session orchestration falls cloud STT/Translation back to Local; Assistant errors are reported, never fallen back |
+
+Migration boundary: new secure modes and provider code are added alongside the legacy path
+and stay dormant until their integration task switches the runtime over. Until then the
+legacy path below must keep working.
 
 ## WebSocket API Contract
+
+This section documents the **current runtime** contract. It stays unchanged until the code
+changes; target-state messages are added here only in the same change that implements them.
 
 ALL communication between Engine and UI must follow this exact JSON structure.
 
