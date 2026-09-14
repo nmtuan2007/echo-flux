@@ -8,6 +8,7 @@ import { StatusBar } from "./components/StatusBar";
 import { SummaryModal } from "./components/SummaryModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
 import { useEngineStore } from "./store/engineStore";
+import { publicConfigSnapshot } from "./store/settingsSlice";
 
 import { register, unregisterAll } from "@tauri-apps/api/globalShortcut";
 import { invoke } from "@tauri-apps/api/tauri";
@@ -64,7 +65,7 @@ function ErrorToast() {
 }
 
 export default function App() {
-  const { activeView, connect, disconnect, theme } = useEngineStore();
+  const { activeView, bootstrapEngine, disconnect, theme } = useEngineStore();
   const isOverlay = appWindow.label === "overlay";
 
   useEffect(() => {
@@ -85,8 +86,8 @@ export default function App() {
 
       emit("request_sync_state");
     } else {
-      // MAIN WINDOW: Connect to server and broadcast state
-      connect();
+      // MAIN WINDOW: start the owned engine (Tauri) or connect (browser), then broadcast state
+      void bootstrapEngine();
 
       listen("request_sync_state", () => {
         const state = useEngineStore.getState();
@@ -96,7 +97,7 @@ export default function App() {
           running: state.running,
           connected: state.connected,
           suggestionLoading: state.suggestionLoading,
-          config: state.config,
+          config: publicConfigSnapshot(state.config),
         });
       }).then(f => unlistenReq = f);
 
@@ -112,7 +113,7 @@ export default function App() {
           running: state.running,
           connected: state.connected,
           suggestionLoading: state.suggestionLoading,
-          config: state.config, // Ensure config is synced to pick up settings like stealthMode
+          config: publicConfigSnapshot(state.config), // Ensure config is synced to pick up settings like stealthMode
         });
       });
 
@@ -154,7 +155,7 @@ export default function App() {
         disconnect();
       }
     };
-  }, [connect, disconnect, isOverlay]);
+  }, [bootstrapEngine, disconnect, isOverlay]);
 
   if (isOverlay) {
     return <OverlayPanel />;
