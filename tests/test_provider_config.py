@@ -54,7 +54,8 @@ STT = ProviderCapability.STT
 TRANSLATION = ProviderCapability.TRANSLATION
 ASSISTANT = ProviderCapability.ASSISTANT
 
-# Approved provider matrix (master plan). This task seeds a subset; nothing outside it.
+# Approved v1 provider matrix (master plan): the authoritative upper bound. Registration tasks
+# add providers inside it; nothing may appear outside it or under an unapproved capability.
 APPROVED_PROVIDERS = {
     STT: {
         "local",
@@ -83,13 +84,37 @@ APPROVED_PROVIDERS = {
     },
 }
 
-PLANNED_FACTORY_MODULES = {
-    "engine.providers.stt.local",
-    "engine.providers.stt.openai_realtime",
-    "engine.providers.stt.gemini_live",
-    "engine.providers.translation.local",
-    "engine.providers.translation.openai_compatible",
-    "engine.providers.assistant.openai_compatible",
+SEED_PROVIDERS = {"local", "openai-realtime", "gemini-live", "openai", "custom-openai-compatible"}
+
+FORBIDDEN_PROVIDER_IDS = {"deepl", "google-translate", "azure-translator", "openrouter"}
+
+# Adapters live in the package for the capability they serve.
+PLANNED_FACTORY_PACKAGES = {
+    STT: "engine.providers.stt.",
+    TRANSLATION: "engine.providers.translation.",
+    ASSISTANT: "engine.providers.assistant.",
+}
+
+BUILTIN_FACTORY_MODULES = {
+    ref.partition(":")[0] for manifest in BUILTIN_MANIFESTS for ref in manifest.factories.values()
+}
+
+# Approved protocol families per capability. Anything absent from a row is forbidden.
+APPROVED_PROTOCOLS = {
+    STT: {
+        ProtocolFamily.LOCAL,
+        ProtocolFamily.OPENAI_REALTIME,
+        ProtocolFamily.GEMINI_LIVE,
+        ProtocolFamily.DEEPGRAM,
+        ProtocolFamily.ASSEMBLYAI_STREAMING,
+        ProtocolFamily.AZURE_SPEECH,
+    },
+    TRANSLATION: {
+        ProtocolFamily.LOCAL,
+        ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+        ProtocolFamily.GEMINI_TEXT,
+    },
+    ASSISTANT: {ProtocolFamily.OPENAI_COMPATIBLE_TEXT, ProtocolFamily.GEMINI_TEXT},
 }
 
 
@@ -144,33 +169,149 @@ def _redacted_legacy_document() -> dict:
 
 
 def test_builtin_providers_stay_inside_the_approved_matrix():
-    registry = build_default_registry()
-    for capability in ProviderCapability:
-        ids = {m.provider_id for m in registry.providers_for(capability)}
-        assert ids <= APPROVED_PROVIDERS[capability], capability
-    all_ids = {m.provider_id for m in BUILTIN_MANIFESTS}
-    assert all_ids == {
-        "local",
-        "openai-realtime",
-        "gemini-live",
-        "openai",
-        "custom-openai-compatible",
+    all_ids = [m.provider_id for m in BUILTIN_MANIFESTS]
+    assert len(all_ids) == len(set(all_ids))
+    assert set(all_ids) >= SEED_PROVIDERS
+    assert not FORBIDDEN_PROVIDER_IDS & set(all_ids)
+    for manifest in BUILTIN_MANIFESTS:
+        for capability in manifest.capabilities:
+            assert manifest.provider_id in APPROVED_PROVIDERS[capability], (
+                manifest.provider_id,
+                capability,
+            )
+
+    # Speech-only vendors never serve text, and there is no local Assistant under "local".
+    text_ids = {
+        m.provider_id for m in BUILTIN_MANIFESTS if m.supports(TRANSLATION) or m.supports(ASSISTANT)
     }
-    assert "openrouter" not in all_ids
-    assert len(all_ids) == len(BUILTIN_MANIFESTS)
+    assert not {"deepgram", "azure-speech"} & text_ids
+    assert "local" not in APPROVED_PROVIDERS[ASSISTANT]
+    assert not any(m.provider_id == "local" and m.supports(ASSISTANT) for m in BUILTIN_MANIFESTS)
+
+
+def test_approved_matrix_itself_matches_the_master_plan():
+    # Guards the upper bound against being widened to let a forbidden provider through.
+    approved = set().union(*APPROVED_PROVIDERS.values())
+    assert not FORBIDDEN_PROVIDER_IDS & approved
+    assert not {"deepgram", "azure-speech"} & (
+        APPROVED_PROVIDERS[TRANSLATION] | APPROVED_PROVIDERS[ASSISTANT]
+    )
+    assert approved >= SEED_PROVIDERS
 
 
 def test_registry_lists_only_providers_supporting_the_capability():
     registry = build_default_registry()
-    stt_ids = {m.provider_id for m in registry.providers_for(STT)}
-    translation_ids = {m.provider_id for m in registry.providers_for("translation")}
-    assistant_ids = {m.provider_id for m in registry.providers_for(ASSISTANT)}
-
-    assert stt_ids == {"local", "openai-realtime", "gemini-live"}
-    assert translation_ids == {"local", "openai", "custom-openai-compatible"}
-    assert assistant_ids == {"openai", "custom-openai-compatible"}
     for capability in ProviderCapability:
+        expected = sorted(m.provider_id for m in BUILTIN_MANIFESTS if m.supports(capability))
+        for key in (capability, capability.value):
+            listed = [m.provider_id for m in registry.providers_for(key)]
+            assert listed == expected, capability
         assert all(m.supports(capability) for m in registry.providers_for(capability))
+
+    assert {"local", "openai-realtime", "gemini-live"} <= {
+        m.provider_id for m in registry.providers_for(STT)
+    }
+    assert {"local", "openai", "custom-openai-compatible"} <= {
+        m.provider_id for m in registry.providers_for(TRANSLATION)
+    }
+    assert {"openai", "custom-openai-compatible"} <= {
+        m.provider_id for m in registry.providers_for(ASSISTANT)
+    }
+
+
+def test_builtin_protocol_families_are_approved_for_their_capabilities():
+    for manifest in BUILTIN_MANIFESTS:
+        for capability in manifest.capabilities:
+            assert manifest.protocol_family in APPROVED_PROTOCOLS[capability], (
+                manifest.provider_id,
+                capability,
+            )
+
+
+def _protocol_manifest(capability, family, provider_id="test-protocol"):
+    local = family is ProtocolFamily.LOCAL
+    return _manifest(
+        provider_id=provider_id,
+        capabilities=frozenset({capability}),
+        protocol_family=family,
+        factories={capability: "collections:OrderedDict"},
+        model_selectable=not local,
+        recommended_model="" if local else "test-model",
+    )
+
+
+@pytest.mark.parametrize("capability", list(ProviderCapability))
+@pytest.mark.parametrize("family", list(ProtocolFamily))
+def test_protocol_family_capability_table(capability, family):
+    manifest = _protocol_manifest(capability, family)
+    if family in APPROVED_PROTOCOLS[capability]:
+        registry = ProviderRegistry([manifest])
+        assert registry.get(capability, "test-protocol").protocol_family is family
+    else:
+        with pytest.raises(ProviderRegistryError) as excinfo:
+            ProviderRegistry([manifest])
+        assert excinfo.value.code is RegistryErrorCode.INVALID_MANIFEST
+
+
+@pytest.mark.parametrize(
+    ("capability", "family"),
+    [
+        (TRANSLATION, ProtocolFamily.DEEPGRAM),
+        (ASSISTANT, ProtocolFamily.AZURE_SPEECH),
+        (TRANSLATION, ProtocolFamily.ASSEMBLYAI_STREAMING),
+        (STT, ProtocolFamily.GEMINI_TEXT),
+        (STT, ProtocolFamily.OPENAI_COMPATIBLE_TEXT),
+        (TRANSLATION, ProtocolFamily.OPENAI_REALTIME),
+        (ASSISTANT, ProtocolFamily.GEMINI_LIVE),
+        (ASSISTANT, ProtocolFamily.LOCAL),
+    ],
+)
+def test_protocol_family_rejections_are_explicit(capability, family):
+    with pytest.raises(ProviderRegistryError) as excinfo:
+        ProviderRegistry([_protocol_manifest(capability, family)])
+    assert excinfo.value.code is RegistryErrorCode.INVALID_MANIFEST
+
+
+def test_mixed_capability_manifest_needs_family_approved_for_each():
+    # Gemini text may serve both text capabilities, but not STT alongside them.
+    both = _manifest(
+        capabilities=frozenset({TRANSLATION, ASSISTANT}),
+        protocol_family=ProtocolFamily.GEMINI_TEXT,
+        factories={TRANSLATION: "collections:OrderedDict", ASSISTANT: "collections:OrderedDict"},
+    )
+    assert ProviderRegistry([both]).get(ASSISTANT, "test-text").protocol_family is (
+        ProtocolFamily.GEMINI_TEXT
+    )
+    with_stt = _manifest(
+        capabilities=frozenset({STT, TRANSLATION}),
+        protocol_family=ProtocolFamily.GEMINI_TEXT,
+        factories={STT: "collections:OrderedDict", TRANSLATION: "collections:OrderedDict"},
+    )
+    with pytest.raises(ProviderRegistryError) as excinfo:
+        ProviderRegistry([with_stt])
+    assert excinfo.value.code is RegistryErrorCode.INVALID_MANIFEST
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "capability", "allowed"),
+    [
+        # D-011: Custom STT reuses a realtime protocol profile only.
+        ("custom", STT, {ProtocolFamily.OPENAI_REALTIME, ProtocolFamily.GEMINI_LIVE}),
+        # D-012: custom and local text APIs are OpenAI-compatible only.
+        ("custom-openai-compatible", TRANSLATION, {ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
+        ("custom-openai-compatible", ASSISTANT, {ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
+        ("local-openai-compatible", ASSISTANT, {ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
+    ],
+)
+def test_custom_providers_are_limited_to_compatible_protocols(provider_id, capability, allowed):
+    for family in APPROVED_PROTOCOLS[capability]:
+        manifest = _protocol_manifest(capability, family, provider_id=provider_id)
+        if family in allowed:
+            assert ProviderRegistry([manifest]).get(capability, provider_id)
+        else:
+            with pytest.raises(ProviderRegistryError) as excinfo:
+                ProviderRegistry([manifest])
+            assert excinfo.value.code is RegistryErrorCode.INVALID_MANIFEST, family
 
 
 def test_unsupported_pair_fails_deterministically():
@@ -257,8 +398,11 @@ def test_invalid_manifests_are_rejected(overrides):
 def test_factory_references_point_at_planned_modules():
     for manifest in BUILTIN_MANIFESTS:
         assert set(manifest.factories) == set(manifest.capabilities)
-        for ref in manifest.factories.values():
-            assert ref.partition(":")[0] in PLANNED_FACTORY_MODULES, ref
+        for capability, ref in manifest.factories.items():
+            module_name, sep, attribute = ref.partition(":")
+            assert sep and attribute.isidentifier(), ref
+            assert module_name.startswith(PLANNED_FACTORY_PACKAGES[capability]), ref
+            assert all(part.isidentifier() for part in module_name.split(".")), ref
     local = build_default_registry().get(STT, "local")
     assert local.factories[STT] != local.factories[TRANSLATION]
 
@@ -301,7 +445,7 @@ def _module_exists(module_name: str) -> bool:
 
 def test_registry_lookups_do_not_import_adapters_or_network_libs():
     # A fresh interpreter makes this independent of whatever earlier test modules imported.
-    watched = sorted(PLANNED_FACTORY_MODULES | set(NETWORK_MODULES))
+    watched = sorted(BUILTIN_FACTORY_MODULES | set(NETWORK_MODULES))
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if part
@@ -387,6 +531,47 @@ def _service_for(manifest: ProviderManifest, capability: ProviderCapability, **v
     )
 
 
+def _placeholder_value(spec: ManifestField):
+    if spec.field_type is FieldType.CHOICE:
+        return spec.choices[0]
+    if spec.field_type is FieldType.BOOLEAN:
+        return False
+    if spec.field_type in (FieldType.INTEGER, FieldType.NUMBER):
+        value = spec.minimum if spec.minimum is not None else spec.maximum
+        value = 1 if value is None else value
+        return int(value) if spec.field_type is FieldType.INTEGER else float(value)
+    return "placeholder"
+
+
+def _required_options(manifest: ProviderManifest, capability: ProviderCapability) -> dict:
+    # Fill required non-secret fields without a default (e.g. an Azure deployment name).
+    return {
+        spec.key: _placeholder_value(spec)
+        for spec in manifest.option_fields_for(capability)
+        if spec.required and spec.default is None
+    }
+
+
+def test_placeholder_options_satisfy_required_fields():
+    manifest = _manifest(
+        fields=(
+            ManifestField(key="deployment", label="d", field_type=FieldType.STRING, required=True),
+            ManifestField(
+                key="region", label="r", field_type=FieldType.CHOICE, required=True, choices=("a",)
+            ),
+            ManifestField(
+                key="rate", label="n", field_type=FieldType.INTEGER, required=True, minimum=8000
+            ),
+        )
+    )
+    registry = ProviderRegistry([manifest])
+    with pytest.raises(ProviderRegistryError) as excinfo:
+        registry.validate_options(TRANSLATION, "test-text", {})
+    assert excinfo.value.code is RegistryErrorCode.INVALID_OPTION
+    options = _required_options(manifest, TRANSLATION)
+    assert registry.validate_options(TRANSLATION, "test-text", options) == options
+
+
 def test_api_url_is_editable_for_every_provider():
     registry = build_default_registry()
     custom_url = "https://edited.example.invalid/custom"
@@ -394,7 +579,13 @@ def test_api_url_is_editable_for_every_provider():
         assert manifest.endpoint_editable
         model = "chosen-model" if manifest.model_selectable else ""
         for capability in manifest.capabilities:
-            service = _service_for(manifest, capability, endpoint=custom_url, model_override=model)
+            service = _service_for(
+                manifest,
+                capability,
+                endpoint=custom_url,
+                model_override=model,
+                options=_required_options(manifest, capability),
+            )
             assert registry.resolve_service(service).endpoint == custom_url
 
 

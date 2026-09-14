@@ -40,13 +40,31 @@ _FACTORY_REF_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*")
 
 _ALLOWED_PROTOCOLS: Dict[ProviderCapability, FrozenSet[ProtocolFamily]] = {
     ProviderCapability.STT: frozenset(
-        {ProtocolFamily.LOCAL, ProtocolFamily.OPENAI_REALTIME, ProtocolFamily.GEMINI_LIVE}
+        {
+            ProtocolFamily.LOCAL,
+            ProtocolFamily.OPENAI_REALTIME,
+            ProtocolFamily.GEMINI_LIVE,
+            ProtocolFamily.DEEPGRAM,
+            ProtocolFamily.ASSEMBLYAI_STREAMING,
+            ProtocolFamily.AZURE_SPEECH,
+        }
     ),
     ProviderCapability.TRANSLATION: frozenset(
-        {ProtocolFamily.LOCAL, ProtocolFamily.OPENAI_COMPATIBLE_TEXT}
+        {ProtocolFamily.LOCAL, ProtocolFamily.OPENAI_COMPATIBLE_TEXT, ProtocolFamily.GEMINI_TEXT}
     ),
     # Local Assistant is an OpenAI-compatible server, not an in-process runtime.
-    ProviderCapability.ASSISTANT: frozenset({ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
+    ProviderCapability.ASSISTANT: frozenset(
+        {ProtocolFamily.OPENAI_COMPATIBLE_TEXT, ProtocolFamily.GEMINI_TEXT}
+    ),
+}
+
+# User-configured providers speak a compatible protocol, never a vendor-specific one.
+# Custom STT picks a realtime profile (D-011); custom and local text APIs are OpenAI-compatible
+# (D-012).
+_RESTRICTED_PROVIDER_PROTOCOLS: Dict[str, FrozenSet[ProtocolFamily]] = {
+    "custom": frozenset({ProtocolFamily.OPENAI_REALTIME, ProtocolFamily.GEMINI_LIVE}),
+    "custom-openai-compatible": frozenset({ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
+    "local-openai-compatible": frozenset({ProtocolFamily.OPENAI_COMPATIBLE_TEXT}),
 }
 
 
@@ -151,6 +169,9 @@ def _validate_manifest(manifest: Any) -> None:
     if not isinstance(manifest.protocol_family, ProtocolFamily):
         raise invalid()
     if not manifest.endpoint_editable:
+        raise invalid()
+    restricted = _RESTRICTED_PROVIDER_PROTOCOLS.get(pid)
+    if restricted is not None and manifest.protocol_family not in restricted:
         raise invalid()
     if manifest.protocol_family is ProtocolFamily.LOCAL and (
         manifest.model_selectable or manifest.recommended_model

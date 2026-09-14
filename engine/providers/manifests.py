@@ -22,12 +22,20 @@ from engine.providers.types import ProviderCapability
 
 
 class ProtocolFamily(str, Enum):
-    """Wire protocol an adapter speaks. Custom providers reuse one of the cloud families."""
+    """Wire protocol an adapter speaks. Custom providers reuse one of the cloud families.
+
+    Which capabilities may use each family is enforced by ``engine.providers.registry``.
+    """
 
     LOCAL = "local"
     OPENAI_REALTIME = "openai_realtime"
     GEMINI_LIVE = "gemini_live"
     OPENAI_COMPATIBLE_TEXT = "openai_compatible_text"
+    # Vendor-specific protocols with no custom-compatible variant (D-011, D-012).
+    GEMINI_TEXT = "gemini_text"
+    DEEPGRAM = "deepgram"
+    ASSEMBLYAI_STREAMING = "assemblyai_streaming"
+    AZURE_SPEECH = "azure_speech"
 
 
 class FieldType(str, Enum):
