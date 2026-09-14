@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod control_bridge;
 mod engine_process;
 mod secure_store;
 
@@ -110,12 +111,21 @@ fn set_ignore_cursor_events(window: tauri::Window, ignore: bool) -> Result<(), S
 fn main() {
     let credentials: secure_store::SharedCredentialStore =
         std::sync::Arc::new(secure_store::CredentialStore::production());
+    let bridge: control_bridge::SharedControlBridge =
+        std::sync::Arc::new(control_bridge::ControlBridge::production());
+    // The capturing spawner hands the bridge each run's port and control token; the
+    // webview never sees the control token.
     let engine: engine_process::SharedEngineManager =
-        std::sync::Arc::new(engine_process::EngineManager::production());
+        std::sync::Arc::new(engine_process::EngineManager::new(
+            Box::new(bridge.capturing_spawner(Box::new(engine_process::OsSpawner))),
+            Box::new(engine_process::default_launch_target),
+            control_bridge::ENGINE_STOP_GRACE,
+        ));
 
     tauri::Builder::default()
         .manage(credentials)
         .manage(engine)
+        .manage(bridge)
         // Credential commands are write/delete/status only; raw reads stay in Rust.
         .invoke_handler(tauri::generate_handler![
             get_engine_url,
@@ -133,6 +143,11 @@ fn main() {
             engine_process::engine_start,
             engine_process::engine_stop,
             engine_process::engine_status,
+            // Rust resolves credential refs and holds the control token; each returns safe
+            // fields only. Start/Stop forwarding stays unused by React until integration.
+            control_bridge::provider_test_connection,
+            control_bridge::engine_forward_start,
+            control_bridge::engine_forward_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

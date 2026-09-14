@@ -39,6 +39,12 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 zeroize = "1.8"
 # OS CSPRNG for per-run engine tokens. 0.2 is already in the tree via tauri; MSRV 1.36.
 getrandom = "0.2"
+# Privileged control-role client for the loopback engine socket. Plain ws:// only (the
+# engine binds 127.0.0.1), so no TLS backend is compiled in. tokio is already in the tree
+# via tauri; these features add the TCP and timer drivers the client needs.
+tokio = { version = "1", features = ["net", "time", "rt"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [features]
 default = ["custom-protocol"]
