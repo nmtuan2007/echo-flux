@@ -1,705 +1,187 @@
-import { create } from "zustand";
-import { createJSONStorage, persist } from "zustand/middleware";
-
-export interface SuggestionOption {
-  strategy: string;
-  text: string;
-}
-
-export interface SuggestionResult {
-  options?: SuggestionOption[];
-  error?: string;
-}
-
-export interface TranscriptEntry {
-  id: string;
-  text: string;
-  translation: string | null;
-  isFinal: boolean;
-  timestamp: number;
-  source?: "mic" | "system" | "both" | null;
-  suggestions?: SuggestionResult; // persisted with the entry
-}
-
-export interface Conversation {
-  id: string;
-  name: string;
-  date: number;
-  entries: TranscriptEntry[];
-  summary?: string; // persisted meeting summary
-}
-
-export interface AudioDeviceInfo {
-  id: string;
-  name: string;
-}
-
-export interface HubSearchResult {
-  id: string;
-  downloads: number;
-  tags: string[];
-  task: string;
-}
-
-export interface ModelItem {
-  id: string;
-  name: string;
-  size_mb: number;
-  runtime?: string;
-  is_downloaded: boolean;
-}
-
-export interface EngineConfig {
-  host: string;
-  port: number;
-  modelSize: string;
-  language: string;
-  device: string;
-  translationEnabled: boolean;
-  translationBackend: "online" | "marian";
-  translationModel: string;
-  sourceLang: string;
-  targetLang: string;
-  vadEnabled: boolean;
-  // Dual audio capture
-  audioSource: "microphone" | "system" | "both";
-  micDeviceId: string;
-  speakerDeviceId: string;
-  // LLM / AI Assistant
-  llmEnabled: boolean;
-  llmProviderUrl: string;
-  llmApiKey: string;
-  llmModel: string;
-  stealthMode: boolean;
-  hfToken: string;
-}
-
-export type AppView = "transcript" | "settings" | "history" | "model_manager";
-
-interface EngineState {
-  // Connection
-  connected: boolean;
-  socket: WebSocket | null;
-
-  // Pipeline
-  running: boolean;
-  isToggling: boolean;
-
-  // Transcript
-  entries: TranscriptEntry[];
-  partials: Record<string, {
-    text: string;
-    translation: string | null;
-    source: "mic" | "system" | "both" | null;
-  }>;
-
-  // Translation status
-  activeTranslationBackend: string | null;
-
-  // Downloads & Hub
-  downloading: boolean;
-  downloadModel: string;
-  downloadPercent: number;
-
-  hubSearchResults: HubSearchResult[];
-  searchingHub: boolean;
-
-  modelsList: { asr: ModelItem[]; translation: ModelItem[] };
-
-  // History
-  history: Conversation[];
-  activeConversationId: string | null;
-
-  // UI
-  activeView: AppView;
-  theme: "dark" | "light";
-
-  // Global Error Toast
-  appError: string | null;
-
-  // Config
-  config: EngineConfig;
-
-  // Audio device lists
-  availableMics: AudioDeviceInfo[];
-  availableSpeakers: AudioDeviceInfo[];
-
-  // LLM — suggestion loading (ephemeral, not persisted)
-  suggestionLoading: Record<string, boolean>;
-
-  // LLM — summary (summaryText is the live buffer / current session summary)
-  summaryText: string;
-  summaryLoading: boolean;
-  summaryVisible: boolean;
-
-  // Actions
-  connect: () => void;
-  disconnect: () => void;
-  startPipeline: () => void;
-  stopPipeline: () => void;
-  togglePipeline: () => void;
-  clearTranscript: () => void;
-  setActiveView: (view: AppView) => void;
-  setTheme: (theme: "dark" | "light") => void;
-  updateConfig: (partial: Partial<EngineConfig>) => void;
-  requestDeviceList: () => void;
-  clearAppError: () => void;
-
-  requestModelsList: () => void;
-  downloadModelById: (id: string, type: "asr" | "translation") => void;
-  deleteModelById: (id: string, type: "asr" | "translation") => void;
-  searchHub: (query: string, task: "asr" | "translation") => void;
-
-  // LLM Actions
-  requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
-  requestSummary: () => void;
-  openSummary: () => void;
-  closeSummary: () => void;
-
-  // History Actions
-  renameConversation: (id: string, name: string) => void;
-  deleteConversation: (id: string) => void;
-  saveCurrentSession: () => void;
-  loadConversation: (id: string) => void;
-}
-
-const DEFAULT_CONFIG: EngineConfig = {
-  host: "127.0.0.1",
-  port: 8765,
-  modelSize: "small",
-  language: "en",
-  device: "auto",
-  translationEnabled: true,
-  translationBackend: "online",
-  translationModel: "",
-  sourceLang: "en",
-  targetLang: "vi",
-  vadEnabled: true,
-  audioSource: "microphone",
-  micDeviceId: "",
-  speakerDeviceId: "",
-  llmEnabled: false,
-  llmProviderUrl: "https://openrouter.ai/api/v1",
-  llmApiKey: "",
-  llmModel: "openai/gpt-4o-mini",
-  stealthMode: false,
-  hfToken: "",
-};
-
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let idCounter = 0;
-
-function nextId(): string {
-  idCounter += 1;
-  return `t-${Date.now()}-${idCounter}`;
-}
-
-export const useEngineStore = create<EngineState>()(
-  persist(
-    (set, get) => ({
-      connected: false,
-      socket: null,
-      running: false,
-      isToggling: false,
-      entries: [],
-      partials: {},
-      activeTranslationBackend: null,
-      downloading: false,
-      downloadModel: "",
-      downloadPercent: 0,
-      history: [],
-      activeView: "transcript",
-      theme: window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark",
-      activeConversationId: null,
-      modelsList: { asr: [], translation: [] },
-      hubSearchResults: [],
-      searchingHub: false,
-      config: { ...DEFAULT_CONFIG },
-      availableMics: [],
-      availableSpeakers: [],
-      suggestionLoading: {},
-      summaryText: "",
-      summaryLoading: false,
-      summaryVisible: false,
-      appError: null,
-
-      connect: () => {
-        const { config, socket } = get();
-        if (socket && socket.readyState === WebSocket.OPEN) return;
-
-        const url = `ws://${config.host}:${config.port}`;
-        const ws = new WebSocket(url);
-
-        ws.onopen = () => {
-          set({ connected: true, socket: ws });
-          if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-          }
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
-            handleMessage(message, set, get);
-          } catch {
-            // Ignore malformed messages
-          }
-        };
-
-        ws.onclose = () => {
-          set({
-            connected: false,
-            socket: null,
-            running: false,
-            isToggling: false,
-            activeTranslationBackend: null,
-            downloading: false,
-            downloadModel: "",
-            downloadPercent: 0,
-            modelsList: { asr: [], translation: [] },
-          });
-          reconnectTimer = setTimeout(() => {
-            get().connect();
-          }, 3000);
-        };
-
-        ws.onerror = () => {
-          ws.close();
-        };
-
-        set({ socket: ws });
-      },
-
-      disconnect: () => {
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        const { socket } = get();
-        if (socket) {
-          socket.close();
-        }
-        set({
-          connected: false,
-          socket: null,
-          running: false,
-          isToggling: false,
-          activeTranslationBackend: null,
-          downloading: false,
-          downloadModel: "",
-          downloadPercent: 0,
-          modelsList: { asr: [], translation: [] },
-        });
-      },
-
-      startPipeline: () => {
-        const { socket, connected, config } = get();
-        if (!socket || !connected) return;
-
-        set({ isToggling: true, activeView: "transcript" });
-
-        socket.send(
-          JSON.stringify({
-            type: "start",
-            config: {
-              "asr.model_size": config.modelSize,
-              "asr.language": config.language,
-              "asr.device": config.device,
-              "translation.enabled": config.translationEnabled,
-              "translation.backend": config.translationBackend,
-              "translation.model": config.translationModel || undefined,
-              "translation.source_lang": config.sourceLang,
-              "translation.target_lang": config.targetLang,
-              "vad.enabled": config.vadEnabled,
-              "audio.source": config.audioSource,
-              "audio.mic_device_id": config.micDeviceId || undefined,
-              "audio.speaker_device_id": config.speakerDeviceId || undefined,
-              "llm.enabled": config.llmEnabled,
-              "llm.provider_url": config.llmProviderUrl || undefined,
-              "llm.api_key": config.llmApiKey || undefined,
-              "llm.model": config.llmModel || undefined,
-            },
-          }),
-        );
-      },
-
-      stopPipeline: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-
-        set({ isToggling: true });
-        socket.send(JSON.stringify({ type: "stop" }));
-      },
-
-      togglePipeline: () => {
-        const { running } = get();
-        if (running) {
-          get().stopPipeline();
-        } else {
-          get().startPipeline();
-        }
-      },
-
-      clearTranscript: () => {
-        set({
-          entries: [],
-          partials: {},
-          suggestionLoading: {},
-          summaryText: "",
-          summaryVisible: false,
-          activeConversationId: null,
-        });
-      },
-
-      setActiveView: (view) => {
-        set({ activeView: view });
-      },
-
-      setTheme: (theme) => {
-        set({ theme });
-      },
-
-      updateConfig: (partial) => {
-        set((state) => ({
-          config: { ...state.config, ...partial },
-        }));
-      },
-
-      requestDeviceList: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "list_devices" }));
-      },
-
-      clearAppError: () => {
-        set({ appError: null });
-      },
-
-      requestModelsList: () => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "request_models_list" }));
-      },
-
-      downloadModelById: (id, type) => {
-        const { socket, connected, downloading, config } = get();
-        if (!socket || !connected || downloading) return;
-        set({ downloading: true, downloadModel: id, downloadPercent: 0 });
-        socket.send(JSON.stringify({ type: "download_model", model_id: id, model_type: type, hf_token: config.hfToken }));
-      },
-
-      deleteModelById: (id, type) => {
-        const { socket, connected } = get();
-        if (!socket || !connected) return;
-        socket.send(JSON.stringify({ type: "delete_model", model_id: id, model_type: type }));
-      },
-
-      searchHub: (query, task) => {
-        const { socket, connected, config } = get();
-        if (!socket || !connected) return;
-        set({ searchingHub: true, hubSearchResults: [] });
-        socket.send(JSON.stringify({ type: "search_hub", query, task, hf_token: config.hfToken }));
-      },
-
-      requestSuggestion: async (entryId, targetText, context) => {
-        const { socket, connected, config } = get();
-
-        // If we don't have a direct socket connection (like in the overlay window),
-        // we relay the request to the main window via Tauri events.
-        if (!socket || !connected) {
-          if (typeof window !== "undefined" && window.__TAURI__) {
-             const { emit } = await import("@tauri-apps/api/event");
-             await emit("relay_request_suggestion", { entryId, targetText, context });
-          }
-          return;
-        }
-
-        set((state) => ({
-          suggestionLoading: { ...state.suggestionLoading, [entryId]: true },
-        }));
-
-        socket.send(JSON.stringify({
-          type: "request_suggestion",
-          entry_id: entryId,
-          target_text: targetText,
-          context,
-          llm_config: {
-            api_key: config.llmApiKey,
-            model: config.llmModel,
-            provider_url: config.llmProviderUrl || undefined,
-          },
-        }));
-      },
-
-      requestSummary: () => {
-        const { socket, connected, entries, config } = get();
-        if (!socket || !connected || entries.length === 0) return;
-
-        set({ summaryText: "", summaryLoading: true, summaryVisible: true });
-
-        socket.send(JSON.stringify({
-          type: "request_summary",
-          entries: entries.map((e) => ({ text: e.text, source: e.source ?? "speaker" })),
-          llm_config: {
-            api_key: config.llmApiKey,
-            model: config.llmModel,
-            provider_url: config.llmProviderUrl || undefined,
-          },
-        }));
-      },
-
-      openSummary: () => {
-        set({ summaryVisible: true });
-      },
-
-      closeSummary: () => {
-        set({ summaryVisible: false, summaryLoading: false });
-      },
-
-      saveCurrentSession: () => {
-        const { entries, summaryText, activeConversationId } = get();
-        if (entries.length === 0) return;
-
-        if (activeConversationId) {
-          set((state) => ({
-            history: state.history.map((c) =>
-              c.id === activeConversationId
-                ? { ...c, entries: [...entries], summary: summaryText || c.summary }
-                : c
-            ),
-          }));
-          return;
-        }
-
-        const timestamp = Date.now();
-        const dateStr = new Date(timestamp).toLocaleString();
-
-        let name = "Session " + dateStr;
-        if (entries[0] && entries[0].text) {
-          name = entries[0].text.slice(0, 30) + (entries[0].text.length > 30 ? "..." : "");
-        }
-
-        const newId = `conv-${timestamp}`;
-        const conversation: Conversation = {
-          id: newId,
-          name,
-          date: timestamp,
-          entries: [...entries],
-          summary: summaryText || undefined,
-        };
-
-        set((state) => ({
-          activeConversationId: newId,
-          history: [conversation, ...state.history],
-        }));
-      },
-
-      renameConversation: (id, name) => {
-        set((state) => ({
-          history: state.history.map((c) => (c.id === id ? { ...c, name } : c)),
-        }));
-      },
-
-      deleteConversation: (id) => {
-        set((state) => {
-          const newHistory = state.history.filter((c) => c.id !== id);
-          return {
-            history: newHistory,
-            activeConversationId: state.activeConversationId === id ? null : state.activeConversationId,
-          };
-        });
-      },
-
-      loadConversation: (id) => {
-        const { history, running } = get();
-        if (running) return;
-
-        const target = history.find((c) => c.id === id);
-        if (target) {
-          set({
-            entries: [...target.entries],
-            activeView: "transcript",
-            partials: {},
-            suggestionLoading: {},
-            summaryText: target.summary || "",
-            summaryVisible: false,
-            summaryLoading: false,
-            activeConversationId: id,
-          });
-        }
+import { create, type StateCreator } from "zustand";
+import { createJSONStorage, persist, type StateStorage } from "zustand/middleware";
+import {
+  applyLlmChunk,
+  createConversationSlice,
+  sanitizeHistory,
+  type ConversationSlice,
+} from "./conversationSlice";
+import {
+  applyDevicesList,
+  applyDownloadProgress,
+  applyHubSearchResults,
+  applyModelsList,
+  createSessionSlice,
+  downloadIdleState,
+  RECONNECT_DELAY_MS,
+  sessionStartedState,
+  sessionStoppedState,
+  type EngineCommands,
+  type SessionSlice,
+} from "./sessionSlice";
+import {
+  createSettingsSlice,
+  sanitizeConfig,
+  sanitizeTheme,
+  type PersistedConfig,
+  type SettingsSlice,
+} from "./settingsSlice";
+import {
+  applyFinal,
+  applyPartial,
+  applySuggestionResult,
+  applyTranslationUpdate,
+  createTranscriptSlice,
+  type TranscriptSlice,
+} from "./transcriptSlice";
+import type { Conversation, EngineConfig, EngineMessage, Theme } from "./types";
+
+// Composition root for the UI store. Components keep importing `useEngineStore` and the
+// types below from this module.
+//
+// The full engine<->UI wire surface (every command encoded and every event routed) stays in
+// this file: tests/test_ws_contract.py reads only engineStore.ts.
+
+export type {
+  AppView,
+  AudioDeviceInfo,
+  Conversation,
+  EngineConfig,
+  HubSearchResult,
+  ModelItem,
+  SuggestionOption,
+  SuggestionResult,
+  TranscriptEntry,
+} from "./types";
+
+export type EngineState = SettingsSlice & SessionSlice & TranscriptSlice & ConversationSlice;
+
+export type EngineSliceCreator<T> = StateCreator<
+  EngineState,
+  [["zustand/persist", unknown]],
+  [],
+  T
+>;
+
+type StoreSet = Parameters<EngineSliceCreator<EngineState>>[0];
+type StoreGet = () => EngineState;
+
+// ---------------------------------------------------------------------------
+// UI -> engine commands
+// ---------------------------------------------------------------------------
+
+export const engineCommands: EngineCommands = {
+  start: (config) =>
+    JSON.stringify({
+      type: "start",
+      config: {
+        "asr.model_size": config.modelSize,
+        "asr.language": config.language,
+        "asr.device": config.device,
+        "translation.enabled": config.translationEnabled,
+        "translation.backend": config.translationBackend,
+        "translation.model": config.translationModel || undefined,
+        "translation.source_lang": config.sourceLang,
+        "translation.target_lang": config.targetLang,
+        "vad.enabled": config.vadEnabled,
+        "audio.source": config.audioSource,
+        "audio.mic_device_id": config.micDeviceId || undefined,
+        "audio.speaker_device_id": config.speakerDeviceId || undefined,
+        "llm.enabled": config.llmEnabled,
+        "llm.provider_url": config.llmProviderUrl || undefined,
+        "llm.api_key": config.llmApiKey || undefined,
+        "llm.model": config.llmModel || undefined,
       },
     }),
-    {
-      name: "echoflux-storage",
-      storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({
-        config: state.config,
-        history: state.history,
-        theme: state.theme,
-      }),
-    },
-  ),
-);
 
-function handleMessage(
-  message: Record<string, unknown>,
-  set: (partial: Partial<EngineState> | ((state: EngineState) => Partial<EngineState>)) => void,
-  get: () => EngineState,
-) {
+  stop: () => JSON.stringify({ type: "stop" }),
+
+  listDevices: () => JSON.stringify({ type: "list_devices" }),
+
+  requestModelsList: () => JSON.stringify({ type: "request_models_list" }),
+
+  downloadModel: (modelId, modelType, hfToken) =>
+    JSON.stringify({
+      type: "download_model",
+      model_id: modelId,
+      model_type: modelType,
+      hf_token: hfToken,
+    }),
+
+  deleteModel: (modelId, modelType) =>
+    JSON.stringify({ type: "delete_model", model_id: modelId, model_type: modelType }),
+
+  searchHub: (query, task, hfToken) =>
+    JSON.stringify({ type: "search_hub", query, task, hf_token: hfToken }),
+
+  requestSuggestion: (entryId, targetText, context, config) =>
+    JSON.stringify({
+      type: "request_suggestion",
+      entry_id: entryId,
+      target_text: targetText,
+      context,
+      llm_config: {
+        api_key: config.llmApiKey,
+        model: config.llmModel,
+        provider_url: config.llmProviderUrl || undefined,
+      },
+    }),
+
+  requestSummary: (entries, config) =>
+    JSON.stringify({
+      type: "request_summary",
+      entries: entries.map((e) => ({ text: e.text, source: e.source ?? "speaker" })),
+      llm_config: {
+        api_key: config.llmApiKey,
+        model: config.llmModel,
+        provider_url: config.llmProviderUrl || undefined,
+      },
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Engine -> UI events
+// ---------------------------------------------------------------------------
+
+export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: StoreGet): void {
   switch (message.type) {
     case "partial": {
-      const newPartial = (message.text as string) || "";
-      const streamId = (message.source as string) || "default";
-      const currentPartial = get().partials[streamId]?.text || "";
-
-      const extra: Partial<EngineState> = {};
-      if (message.translation_backend) {
-        extra.activeTranslationBackend = message.translation_backend as string;
-      }
-
-      if (
-        newPartial.length >= currentPartial.length ||
-        newPartial.length >= currentPartial.length * 0.6 ||
-        currentPartial === ""
-      ) {
-        set((state) => ({
-          partials: {
-            ...state.partials,
-            [streamId]: {
-              text: newPartial,
-              translation: (message.translation as string) ?? null,
-              source: (message.source as TranscriptEntry["source"]) ?? null,
-            },
-          },
-          ...extra,
-        }));
-      }
+      const update = applyPartial(get(), message);
+      if (update) set(update);
       break;
     }
 
-    case "final": {
-      const finalText = (message.text as string) || "";
-      const streamId = (message.source as string) || "default";
-
-      const update: Partial<EngineState> = {};
-      if (message.translation_backend) {
-        update.activeTranslationBackend = message.translation_backend as string;
-      }
-
-      set((state) => {
-        const newPartials = { ...state.partials };
-        delete newPartials[streamId];
-
-        if (!finalText.trim()) {
-          return {
-            ...update,
-            partials: newPartials,
-          };
-        }
-
-        return {
-          ...update,
-          entries: [
-            ...state.entries,
-            {
-              id: (message.entry_id as string) || nextId(),
-              text: finalText,
-              translation: (message.translation as string) ?? null,
-              isFinal: true,
-              timestamp: message.timestamp as number,
-              source: (message.source as TranscriptEntry["source"]) ?? null,
-            },
-          ],
-          partials: newPartials,
-        };
-      });
+    case "final":
+      set((state) => applyFinal(state, message));
       break;
-    }
 
-    case "translation_update": {
-      const translation = message.translation as string;
-      const entryId = message.entry_id as string | undefined;
-      const sourceText = message.source_text as string;
-
-      if (!translation) break;
-
-      // ES2021-compatible reverse linear search helper
-      const findLast = (arr: TranscriptEntry[], pred: (e: TranscriptEntry) => boolean) => {
-        for (let i = arr.length - 1; i >= 0; i--) {
-          if (pred(arr[i])) return i;
-        }
-        return -1;
-      };
-
-      set((state) => {
-        const newEntries = [...state.entries];
-        let foundIndex = -1;
-
-        // 1. Prefer exact entry_id match — precise
-        if (entryId) {
-          foundIndex = findLast(newEntries, (e) => e.id === entryId);
-        }
-
-        // 2. Fall back to exact text match (legacy messages without entry_id)
-        if (foundIndex === -1 && sourceText) {
-          foundIndex = findLast(newEntries, (e) => e.text === sourceText);
-        }
-
-        // 3. Last resort: prefix match on entries that don't yet have a translation
-        if (foundIndex === -1 && sourceText) {
-          const prefix = sourceText.slice(0, 30);
-          foundIndex = findLast(newEntries, (e) => !e.translation && e.text.includes(prefix));
-        }
-
-        if (foundIndex !== -1) {
-          newEntries[foundIndex] = { ...newEntries[foundIndex], translation };
-          return { entries: newEntries };
-        }
-
-        // If no match at all, discard — do NOT blindly attach to the last entry
-        return {};
-      });
+    case "translation_update":
+      set((state) => applyTranslationUpdate(state, message));
       break;
-    }
 
     case "download_progress": {
       if (message.percent === 100) {
-        set({ downloading: false, downloadModel: "", downloadPercent: 0 });
+        set(downloadIdleState());
         const { connected, socket } = get();
         if (connected && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "request_models_list" }));
+          socket.send(engineCommands.requestModelsList());
         }
       } else {
-        set((state) => ({
-          downloading: true,
-          downloadModel: state.downloadModel || (message.model as string) || "AI Model",
-          downloadPercent: (message.percent as number) || 0,
-        }));
+        set((state) => applyDownloadProgress(state, message));
       }
       break;
     }
 
-    case "models_list": {
-      set({ 
-        modelsList: { 
-          asr: (message.asr as ModelItem[]) ?? [], 
-          translation: (message.translation as ModelItem[]) ?? [] 
-        } 
-      });
+    case "models_list":
+      set(applyModelsList(message));
       break;
-    }
 
-    case "hub_search_results": {
-      set({
-        hubSearchResults: (message.results as HubSearchResult[]) ?? [],
-        searchingHub: false
-      });
+    case "hub_search_results":
+      set(applyHubSearchResults(message));
       break;
-    }
 
     case "model_action_result": {
-      set({ downloading: false, downloadModel: "", downloadPercent: 0 });
+      set(downloadIdleState());
       if (message.success) {
         get().requestModelsList();
       } else {
@@ -711,77 +193,32 @@ function handleMessage(
 
     case "status":
       if (message.status === "started") {
-        set({
-          running: true,
-          isToggling: false,
-          entries: [],
-          partials: {},
-          suggestionLoading: {},
-          summaryText: "",
-          summaryVisible: false,
-          activeTranslationBackend: null,
-          downloading: false,
-          downloadModel: "",
-          downloadPercent: 0,
-          activeConversationId: null,
-        });
+        set(sessionStartedState());
       } else if (message.status === "stopped") {
         get().saveCurrentSession();
-        set({
-          running: false,
-          isToggling: false,
-          partials: {},
-          downloading: false,
-          downloadModel: "",
-          downloadPercent: 0,
-        });
+        set(sessionStoppedState());
       }
       break;
 
     case "error":
       console.error("Engine error:", message.message);
-      set({ isToggling: false, appError: (message.message as string) });
+      set({ isToggling: false, appError: message.message as string });
       break;
 
     case "devices_list":
-      set({
-        availableMics: (message.microphones as AudioDeviceInfo[]) ?? [],
-        availableSpeakers: (message.speakers as AudioDeviceInfo[]) ?? [],
-      });
+      set(applyDevicesList(message));
       break;
 
     case "suggestion_result": {
-      const entryId = message.entry_id as string;
-      if (!entryId) break;
-
-      set((state) => {
-        // Remove loading flag
-        const newLoading = { ...state.suggestionLoading };
-        delete newLoading[entryId];
-
-        // Store result inside the matching TranscriptEntry (persisted with session)
-        const newEntries = state.entries.map((e) => {
-          if (e.id !== entryId) return e;
-          return {
-            ...e,
-            suggestions: {
-              options: (message.options as SuggestionOption[]) ?? undefined,
-              error: (message.error as string) ?? undefined,
-            } as SuggestionResult,
-          };
-        });
-
-        return { suggestionLoading: newLoading, entries: newEntries };
-      });
+      if (!message.entry_id) break;
+      set((state) => applySuggestionResult(state, message));
       get().saveCurrentSession();
       break;
     }
 
-    case "llm_chunk": {
-      const text = (message.text as string) || "";
-      set((state) => ({ summaryText: state.summaryText + text }));
+    case "llm_chunk":
+      set((state) => applyLlmChunk(state, message));
       break;
-    }
 
     case "llm_done": {
       set({ summaryLoading: false });
@@ -790,3 +227,140 @@ function handleMessage(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+// Versioned key. The pre-slice blob under the legacy key is read, never rewritten: it is the
+// only copy of the user's legacy LLM key until the vault migration task consumes it.
+export const PERSIST_STORAGE_NAME = "echoflux-storage-v1";
+export const LEGACY_PERSIST_STORAGE_NAME = "echoflux-storage";
+export const PERSIST_VERSION = 1;
+
+// The complete persisted whitelist. Sockets, loading maps, tokens, raw keys, and transient
+// errors are absent by construction.
+export interface PersistedEngineState {
+  theme: Theme;
+  config: PersistedConfig;
+  history: Conversation[];
+}
+
+export function selectPersistedState(state: EngineState): PersistedEngineState {
+  return {
+    theme: state.theme,
+    config: sanitizeConfig(state.config) as PersistedConfig,
+    history: sanitizeHistory(state.history) ?? [],
+  };
+}
+
+export function sanitizePersistedState(raw: unknown): Partial<PersistedEngineState> {
+  if (typeof raw !== "object" || raw === null) return {};
+  const source = raw as Record<string, unknown>;
+  const out: Partial<PersistedEngineState> = {};
+  const theme = sanitizeTheme(source.theme);
+  if (theme) out.theme = theme;
+  if (source.config !== undefined) out.config = sanitizeConfig(source.config) as PersistedConfig;
+  const history = sanitizeHistory(source.history);
+  if (history) out.history = history;
+  return out;
+}
+
+// Hook for future schema changes. Version 0 is the pre-slice blob; secrets are dropped from
+// what gets rewritten but are not migrated anywhere yet.
+export function migratePersistedState(
+  persisted: unknown,
+  _fromVersion: number,
+): Partial<PersistedEngineState> {
+  return sanitizePersistedState(persisted);
+}
+
+type LegacySecrets = Partial<Pick<EngineConfig, "llmApiKey" | "hfToken">>;
+
+// Read-only compatibility: the legacy runtime still needs these in memory.
+function readLegacySecrets(storage: StateStorage): LegacySecrets {
+  const raw = storage.getItem(LEGACY_PERSIST_STORAGE_NAME);
+  if (typeof raw !== "string") return {};
+  try {
+    const config = JSON.parse(raw)?.state?.config;
+    const secrets: LegacySecrets = {};
+    if (typeof config?.llmApiKey === "string" && config.llmApiKey) {
+      secrets.llmApiKey = config.llmApiKey;
+    }
+    if (typeof config?.hfToken === "string" && config.hfToken) {
+      secrets.hfToken = config.hfToken;
+    }
+    return secrets;
+  } catch {
+    return {};
+  }
+}
+
+export interface CreateEngineStoreOptions {
+  // Defaults to window.localStorage.
+  storage?: StateStorage;
+  reconnectDelayMs?: number;
+}
+
+export function createEngineStore(options: CreateEngineStoreOptions = {}) {
+  const resolveStorage = (): StateStorage => options.storage ?? window.localStorage;
+
+  // Falls back to the legacy blob only when no versioned state exists yet, which routes the
+  // first load through migrate().
+  const versionedStorage = (): StateStorage => {
+    const base = resolveStorage();
+    return {
+      getItem: (name) => {
+        const value = base.getItem(name);
+        return value === null && name === PERSIST_STORAGE_NAME
+          ? base.getItem(LEGACY_PERSIST_STORAGE_NAME)
+          : value;
+      },
+      setItem: (name, value) => base.setItem(name, value),
+      removeItem: (name) => base.removeItem(name),
+    };
+  };
+
+  return create<EngineState>()(
+    persist(
+      (set, get, api) => {
+        const commands = engineCommands;
+        return {
+          ...createSettingsSlice(set, get, api),
+          ...createSessionSlice({
+            commands,
+            routeMessage: (message) => routeEngineMessage(message, set, get),
+            reconnectDelayMs: options.reconnectDelayMs ?? RECONNECT_DELAY_MS,
+          })(set, get, api),
+          ...createTranscriptSlice(commands)(set, get, api),
+          ...createConversationSlice(commands)(set, get, api),
+        };
+      },
+      {
+        name: PERSIST_STORAGE_NAME,
+        version: PERSIST_VERSION,
+        storage: createJSONStorage<PersistedEngineState>(versionedStorage),
+        partialize: selectPersistedState,
+        migrate: (persisted, version) =>
+          migratePersistedState(persisted, version) as PersistedEngineState,
+        merge: (persisted, current) => {
+          const safe = sanitizePersistedState(persisted);
+          let secrets: LegacySecrets = {};
+          try {
+            secrets = readLegacySecrets(resolveStorage());
+          } catch {
+            secrets = {};
+          }
+          return {
+            ...current,
+            theme: safe.theme ?? current.theme,
+            history: safe.history ?? current.history,
+            config: { ...current.config, ...safe.config, ...secrets },
+          };
+        },
+      },
+    ),
+  );
+}
+
+export const useEngineStore = createEngineStore();
