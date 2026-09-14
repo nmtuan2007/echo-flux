@@ -3,6 +3,8 @@
     windows_subsystem = "windows"
 )]
 
+mod secure_store;
+
 use tauri::Manager;
 
 #[tauri::command]
@@ -105,7 +107,12 @@ fn set_ignore_cursor_events(window: tauri::Window, ignore: bool) -> Result<(), S
 }
 
 fn main() {
+    let credentials: secure_store::SharedCredentialStore =
+        std::sync::Arc::new(secure_store::CredentialStore::production());
+
     tauri::Builder::default()
+        .manage(credentials)
+        // Credential commands are write/delete/status only; raw reads stay in Rust.
         .invoke_handler(tauri::generate_handler![
             get_engine_url,
             create_overlay_window,
@@ -114,6 +121,10 @@ fn main() {
             revert_to_main_window,
             set_stealth_mode,
             set_ignore_cursor_events,
+            secure_store::credential_save,
+            secure_store::credential_replace,
+            secure_store::credential_delete,
+            secure_store::credential_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
