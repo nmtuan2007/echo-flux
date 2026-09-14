@@ -31,6 +31,7 @@ class FasterWhisperBackend(ASRBackend):
     def __init__(self):
         self._model = None
         self._config: Optional[TranscriptionConfig] = None
+        self._device: Optional[str] = None
 
         self._sample_rate = 16000
         
@@ -79,6 +80,7 @@ class FasterWhisperBackend(ASRBackend):
                     download_root=models_dir
                 )
                 logger.info("Faster-Whisper loaded successfully on CUDA.")
+                self._device = "cuda"
                 return
             except Exception as e:
                 logger.warning("Failed on CUDA: %s. Fallback to CPU.", e)
@@ -92,15 +94,29 @@ class FasterWhisperBackend(ASRBackend):
             download_root=models_dir
         )
         logger.info("Faster-Whisper loaded successfully on CPU.")
+        self._device = "cpu"
 
     @property
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def device(self) -> Optional[str]:
+        """Device the model actually loaded on after any CUDA-to-CPU fallback."""
+        return self._device
+
+    @staticmethod
+    def normalize_language(language: Optional[str]) -> Optional[str]:
+        """Map the "auto" hint (and empty values) to None so Whisper detects the language."""
+        if not language or language.strip().lower() == "auto":
+            return None
+        return language
+
     def unload_model(self) -> None:
         if self._model:
             del self._model
         self._model = None
+        self._device = None
         self._streams.clear()
 
     def reset_stream(self, stream_id: str = "default") -> None:
@@ -149,7 +165,7 @@ class FasterWhisperBackend(ASRBackend):
         # Fixed parameter name: log_prob_threshold instead of logprob_threshold
         segments_gen, info = self._model.transcribe(
             stream["audio_buffer"],
-            language=self._config.language,
+            language=self.normalize_language(self._config.language),
             beam_size=1,
             best_of=1,
             temperature=0.0,

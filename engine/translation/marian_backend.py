@@ -46,6 +46,10 @@ class MarianBackend(TranslationBackend):
         except ImportError:
             raise ModelLoadError("ctranslate2 or transformers not installed")
 
+        # Reloading must not leak the previous translator.
+        if self._translator is not None or self._tokenizer is not None:
+            self.unload_model()
+
         self._source_lang = config.get("translation.source_lang", "en")
         self._target_lang = config.get("translation.target_lang", "vi")
 
@@ -202,6 +206,8 @@ class MarianBackend(TranslationBackend):
             raise TranslationError(f"Translation failed: {e}") from e
 
     def unload_model(self) -> None:
+        if self._translator is None and self._tokenizer is None:
+            return
         if self._translator:
             del self._translator
         self._translator = None
@@ -223,3 +229,8 @@ class MarianBackend(TranslationBackend):
     @staticmethod
     def get_preset_models() -> dict:
         return dict(_PRESET_MODELS)
+
+    @staticmethod
+    def resolve_preset_model(source_lang: str, target_lang: str) -> Optional[str]:
+        """Preset model for an exact pair, or None. Never guesses a Hub model id."""
+        return _PRESET_MODELS.get((source_lang, target_lang))
