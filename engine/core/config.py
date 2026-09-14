@@ -1,9 +1,13 @@
 import os
 import sys
 import json
-from dataclasses import dataclass
+import copy
+import hashlib
+import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 
 _DEFAULT_CONFIG = {
@@ -93,6 +97,382 @@ class TranscriptionConfig:
     model_path: Optional[str] = None
 
 
+# Schema version 2: independent, provider-backed service sections under "services".
+# Legacy flat sections (asr, translation, llm, ...) stay alongside them during the
+# migration so the current runtime keeps reading the keys it already uses.
+
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
+SERVICE_NAMES = ("stt", "translation", "assistant")
+
+# D-003: Local STT and Local Translation are enabled by default; Assistant stays off until
+# the user configures it.
+_DEFAULT_SERVICES: Dict[str, Dict[str, Any]] = {
+    "stt": {"enabled": True, "providerId": "local"},
+    "translation": {"enabled": True, "providerId": "local"},
+    "assistant": {"enabled": False, "providerId": "openai"},
+}
+
+# Legacy keys holding secret values. Readable in memory for the legacy runtime, never written.
+LEGACY_SECRET_KEYS = ("llm.api_key",)
+# Legacy URL keys whose credential-bearing parts are stripped before writing.
+LEGACY_URL_KEYS = ("llm.provider_url",)
+
+VALIDATION_UNVALIDATED = "unvalidated"
+VALIDATION_VALID = "valid"
+VALIDATION_INVALID = "invalid"
+VALIDATION_STALE = "stale"
+
+_SERVICE_FIELDS = frozenset(
+    {"enabled", "providerId", "endpoint", "modelOverride", "options", "credentialRefs", "validation"}
+)
+_CREDENTIAL_REF_FIELDS = frozenset({"configId", "slot", "version"})
+_VALIDATION_FIELDS = frozenset({"status", "fingerprint", "checkedAt", "errorCode"})
+_STORED_VALIDATION_STATUSES = (VALIDATION_UNVALIDATED, VALIDATION_VALID, VALIDATION_INVALID)
+
+_SECRET_KEY_NAMES = frozenset(
+    {
+        "apikey",
+        "secret",
+        "secretkey",
+        "clientsecret",
+        "token",
+        "accesstoken",
+        "authtoken",
+        "password",
+        "authorization",
+        "bearer",
+        "value",
+    }
+)
+
+# Mirrors the vault id rules in apps/desktop/src-tauri/src/secure_store.rs so a pasted key
+# can never become a provider id or credential reference.
+_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+_KEY_LIKE_PREFIXES = ("sk-", "sk_", "aiza", "gsk_", "xai-", "ghp_", "bearer")
+_MAX_UNSEPARATED_RUN = 24
+_ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class ConfigError(ValueError):
+    """Invalid public config. Carries a location and a fixed code, never the offending value."""
+
+    def __init__(self, path: str, code: str) -> None:
+        super().__init__(f"{path}: {code}")
+        self.path = path
+        self.code = code
+
+
+def is_secret_key_name(key: str) -> bool:
+    """True for field names that would hold a raw credential rather than a reference."""
+    return key.lower().replace("_", "").replace("-", "") in _SECRET_KEY_NAMES
+
+
+def is_valid_id_segment(value: Any) -> bool:
+    if not isinstance(value, str) or not _ID_RE.fullmatch(value):
+        return False
+    if value.startswith(_KEY_LIKE_PREFIXES):
+        return False
+    return max(len(run) for run in re.split(r"[-_]", value)) < _MAX_UNSEPARATED_RUN
+
+
+def endpoint_has_embedded_credentials(endpoint: str) -> bool:
+    """Detects user:pass@host and key-bearing query parameters such as ``?key=``."""
+    try:
+        parts = urlsplit(endpoint)
+    except ValueError:
+        return False
+    if parts.username or parts.password:
+        return True
+    return any(_is_secret_query_pair(pair) for pair in parts.query.split("&"))
+
+
+def _is_secret_query_pair(pair: str) -> bool:
+    name = pair.split("=", 1)[0]
+    return bool(name) and (name.lower() == "key" or is_secret_key_name(name))
+
+
+def strip_endpoint_credentials(endpoint: str) -> str:
+    """``endpoint`` without userinfo or key-bearing query parameters; otherwise unchanged."""
+    if not endpoint_has_embedded_credentials(endpoint):
+        return endpoint
+    parts = urlsplit(endpoint)
+    netloc = parts.netloc.rpartition("@")[2]
+    query = "&".join(p for p in parts.query.split("&") if p and not _is_secret_query_pair(p))
+    return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+
+
+def read_schema_version(data: Any) -> int:
+    """Schema version of a raw config document. Files written before v2 carry no marker."""
+    if not isinstance(data, dict):
+        raise ConfigError("config", "invalid_document")
+    version = data.get("schema_version", LEGACY_SCHEMA_VERSION)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ConfigError("schema_version", "invalid_schema_version")
+    return version
+
+
+def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep copy of ``data`` with every legacy secret value removed, safe to serialize."""
+    cleaned = copy.deepcopy(data)
+    for dotted in LEGACY_SECRET_KEYS:
+        cleaned.pop(dotted, None)
+        section, _, leaf = dotted.rpartition(".")
+        node = cleaned.get(section)
+        if isinstance(node, dict):
+            node.pop(leaf, None)
+    for dotted in LEGACY_URL_KEYS:
+        section, _, leaf = dotted.rpartition(".")
+        node = cleaned.get(section)
+        for container, key in ((cleaned, dotted), (node, leaf)):
+            if isinstance(container, dict) and isinstance(container.get(key), str):
+                container[key] = strip_endpoint_credentials(container[key])
+    return cleaned
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, bool, int, float))
+
+
+@dataclass(frozen=True)
+class CredentialRef:
+    """Pointer to one OS-vault entry: identity plus a version counter, never the secret.
+
+    ``version`` is bumped whenever the stored secret is replaced, which is how a credential
+    change reaches the validation fingerprint without the value ever touching config.
+    """
+
+    config_id: str
+    slot: str
+    version: int = 1
+
+    def __post_init__(self) -> None:
+        if not is_valid_id_segment(self.config_id):
+            raise ConfigError("credentialRef.configId", "invalid_credential_ref")
+        if not is_valid_id_segment(self.slot):
+            raise ConfigError("credentialRef.slot", "invalid_credential_ref")
+        if isinstance(self.version, bool) or not isinstance(self.version, int):
+            raise ConfigError("credentialRef.version", "invalid_credential_version")
+        if self.version < 0:
+            raise ConfigError("credentialRef.version", "invalid_credential_version")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"configId": self.config_id, "slot": self.slot, "version": self.version}
+
+    @classmethod
+    def from_dict(cls, path: str, data: Any) -> "CredentialRef":
+        if not isinstance(data, dict):
+            raise ConfigError(path, "invalid_credential_ref")
+        for key in data:
+            if key not in _CREDENTIAL_REF_FIELDS:
+                secret_like = isinstance(key, str) and is_secret_key_name(key)
+                raise ConfigError(path, "secret_value_rejected" if secret_like else "unknown_field")
+        try:
+            return cls(
+                config_id=data.get("configId"),
+                slot=data.get("slot"),
+                version=data.get("version", 1),
+            )
+        except ConfigError as exc:
+            raise ConfigError(path, exc.code) from None
+
+
+@dataclass(frozen=True)
+class ValidationMetadata:
+    """Outcome of the last Test Connection, bound to the fingerprint it was run against."""
+
+    status: str = VALIDATION_UNVALIDATED
+    fingerprint: Optional[str] = None
+    checked_at: Optional[float] = None
+    # A ProviderErrorCode value. Free-text messages are not stored: they can echo secrets.
+    error_code: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.status not in _STORED_VALIDATION_STATUSES:
+            raise ConfigError("validation.status", "invalid_validation")
+        if self.fingerprint is not None and not (
+            isinstance(self.fingerprint, str) and _FINGERPRINT_RE.fullmatch(self.fingerprint)
+        ):
+            raise ConfigError("validation.fingerprint", "invalid_validation")
+        if self.checked_at is not None and (
+            isinstance(self.checked_at, bool) or not isinstance(self.checked_at, (int, float))
+        ):
+            raise ConfigError("validation.checkedAt", "invalid_validation")
+        if self.error_code is not None and not (
+            isinstance(self.error_code, str) and _ERROR_CODE_RE.fullmatch(self.error_code)
+        ):
+            raise ConfigError("validation.errorCode", "invalid_validation")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "fingerprint": self.fingerprint,
+            "checkedAt": self.checked_at,
+            "errorCode": self.error_code,
+        }
+
+    @classmethod
+    def from_dict(cls, path: str, data: Any) -> "ValidationMetadata":
+        if data is None:
+            return cls()
+        if not isinstance(data, dict) or any(key not in _VALIDATION_FIELDS for key in data):
+            raise ConfigError(path, "invalid_validation")
+        try:
+            return cls(
+                status=data.get("status", VALIDATION_UNVALIDATED),
+                fingerprint=data.get("fingerprint"),
+                checked_at=data.get("checkedAt"),
+                error_code=data.get("errorCode"),
+            )
+        except ConfigError as exc:
+            raise ConfigError(path, exc.code) from None
+
+
+# Fields whose change alters what a Test Connection proved. ``enabled`` is deliberately absent:
+# toggling a service off and on does not change whether its provider config works.
+_FINGERPRINTED_CHANGES = frozenset(
+    {"provider_id", "endpoint", "model_override", "options", "credential_refs"}
+)
+
+
+@dataclass(frozen=True)
+class ServiceConfig:
+    """Typed view of one ``services.<name>`` section."""
+
+    service: str
+    provider_id: str
+    enabled: bool = False
+    endpoint: str = ""
+    model_override: str = ""
+    options: Dict[str, Any] = field(default_factory=dict)
+    credential_refs: Dict[str, CredentialRef] = field(default_factory=dict)
+    validation: ValidationMetadata = field(default_factory=ValidationMetadata)
+
+    def __post_init__(self) -> None:
+        if self.service not in SERVICE_NAMES:
+            raise ConfigError("services", "unknown_service")
+        path = f"services.{self.service}"
+        if not isinstance(self.enabled, bool):
+            raise ConfigError(f"{path}.enabled", "invalid_type")
+        if not is_valid_id_segment(self.provider_id):
+            raise ConfigError(f"{path}.providerId", "invalid_provider_id")
+        for name, value in (("endpoint", self.endpoint), ("modelOverride", self.model_override)):
+            if not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
+                raise ConfigError(f"{path}.{name}", "invalid_type")
+        if endpoint_has_embedded_credentials(self.endpoint):
+            raise ConfigError(f"{path}.endpoint", "secret_value_rejected")
+        if not isinstance(self.options, dict):
+            raise ConfigError(f"{path}.options", "invalid_type")
+        for key, value in self.options.items():
+            if not isinstance(key, str):
+                raise ConfigError(f"{path}.options", "invalid_option_key")
+            if is_secret_key_name(key):
+                raise ConfigError(f"{path}.options", "secret_value_rejected")
+            if not _is_json_scalar(value):
+                raise ConfigError(f"{path}.options.{key}", "invalid_option_value")
+        if not isinstance(self.credential_refs, dict):
+            raise ConfigError(f"{path}.credentialRefs", "invalid_type")
+        for slot, ref in self.credential_refs.items():
+            if not isinstance(ref, CredentialRef) or ref.slot != slot:
+                raise ConfigError(f"{path}.credentialRefs", "invalid_credential_ref")
+        if not isinstance(self.validation, ValidationMetadata):
+            raise ConfigError(f"{path}.validation", "invalid_validation")
+        # Detach from caller-owned dicts so later mutation cannot bypass validation.
+        object.__setattr__(self, "options", dict(self.options))
+        object.__setattr__(self, "credential_refs", dict(self.credential_refs))
+
+    @classmethod
+    def from_dict(cls, service: str, data: Any) -> "ServiceConfig":
+        path = f"services.{service}"
+        if not isinstance(data, dict):
+            raise ConfigError(path, "invalid_section")
+        for key in data:
+            if key not in _SERVICE_FIELDS:
+                secret_like = isinstance(key, str) and is_secret_key_name(key)
+                raise ConfigError(path, "secret_value_rejected" if secret_like else "unknown_field")
+        refs_raw = data.get("credentialRefs") or {}
+        if not isinstance(refs_raw, dict):
+            raise ConfigError(f"{path}.credentialRefs", "invalid_type")
+        refs = {
+            slot: CredentialRef.from_dict(f"{path}.credentialRefs", raw)
+            for slot, raw in refs_raw.items()
+        }
+        model_override = data.get("modelOverride")
+        options = data.get("options")
+        return cls(
+            service=service,
+            provider_id=data.get("providerId"),
+            enabled=data.get("enabled", False),
+            endpoint=data.get("endpoint", ""),
+            model_override="" if model_override is None else model_override,
+            options={} if options is None else options,
+            credential_refs=refs,
+            validation=ValidationMetadata.from_dict(f"{path}.validation", data.get("validation")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "providerId": self.provider_id,
+            "endpoint": self.endpoint,
+            "modelOverride": self.model_override,
+            "options": dict(self.options),
+            "credentialRefs": {slot: ref.to_dict() for slot, ref in self.credential_refs.items()},
+            "validation": self.validation.to_dict(),
+        }
+
+    def fingerprint(self) -> str:
+        """Digest of the public config a validation result depends on.
+
+        Covers provider, endpoint, model override, options, and each credential reference
+        including its version. There is no secret value in this object to include.
+        """
+        payload = {
+            "schemaVersion": SCHEMA_VERSION,
+            "service": self.service,
+            "providerId": self.provider_id,
+            "endpoint": self.endpoint.strip(),
+            "modelOverride": self.model_override.strip(),
+            "options": self.options,
+            "credentialRefs": {slot: ref.to_dict() for slot, ref in self.credential_refs.items()},
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def validation_state(self) -> str:
+        """``valid``/``invalid`` only while the stored fingerprint still matches; else stale."""
+        if self.validation.status == VALIDATION_UNVALIDATED or not self.validation.fingerprint:
+            return VALIDATION_UNVALIDATED
+        if self.validation.fingerprint != self.fingerprint():
+            return VALIDATION_STALE
+        return self.validation.status
+
+    def with_changes(self, **changes: Any) -> "ServiceConfig":
+        """Copy with ``changes`` applied; clears validation when a fingerprinted field changes."""
+        unknown = set(changes) - _FINGERPRINTED_CHANGES - {"enabled"}
+        if unknown:
+            raise ConfigError(f"services.{self.service}", "unknown_field")
+        updated = replace(self, **changes)
+        if updated.fingerprint() != self.fingerprint():
+            updated = replace(updated, validation=ValidationMetadata())
+        return updated
+
+    def with_validation_result(
+        self,
+        success: bool,
+        error_code: Optional[str] = None,
+        checked_at: Optional[float] = None,
+    ) -> "ServiceConfig":
+        metadata = ValidationMetadata(
+            status=VALIDATION_VALID if success else VALIDATION_INVALID,
+            fingerprint=self.fingerprint(),
+            checked_at=checked_at,
+            error_code=None if success else error_code,
+        )
+        return replace(self, validation=metadata)
+
+
 def _get_data_dir() -> Path:
     override = os.environ.get("ECHOFLUX_DATA_DIR")
     if override:
@@ -150,15 +530,61 @@ class Config:
         _load_dotenv(project_env)
         _load_dotenv(self._data_dir / ".env")
 
+        # No file means a fresh install: nothing to migrate.
+        self._loaded_schema_version = SCHEMA_VERSION
+        self._issues: List[str] = []
+
         if self._config_path.exists():
             self._load_file()
 
         self._apply_env_overrides()
+        self._normalize_services()
 
     def _load_file(self):
         with open(self._config_path, "r", encoding="utf-8") as f:
             user_config = json.load(f)
+        try:
+            self._loaded_schema_version = read_schema_version(user_config)
+        except ConfigError as exc:
+            self._issues.append(f"{exc.path}:{exc.code}")
+            self._loaded_schema_version = LEGACY_SCHEMA_VERSION
+            if not isinstance(user_config, dict):
+                return
         self._deep_merge(self._data, user_config)
+        if self._loaded_schema_version < SCHEMA_VERSION:
+            # Legacy files stay readable: flat sections load untouched and the v2 services
+            # are derived in memory. Nothing is written until migration or save() runs.
+            # Imported here because config_migration depends on this module.
+            from engine.core.config_migration import derive_services
+
+            self._data["services"] = derive_services(user_config)
+        elif self._loaded_schema_version > SCHEMA_VERSION:
+            self._issues.append("schema_version:unsupported_schema_version")
+
+    def _normalize_services(self):
+        """Replace ``services`` with canonical v2 sections; invalid ones fall back to defaults.
+
+        Degrades instead of raising so a hand-edited file cannot stop the engine, and records
+        only location and code so no rejected value reaches logs or the UI.
+        """
+        services = self._data.get("services")
+        if not isinstance(services, dict):
+            if services is not None:
+                self._issues.append("services:invalid_section")
+            services = {}
+        if any(name not in SERVICE_NAMES for name in services):
+            self._issues.append("services:unknown_service")
+        normalized = {}
+        for name in SERVICE_NAMES:
+            section = services.get(name, _DEFAULT_SERVICES[name])
+            try:
+                service = ServiceConfig.from_dict(name, section)
+            except ConfigError as exc:
+                self._issues.append(f"{exc.path}:{exc.code}")
+                service = ServiceConfig.from_dict(name, _DEFAULT_SERVICES[name])
+            normalized[name] = service.to_dict()
+        self._data["services"] = normalized
+        self._data["schema_version"] = SCHEMA_VERSION
 
     def _deep_merge(self, base: dict, override: dict):
         for key, value in override.items():
@@ -198,8 +624,53 @@ class Config:
         node[keys[-1]] = value
 
     def save(self):
+        """Write schema v2 JSON without secret values, backing up a legacy file first."""
+        if self._loaded_schema_version < SCHEMA_VERSION and self._config_path.exists():
+            from engine.core.config_migration import write_backup
+
+            write_backup(self._config_path, self._loaded_schema_version)
         with open(self._config_path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2)
+            json.dump(public_config(self._data), f, indent=2)
+        self._loaded_schema_version = SCHEMA_VERSION
+
+    @property
+    def schema_version(self) -> int:
+        return SCHEMA_VERSION
+
+    @property
+    def loaded_schema_version(self) -> int:
+        """Version of the file on disk when loaded; below SCHEMA_VERSION means legacy."""
+        return self._loaded_schema_version
+
+    @property
+    def issues(self) -> List[str]:
+        """``location:code`` entries for config that was rejected and replaced by defaults."""
+        return list(self._issues)
+
+    def service(self, name: str) -> ServiceConfig:
+        if name not in SERVICE_NAMES:
+            raise ConfigError("services", "unknown_service")
+        return ServiceConfig.from_dict(name, self._data["services"][name])
+
+    def set_service(self, service: ServiceConfig):
+        self._data["services"][service.service] = service.to_dict()
+
+    def update_service(self, name: str, **changes: Any) -> ServiceConfig:
+        """Apply typed changes to one service; relevant changes invalidate its validation."""
+        updated = self.service(name).with_changes(**changes)
+        self.set_service(updated)
+        return updated
+
+    def record_validation(
+        self,
+        name: str,
+        success: bool,
+        error_code: Optional[str] = None,
+        checked_at: Optional[float] = None,
+    ) -> ServiceConfig:
+        updated = self.service(name).with_validation_result(success, error_code, checked_at)
+        self.set_service(updated)
+        return updated
 
     @property
     def data_dir(self) -> Path:
