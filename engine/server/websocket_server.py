@@ -1,20 +1,96 @@
 import json
 import asyncio
-from typing import Optional, Set, Callable, Awaitable
+import contextvars
+import logging
+from typing import Any, Callable, Awaitable, Dict, Optional, Set
 
 from engine.core.logging import get_logger
 from engine.core.exceptions import ServerError
+from engine.server.protocol import (
+    AUTH_TIMEOUT_SECONDS,
+    CLOSE_AUTH_FAILED,
+    CLOSE_AUTH_TIMEOUT,
+    BootstrapTokens,
+    ProtocolError,
+    Role,
+    SecurityMode,
+    auth_ok_frame,
+    complete_frame,
+    encode_frame,
+    error_frame,
+    event_frame,
+    is_loopback_host,
+    parse_auth_frame,
+    parse_control_frame,
+    response_frame,
+    sanitize_event,
+)
 
 logger = get_logger("server.websocket")
+
+# websockets logs raw frames at DEBUG, which would put auth tokens and start configs in the
+# log whenever the engine runs with ECHOFLUX_LOG_LEVEL=DEBUG. Pin its logger above that.
+_transport_logger = get_logger("server.transport")
+_transport_logger.setLevel(logging.INFO)
+
+# The connection whose command is being dispatched, so handlers that only receive a config
+# can still reply to the requester rather than to an arbitrary client.
+_current_requester: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "echoflux_current_requester", default=None
+)
+
+
+class _CorrelatedReplyChannel:
+    """Compatibility adapter: legacy handlers call ``send(json)`` on what they think is the
+    socket. On a control connection each reply is wrapped in a response frame carrying
+    the originating request id, including replies sent later from worker threads."""
+
+    def __init__(self, websocket, request_id: str, tokens: BootstrapTokens):
+        self._websocket = websocket
+        self._request_id = request_id
+        self._tokens = tokens
+        self.remote_address = getattr(websocket, "remote_address", None)
+
+    async def send(self, payload) -> None:
+        message = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+        frame = response_frame(self._request_id, message)
+        try:
+            await self._websocket.send(encode_frame(frame, self._tokens))
+        except Exception as e:
+            logger.debug("Dropped reply for closed control client (%s)", type(e).__name__)
+
+    async def close(self, *args, **kwargs) -> None:
+        await self._websocket.close(*args, **kwargs)
 
 
 class WebSocketServer:
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        tokens: Optional[BootstrapTokens] = None,
+        insecure_dev: bool = False,
+        auth_timeout: float = AUTH_TIMEOUT_SECONDS,
+    ):
+        if tokens is not None and insecure_dev:
+            raise ServerError("Insecure development mode cannot be combined with bootstrap tokens")
+
         self._host = host
         self._port = port
+        self._tokens = tokens
+        self._auth_timeout = auth_timeout
+        if tokens is not None:
+            self._mode = SecurityMode.AUTHENTICATED
+        elif insecure_dev:
+            self._mode = SecurityMode.INSECURE_DEV
+        else:
+            self._mode = SecurityMode.LEGACY_TRANSITIONAL
+
         self._server = None
         self._clients = set()
+        # Connections that receive broadcasts: authenticated event clients and legacy clients.
+        self._subscribers: Dict[Any, Role] = {}
         self._running = False
         self.is_capturing = False
         self._cached_devices = None
@@ -59,13 +135,36 @@ class WebSocketServer:
         except ImportError:
             raise ServerError("websockets library is not installed")
 
+        if not is_loopback_host(self._host):
+            raise ServerError("The engine socket must bind to a loopback address")
+
         self._running = True
         self._server = await websockets.serve(
             self._handle_client,
             self._host,
             self._port,
+            logger=_transport_logger,
         )
-        logger.info("WebSocket server listening on ws://%s:%d", self._host, self._port)
+        if self._mode is SecurityMode.AUTHENTICATED:
+            logger.info(
+                "WebSocket server listening on ws://%s:%d (authenticated control/event roles)",
+                self._host,
+                self.bound_port,
+            )
+        elif self._mode is SecurityMode.INSECURE_DEV:
+            logger.warning(
+                "Insecure development mode: unauthenticated WebSocket server on ws://%s:%d",
+                self._host,
+                self.bound_port,
+            )
+        else:
+            logger.warning(
+                "DEPRECATED: bootstrap tokens are absent, serving the unauthenticated loopback "
+                "path on ws://%s:%d. This transitional path will be removed; use --insecure-dev "
+                "for explicit development runs.",
+                self._host,
+                self.bound_port,
+            )
 
     async def stop(self):
         self._running = False
@@ -75,6 +174,7 @@ class WebSocketServer:
             except Exception:
                 pass
         self._clients.clear()
+        self._subscribers.clear()
 
         if self._server:
             self._server.close()
@@ -84,19 +184,37 @@ class WebSocketServer:
         logger.info("WebSocket server stopped")
 
     async def broadcast(self, message: dict):
-        if not self._clients:
+        if not self._subscribers:
             return
 
-        payload = json.dumps(message)
-        disconnected = set()
+        legacy_payload = None
+        event_payload = None
+        disconnected = []
 
-        for client in self._clients:
+        # Snapshot: clients may connect or authenticate while a send is awaiting.
+        for client, role in list(self._subscribers.items()):
+            if role is Role.EVENT:
+                if event_payload is None:
+                    event_payload = encode_frame(
+                        event_frame(sanitize_event(message)), self._tokens
+                    )
+                payload = event_payload
+            else:
+                if legacy_payload is None:
+                    legacy_payload = json.dumps(message)
+                payload = legacy_payload
             try:
                 await client.send(payload)
             except Exception:
-                disconnected.add(client)
+                disconnected.append(client)
 
-        self._clients -= disconnected
+        for client in disconnected:
+            self._subscribers.pop(client, None)
+            self._clients.discard(client)
+
+    def current_requester(self) -> Optional[Any]:
+        """The reply target of the command currently being dispatched, if any."""
+        return _current_requester.get()
 
     async def _handle_client(self, websocket, path=None):
         self._clients.add(websocket)
@@ -104,13 +222,95 @@ class WebSocketServer:
         logger.info("Client connected: %s", remote)
 
         try:
-            async for raw_message in websocket:
-                await self._process_message(raw_message, websocket)
+            if self._tokens is None:
+                self._subscribers[websocket] = Role.LEGACY
+                async for raw_message in websocket:
+                    await self._process_message(raw_message, websocket)
+            else:
+                role = await self._authenticate(websocket)
+                if role is Role.EVENT:
+                    await self._serve_event_client(websocket)
+                elif role is Role.CONTROL:
+                    await self._serve_control_client(websocket)
         except Exception as e:
-            logger.debug("Client disconnected: %s (%s)", remote, e)
+            logger.debug("Client disconnected: %s (%s)", remote, type(e).__name__)
         finally:
             self._clients.discard(websocket)
+            self._subscribers.pop(websocket, None)
             logger.info("Client removed: %s", remote)
+
+    async def _authenticate(self, websocket) -> Optional[Role]:
+        remote = websocket.remote_address
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=self._auth_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Client %s did not authenticate in time", remote)
+            await self._reject(
+                websocket,
+                ProtocolError("auth_timeout", "Authentication timed out", CLOSE_AUTH_TIMEOUT),
+            )
+            return None
+
+        try:
+            auth = parse_auth_frame(raw)
+            if not self._tokens.verify(auth.role, auth.token):
+                raise ProtocolError("auth_failed", "Authentication failed", CLOSE_AUTH_FAILED)
+        except ProtocolError as err:
+            # Log the code only: the frame may hold a token or a command payload.
+            logger.warning("Rejected client %s: %s", remote, err.code)
+            await self._reject(websocket, err)
+            return None
+
+        # Subscribe before acknowledging, so every event after auth_ok reaches the client.
+        if auth.role is Role.EVENT:
+            self._subscribers[websocket] = Role.EVENT
+        await websocket.send(encode_frame(auth_ok_frame(auth.role), self._tokens))
+        logger.info("Client authenticated: %s role=%s", remote, auth.role.value)
+        return auth.role
+
+    async def _reject(self, websocket, err: ProtocolError):
+        try:
+            await websocket.send(encode_frame(error_frame(err.code, err.message), self._tokens))
+            await websocket.close(code=err.close_code or CLOSE_AUTH_FAILED, reason=err.code)
+        except Exception as e:
+            logger.debug("Reject failed for closed client (%s)", type(e).__name__)
+
+    async def _serve_event_client(self, websocket):
+        remote = websocket.remote_address
+        async for _raw in websocket:
+            logger.warning("Rejected command from event client %s", remote)
+            await websocket.send(
+                encode_frame(
+                    error_frame("forbidden", "Event clients cannot send commands"), self._tokens
+                )
+            )
+
+    async def _serve_control_client(self, websocket):
+        remote = websocket.remote_address
+        async for raw in websocket:
+            try:
+                request = parse_control_frame(raw)
+            except ProtocolError as err:
+                logger.warning("Rejected control frame from %s: %s", remote, err.code)
+                await websocket.send(
+                    encode_frame(error_frame(err.code, err.message, err.request_id), self._tokens)
+                )
+                continue
+
+            channel = _CorrelatedReplyChannel(websocket, request.request_id, self._tokens)
+            try:
+                await self._dispatch(request.command, channel)
+            except Exception as e:
+                logger.error(
+                    "Control request %s failed (%s)", request.request_id, type(e).__name__
+                )
+                await websocket.send(
+                    encode_frame(
+                        error_frame("command_failed", "Command failed", request.request_id),
+                        self._tokens,
+                    )
+                )
+            await websocket.send(encode_frame(complete_frame(request.request_id), self._tokens))
 
     async def _process_message(self, raw: str, websocket):
         try:
@@ -123,11 +323,27 @@ class WebSocketServer:
             }))
             return
 
+        await self._dispatch(message, websocket)
+
+    async def _dispatch(self, message: Any, websocket):
+        if not isinstance(message, dict):
+            await websocket.send(json.dumps({"type": "error", "message": "Invalid message"}))
+            return
+
+        reset_token = _current_requester.set(websocket)
+        try:
+            await self._dispatch_command(message, websocket)
+        finally:
+            _current_requester.reset(reset_token)
+
+    async def _dispatch_command(self, message: dict, websocket):
         msg_type = message.get("type")
 
         if msg_type == "start":
             config = message.get("config", {})
-            logger.info("Received start command with config: %s", config)
+            # Never log the config itself: it carries provider settings and API keys.
+            key_count = len(config) if isinstance(config, dict) else 0
+            logger.info("Received start command (%d config keys)", key_count)
             if self._on_start:
                 await self._on_start(config)
             await websocket.send(json.dumps({"type": "status", "status": "started"}))
@@ -266,6 +482,22 @@ class WebSocketServer:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self._mode is SecurityMode.AUTHENTICATED
+
+    @property
+    def security_mode(self) -> SecurityMode:
+        return self._mode
+
+    @property
+    def bound_port(self) -> int:
+        """The listening port; differs from the configured one when that was 0."""
+        if self._server is not None:
+            for sock in self._server.sockets:
+                return sock.getsockname()[1]
+        return self._port
 
     @property
     def client_count(self) -> int:

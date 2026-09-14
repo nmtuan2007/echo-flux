@@ -55,6 +55,15 @@ def parse_args() -> argparse.Namespace:
         help="Disable voice activity detection",
     )
     parser.add_argument(
+        "--insecure-dev",
+        action="store_true",
+        help=(
+            "Serve the unauthenticated loopback socket explicitly, for local development. "
+            "Refused when ECHOFLUX_CONTROL_TOKEN/ECHOFLUX_EVENT_TOKEN are set; with those "
+            "tokens and without this flag the engine requires authenticated clients."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default=None,
@@ -99,7 +108,7 @@ def main():
                      config.get("asr.language"),
                      config.get("asr.device"))
 
-        run_engine(args.config)
+        run_engine(args.config, insecure_dev=args.insecure_dev)
     except KeyboardInterrupt:
         pass
     except Exception as e:

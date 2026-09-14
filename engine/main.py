@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from engine.core.config import TranscriptionConfig
 from engine.core.progress import install_progress_hijack, set_progress_callback
+from engine.server.protocol import BootstrapTokens
 from engine.server.websocket_server import WebSocketServer
 from engine.asr.base import TranscriptResult
 
@@ -94,11 +95,17 @@ def _setup_logging():
 
 
 class EchoFluxEngine:
-    def __init__(self):
+    def __init__(self, insecure_dev: bool = False):
+        # Tokens are consumed from the environment here and live only inside the server,
+        # so they never reach Config, config dumps, logs, or child processes.
+        tokens = BootstrapTokens.from_environ(os.environ)
         self._ws_server = WebSocketServer(
             host=os.getenv("ECHOFLUX_HOST", "127.0.0.1"),
             port=int(os.getenv("ECHOFLUX_PORT", "8765")),
+            tokens=tokens,
+            insecure_dev=insecure_dev,
         )
+        self._main_task: Optional[asyncio.Task] = None
 
         self._inputs = {}
         self._vads = {}
@@ -140,7 +147,10 @@ class EchoFluxEngine:
         self._ws_server.on_search_hub(self._on_search_hub)
 
         logger.info("EchoFlux Engine starting...")
+        self._main_task = asyncio.current_task()
         await self._ws_server.start()
+        if self._ws_server.is_authenticated:
+            self._start_stdin_watch()
 
         try:
             while True:
@@ -148,9 +158,35 @@ class EchoFluxEngine:
         except asyncio.CancelledError:
             await self._shutdown()
 
+    def _start_stdin_watch(self):
+        """Tauri requests shutdown by closing our stdin. Only armed when supervised
+        (bootstrap tokens present): a detached legacy run may have no stdin at all."""
+        if sys.stdin is None:
+            return
+        t = threading.Thread(target=self._watch_stdin, name="StdinWatch", daemon=True)
+        t.start()
+
+    def _watch_stdin(self):
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        try:
+            while stream.read(1024):
+                pass
+        except (OSError, ValueError) as e:
+            # Unreadable stdin is not a shutdown request; the supervisor can still kill us.
+            logger.debug("Stdin watch disabled (%s)", type(e).__name__)
+            return
+        logger.info("Supervisor closed stdin; shutting down")
+        self._loop.call_soon_threadsafe(self._request_shutdown)
+
+    def _request_shutdown(self):
+        if self._main_task is not None and not self._main_task.done():
+            self._main_task.cancel()
+
     async def _on_client_start(self, config: dict):
-        logger.info("Starting pipeline with client config: %s", config)
-        self._client = list(self._ws_server._clients)[0] if self._ws_server._clients else None
+        # Log the shape only: the start config carries provider settings and API keys.
+        key_count = len(config) if isinstance(config, dict) else 0
+        logger.info("Starting pipeline (%d client config keys)", key_count)
+        self._client = self._ws_server.current_requester()
 
         if self._running:
             await self._stop_pipeline()
@@ -802,7 +838,7 @@ class EchoFluxEngine:
         t.start()
 
 
-def run_engine(config_path=None):
+def run_engine(config_path=None, insecure_dev: bool = False):
     _load_dotenv()
     _setup_logging()
     
@@ -816,7 +852,7 @@ def run_engine(config_path=None):
     
     install_progress_hijack()
 
-    engine = EchoFluxEngine()
+    engine = EchoFluxEngine(insecure_dev=insecure_dev)
     try:
         asyncio.run(engine.start())
     except KeyboardInterrupt:
