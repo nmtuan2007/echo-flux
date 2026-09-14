@@ -37,6 +37,8 @@ serde_json = "1"
 # enabled; other platforms get an explicit "unsupported" error instead of a mock store.
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "apple-native"] }
 zeroize = "1.8"
+# OS CSPRNG for per-run engine tokens. 0.2 is already in the tree via tauri; MSRV 1.36.
+getrandom = "0.2"
 
 [features]
 default = ["custom-protocol"]

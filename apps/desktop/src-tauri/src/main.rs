@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod engine_process;
 mod secure_store;
 
 use tauri::Manager;
@@ -109,9 +110,12 @@ fn set_ignore_cursor_events(window: tauri::Window, ignore: bool) -> Result<(), S
 fn main() {
     let credentials: secure_store::SharedCredentialStore =
         std::sync::Arc::new(secure_store::CredentialStore::production());
+    let engine: engine_process::SharedEngineManager =
+        std::sync::Arc::new(engine_process::EngineManager::production());
 
     tauri::Builder::default()
         .manage(credentials)
+        .manage(engine)
         // Credential commands are write/delete/status only; raw reads stay in Rust.
         .invoke_handler(tauri::generate_handler![
             get_engine_url,
@@ -125,7 +129,16 @@ fn main() {
             secure_store::credential_replace,
             secure_store::credential_delete,
             secure_store::credential_status,
+            // Dormant: registered for the bridge integration, never started automatically.
+            engine_process::engine_start,
+            engine_process::engine_stop,
+            engine_process::engine_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                app.state::<engine_process::SharedEngineManager>().shutdown();
+            }
+        });
 }
