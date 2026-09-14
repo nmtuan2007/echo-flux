@@ -9,9 +9,12 @@ only when a session actually needs the adapter.
 Secret fields describe credential slots. Their values live in the OS vault and reach config
 only as ``credentialRefs``, never as options.
 
-This module seeds the approved provider matrix only partially. Deepgram, Azure, AssemblyAI,
-Gemini text, Local OpenAI-compatible Assistant, and Custom STT (a single ``custom`` provider
-with a protocol profile) are added by the tasks that implement them.
+The Translation and Assistant matrices are complete. STT is still seeded partially: Deepgram,
+Azure Speech, AssemblyAI, and Custom STT (a single ``custom`` provider with a protocol
+profile) are added by the tasks that implement them.
+
+Recommended endpoints and models were checked against official provider documentation on
+2026-09-14. They are the only place provider defaults live; adapters receive resolved values.
 """
 
 from dataclasses import dataclass, field
@@ -183,7 +186,31 @@ _OPENAI_COMPATIBLE_FACTORIES = {
     _ASSISTANT: "engine.providers.assistant.openai_compatible:OpenAICompatibleAssistantProvider",
 }
 
+_GEMINI_FACTORIES = {
+    _TRANSLATION: "engine.providers.translation.gemini:GeminiTranslationProvider",
+    _ASSISTANT: "engine.providers.assistant.gemini:GeminiAssistantProvider",
+}
+
 _TEXT_API_OPTION_FIELDS = (_SOURCE_LANG, _TARGET_LANG, _TEMPERATURE, _MAX_OUTPUT_TOKENS)
+
+# Azure selects the model through a per-resource deployment, so these stay explicit fields.
+_AZURE_DEPLOYMENT = ManifestField(
+    key="deployment",
+    label="Deployment name",
+    field_type=FieldType.STRING,
+    required=True,
+    description="Azure OpenAI deployment; sent as the model on the v1 surface.",
+)
+
+_AZURE_API_VERSION = ManifestField(
+    key="api_version",
+    label="API version",
+    field_type=FieldType.STRING,
+    default="v1",
+    advanced=True,
+    description="v1 or preview use the /openai/v1 surface; a dated version uses the "
+    "deployment-scoped path.",
+)
 
 
 BUILTIN_MANIFESTS: Tuple[ProviderManifest, ...] = (
@@ -263,5 +290,52 @@ BUILTIN_MANIFESTS: Tuple[ProviderManifest, ...] = (
         requires_endpoint=True,
         # Self-hosted compatible servers often run without authentication.
         fields=(_api_key(required=False), *_TEXT_API_OPTION_FIELDS),
+    ),
+    ProviderManifest(
+        provider_id="gemini",
+        display_name="Gemini",
+        capabilities=frozenset({_TRANSLATION, _ASSISTANT}),
+        protocol_family=ProtocolFamily.GEMINI_TEXT,
+        factories=dict(_GEMINI_FACTORIES),
+        recommended_endpoint="https://generativelanguage.googleapis.com/v1beta",
+        recommended_model="gemini-3.8-flash",
+        fields=(_api_key(required=True), *_TEXT_API_OPTION_FIELDS),
+    ),
+    ProviderManifest(
+        provider_id="azure-openai",
+        display_name="Azure OpenAI",
+        capabilities=frozenset({_TRANSLATION, _ASSISTANT}),
+        protocol_family=ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+        factories=dict(_OPENAI_COMPATIBLE_FACTORIES),
+        # The resource endpoint is unique per Azure resource, so nothing is recommended.
+        requires_endpoint=True,
+        recommended_model="gpt-5.6-terra",
+        fields=(
+            _api_key(required=True),
+            _AZURE_DEPLOYMENT,
+            _AZURE_API_VERSION,
+            *_TEXT_API_OPTION_FIELDS,
+        ),
+    ),
+    ProviderManifest(
+        provider_id="assemblyai-llm-gateway",
+        display_name="AssemblyAI LLM Gateway",
+        capabilities=frozenset({_TRANSLATION, _ASSISTANT}),
+        protocol_family=ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+        factories=dict(_OPENAI_COMPATIBLE_FACTORIES),
+        recommended_endpoint="https://llm-gateway.assemblyai.com/v1",
+        recommended_model="gpt-5.6-terra",
+        fields=(_api_key(required=True), *_TEXT_API_OPTION_FIELDS),
+    ),
+    ProviderManifest(
+        provider_id="local-openai-compatible",
+        display_name="Local (OpenAI-compatible)",
+        capabilities=frozenset({_ASSISTANT}),
+        protocol_family=ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+        factories={_ASSISTANT: _OPENAI_COMPATIBLE_FACTORIES[_ASSISTANT]},
+        # Ollama's default address; LM Studio, vLLM, and others are set by editing it.
+        recommended_endpoint="http://localhost:11434/v1",
+        requires_endpoint=True,
+        fields=(_api_key(required=False), _TEMPERATURE, _MAX_OUTPUT_TOKENS),
     ),
 )
