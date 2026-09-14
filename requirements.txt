@@ -27,3 +27,11 @@ onnxruntime>=1.16.0
 nvidia-cublas-cu12>=12.1.3.1; sys_platform != 'darwin'
 nvidia-cudnn-cu12>=9.1.0.70; sys_platform != 'darwin'
 nvidia-cuda-runtime-cu12>=12.1.105; sys_platform != 'darwin'
+
+# --- Optional Cloud STT: Azure Speech (not bundled) ---
+# Left out of the packaged desktop runtime on purpose: only the dormant Azure adapter
+# uses it, the adapter imports it lazily and reports model_unavailable when absent, and
+# the SDK ships a native runtime (Windows x64 also needs the MSVC++ Redistributable).
+# The task that registers the Azure provider enables it here and in the installer.
+# Install for development with: pip install .[azure-speech]
+# azure-cognitiveservices-speech>=1.51.2

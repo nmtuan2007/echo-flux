@@ -38,6 +38,10 @@ cpu = [
 system-audio = [
     "soundcard>=0.4.2",
 ]
+azure-speech = [
+    # Optional cloud STT; engine/providers/stt/azure_speech.py imports it lazily.
+    "azure-cognitiveservices-speech>=1.51.2",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
