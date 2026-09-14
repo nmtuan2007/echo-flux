@@ -156,6 +156,46 @@ def _value_matches(spec: ManifestField, value: Any) -> bool:
     return spec.maximum is None or value <= spec.maximum
 
 
+def _validate_profiles(
+    manifest: ProviderManifest,
+    restricted: Optional[FrozenSet[ProtocolFamily]],
+    invalid: Callable[[], ProviderRegistryError],
+) -> None:
+    """A profiled manifest picks its family from a bounded, required choice field.
+
+    Every profile family must be allowed for every capability and by the provider's
+    restriction, so a profile can never smuggle in an arbitrary protocol or event mapper.
+    """
+    profiles = manifest.protocol_profiles
+    if not isinstance(profiles, dict) or not isinstance(manifest.profile_field, str):
+        raise invalid()
+    if not profiles:
+        if manifest.profile_field:
+            raise invalid()
+        return
+    families = list(profiles.values())
+    if families[0] is not manifest.protocol_family:
+        raise invalid()
+    for name, family in profiles.items():
+        if not is_valid_id_segment(name) or not isinstance(family, ProtocolFamily):
+            raise invalid()
+        if family is ProtocolFamily.LOCAL or (restricted is not None and family not in restricted):
+            raise invalid()
+        if any(family not in _ALLOWED_PROTOCOLS[cap] for cap in manifest.capabilities):
+            raise invalid()
+    spec = next((f for f in manifest.fields if f.key == manifest.profile_field), None)
+    if (
+        spec is None
+        or spec.field_type is not FieldType.CHOICE
+        or not spec.required
+        or spec.default is not None
+        or spec.applies_to
+        or set(spec.choices) != set(profiles)
+        or len(spec.choices) != len(profiles)
+    ):
+        raise invalid()
+
+
 def _validate_manifest(manifest: Any) -> None:
     if not isinstance(manifest, ProviderManifest):
         raise ProviderRegistryError(RegistryErrorCode.INVALID_MANIFEST)
@@ -182,6 +222,7 @@ def _validate_manifest(manifest: Any) -> None:
             raise invalid()
         if manifest.protocol_family not in _ALLOWED_PROTOCOLS[capability]:
             raise invalid()
+    _validate_profiles(manifest, restricted, invalid)
     if set(manifest.factories) != set(manifest.capabilities):
         raise invalid()
     for ref in manifest.factories.values():
@@ -280,8 +321,9 @@ class ProviderRegistry:
                 capability=_coerce_capability(capability),
             )
         resolved = override or manifest.recommended_model
-        # Local runtimes derive a model from their options; cloud APIs need an explicit name.
-        if not resolved and manifest.protocol_family is not ProtocolFamily.LOCAL:
+        # Local runtimes derive a model from their options and some cloud APIs (Azure Speech)
+        # have no model parameter; every provider with a selectable model needs a name.
+        if not resolved and manifest.model_selectable:
             raise ProviderRegistryError(
                 RegistryErrorCode.MISSING_MODEL,
                 provider_id=provider_id,
@@ -352,7 +394,8 @@ class ProviderRegistry:
         return ResolvedService(
             capability=cap,
             provider_id=pid,
-            protocol_family=manifest.protocol_family,
+            # A profiled provider (Custom STT) speaks the family its validated profile names.
+            protocol_family=manifest.protocol_family_for(options),
             factory_ref=manifest.factories[cap],
             endpoint=endpoint,
             model=model,
