@@ -4,8 +4,12 @@ No test contacts a provider or uses a real credential. SECRET is a sentinel that
 appear in serialized config, backups, fingerprints, or error text.
 """
 
+import importlib.util
 import json
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +28,11 @@ from engine.core.config_migration import (
     migrate_data,
 )
 from engine.providers import registry as registry_module
+from engine.providers.contracts import (
+    AssistantProvider,
+    StreamingSTTProvider,
+    TranslationProvider,
+)
 from engine.providers.manifests import (
     BUILTIN_MANIFESTS,
     FieldType,
@@ -254,6 +263,62 @@ def test_factory_references_point_at_planned_modules():
     assert local.factories[STT] != local.factories[TRANSLATION]
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Libraries an adapter may pull in to reach a provider; a lookup must never load them.
+NETWORK_MODULES = ("websockets", "httpx", "aiohttp", "requests", "openai", "google.genai")
+
+CAPABILITY_CONTRACTS = {
+    STT: StreamingSTTProvider,
+    TRANSLATION: TranslationProvider,
+    ASSISTANT: AssistantProvider,
+}
+
+_LAZY_IMPORT_PROBE = """
+import json, sys
+import engine.providers.manifests
+import engine.providers.registry as registry_module
+from engine.providers.types import ProviderCapability
+
+registry = registry_module.build_default_registry()
+for manifest in engine.providers.manifests.BUILTIN_MANIFESTS:
+    for capability in manifest.capabilities:
+        registry.get(capability, manifest.provider_id)
+    for capability in ProviderCapability:
+        registry.providers_for(capability)
+watched = json.loads(sys.argv[1])
+print(json.dumps(sorted(name for name in sys.modules if name in watched)))
+"""
+
+
+def _module_exists(module_name: str) -> bool:
+    # find_spec raises when a parent package is missing, e.g. before a later task adds it.
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def test_registry_lookups_do_not_import_adapters_or_network_libs():
+    # A fresh interpreter makes this independent of whatever earlier test modules imported.
+    watched = sorted(PLANNED_FACTORY_MODULES | set(NETWORK_MODULES))
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if part
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", _LAZY_IMPORT_PROBE, json.dumps(watched)],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == []
+
+
 def test_factories_are_imported_lazily(monkeypatch):
     calls = []
     real_import = registry_module.importlib.import_module
@@ -264,9 +329,11 @@ def test_factories_are_imported_lazily(monkeypatch):
 
     monkeypatch.setattr(registry_module.importlib, "import_module", spy)
     registry = ProviderRegistry([_manifest()])
-    build_default_registry()
+    default = build_default_registry()
+    for manifest in BUILTIN_MANIFESTS:
+        for capability in manifest.capabilities:
+            default.get(capability, manifest.provider_id)
     assert calls == []
-    assert not any(name in sys.modules for name in PLANNED_FACTORY_MODULES)
 
     from collections import OrderedDict
 
@@ -275,18 +342,36 @@ def test_factories_are_imported_lazily(monkeypatch):
     assert calls == ["collections"]
 
 
-def test_unresolvable_factories_fail_deterministically():
+def test_builtin_factories_resolve_or_fail_deterministically():
     registry = build_default_registry()
     for manifest in BUILTIN_MANIFESTS:
-        for capability in manifest.capabilities:
-            with pytest.raises(ProviderRegistryError) as excinfo:
-                registry.load_factory(capability, manifest.provider_id)
-            assert excinfo.value.code is RegistryErrorCode.FACTORY_UNAVAILABLE
+        for capability, ref in manifest.factories.items():
+            if _module_exists(ref.partition(":")[0]):
+                factory = registry.load_factory(capability, manifest.provider_id)
+                assert isinstance(factory, type), ref
+                assert issubclass(factory, CAPABILITY_CONTRACTS[capability]), ref
+                assert registry.load_factory(capability, manifest.provider_id) is factory
+            else:
+                with pytest.raises(ProviderRegistryError) as excinfo:
+                    registry.load_factory(capability, manifest.provider_id)
+                assert excinfo.value.code is RegistryErrorCode.FACTORY_UNAVAILABLE, ref
 
-    missing_attr = ProviderRegistry([_manifest(factories={TRANSLATION: "collections:Nope"})])
-    with pytest.raises(ProviderRegistryError) as excinfo:
-        missing_attr.load_factory(TRANSLATION, "test-text")
-    assert excinfo.value.code is RegistryErrorCode.FACTORY_UNAVAILABLE
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "collections:Nope",
+        "engine.providers.ef003_missing_module:Provider",
+        "engine.providers.ef003_missing_package.adapter:Provider",
+    ],
+)
+def test_unresolvable_factories_fail_deterministically(ref):
+    registry = ProviderRegistry([_manifest(factories={TRANSLATION: ref})])
+    for _ in range(2):
+        with pytest.raises(ProviderRegistryError) as excinfo:
+            registry.load_factory(TRANSLATION, "test-text")
+        assert excinfo.value.code is RegistryErrorCode.FACTORY_UNAVAILABLE
+        assert excinfo.value.provider_id == "test-text"
 
 
 def _service_for(manifest: ProviderManifest, capability: ProviderCapability, **values):
