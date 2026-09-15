@@ -1386,6 +1386,280 @@ body,
   color: var(--accent);
 }
 
+/* ── Settings — provider service cards ── */
+
+.settings-group {
+  margin-bottom: 24px;
+}
+
+.settings-group-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.settings-group-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.service-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.service-card {
+  min-width: 0;
+  padding: 16px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.service-card.is-locked {
+  opacity: 0.85;
+}
+
+.service-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.service-card-header .settings-section-title {
+  margin-bottom: 0;
+}
+
+.service-card-description {
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+.service-badge {
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.service-badge-success {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.service-badge-error {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.service-badge-stale {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.service-badge-loading,
+.service-badge-retry {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.service-model,
+.service-language-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.service-model code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.field-required {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.field-error {
+  font-size: 12px;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
+.settings-field.has-error input[type="text"],
+.settings-field.has-error input[type="password"],
+.settings-field.has-error select {
+  border-color: var(--danger);
+}
+
+.settings-field input[type="text"]::placeholder,
+.settings-field input[type="password"]::placeholder {
+  color: var(--text-muted);
+}
+
+.service-card input:focus-visible,
+.service-card select:focus-visible,
+.service-card button:focus-visible,
+.service-advanced summary:focus-visible,
+.settings-legacy summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.secret-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.secret-field-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.secret-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.secret-status-configured {
+  color: var(--success);
+}
+
+.secret-status-missing {
+  color: var(--text-muted);
+}
+
+.secret-field .settings-field-group {
+  flex-wrap: wrap;
+}
+
+.secret-field .settings-field-group input[type="password"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.secret-field-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-text-danger {
+  color: var(--danger);
+}
+
+.btn-text-danger:hover:not(:disabled) {
+  background-color: rgba(224, 85, 85, 0.1);
+}
+
+.service-advanced {
+  margin: 4px 0 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.service-advanced summary,
+.settings-legacy summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 4px 0;
+}
+
+.service-advanced-body {
+  margin-top: 8px;
+}
+
+.service-test {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.service-test-status {
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.service-test-success {
+  color: var(--success);
+}
+
+.service-test-error {
+  color: var(--danger);
+}
+
+.service-test-stale {
+  color: var(--warning);
+}
+
+.service-test-loading,
+.service-test-retry {
+  color: var(--accent);
+}
+
+.settings-legacy {
+  margin-bottom: 24px;
+}
+
+.settings-legacy > summary {
+  margin-bottom: 12px;
+}
+
+@media (max-width: 560px) {
+  .settings-panel {
+    padding: 16px 12px;
+  }
+
+  .service-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-field-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
 /* ── Overlay PiP Specific Styling ── */
 .overlay-wrapper .transcript-entry {
   background-color: rgba(20, 20, 20, 0.85); /* distinct dark semi-transparent */

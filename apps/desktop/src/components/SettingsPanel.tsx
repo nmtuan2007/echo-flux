@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import { AudioDeviceInfo, EngineConfig, useEngineStore } from "../store/engineStore";
+import { SERVICE_NAMES } from "../store/settingsSlice";
+import { ServiceSettingsCard } from "./ServiceSettingsCard";
 const DEVICES = ["auto", "cpu", "cuda"];
 
 const LANGUAGES = [
@@ -68,6 +70,7 @@ export function SettingsPanel() {
     setActiveView,
     modelsList,
     requestModelsList,
+    refreshServiceCredentials,
   } = useEngineStore();
 
   // Auto-fetch device and model lists when connected.
@@ -77,6 +80,11 @@ export function SettingsPanel() {
       requestModelsList();
     }
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Which secret slots the vault holds for each service; values are never read back.
+  useEffect(() => {
+    for (const service of SERVICE_NAMES) void refreshServiceCredentials(service);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const downloadedAsrModels = modelsList.asr.filter((m) => m.is_downloaded);
   const downloadedTranslationModels = modelsList.translation.filter((m) => m.is_downloaded);
@@ -94,6 +102,21 @@ export function SettingsPanel() {
     <div className="settings-panel">
       <h2 className="settings-title">Settings</h2>
       {running && <p className="settings-warning">Stop the pipeline before changing settings.</p>}
+
+      {/* ── Services ─────────────────────────────────────────────────── */}
+      <div className="settings-group" role="group" aria-labelledby="settings-services-title">
+        <h3 id="settings-services-title" className="settings-group-title">
+          Services
+        </h3>
+        <p className="settings-group-note">
+          Each service has its own provider. Source language is detected automatically.
+        </p>
+        <div className="service-cards">
+          {SERVICE_NAMES.map((service) => (
+            <ServiceSettingsCard key={service} service={service} />
+          ))}
+        </div>
+      </div>
 
       {/* ── Audio Input ──────────────────────────────────────────────── */}
       <section className="settings-section">
@@ -164,6 +187,31 @@ export function SettingsPanel() {
           </p>
         )}
       </section>
+
+      {/* ── Invisible/Pro UI ──────────────────────────────────────────────── */}
+      <section className="settings-section">
+         <h3 className="settings-section-title">✨ Pro UX Experience</h3>
+         <div className="settings-field settings-field-row">
+            <label htmlFor="stealth-mode">Hide from Screen Share (Stealth Mode)</label>
+            <input
+               id="stealth-mode"
+               type="checkbox"
+               checked={config.stealthMode}
+               onChange={(e) => updateConfig({ stealthMode: e.target.checked })}
+            />
+         </div>
+         <p className="settings-note">
+            When enabled, the Overlay Window will be invisible to OBS, Zoom, and Teams screen captures.
+         </p>
+      </section>
+
+      {/* ── Legacy engine settings (transitional, removed by EF-030) ─────── */}
+      <details className="settings-legacy">
+        <summary>Legacy engine settings (transitional)</summary>
+        <p className="settings-note">
+          Model, language, and key settings the current engine runtime still reads. The
+          service cards above replace them.
+        </p>
 
       {/* ── Speech Recognition ───────────────────────────────────────── */}
       <section className="settings-section">
@@ -363,23 +411,6 @@ export function SettingsPanel() {
         )}
       </section>
 
-      {/* ── Invisible/Pro UI ──────────────────────────────────────────────── */}
-      <section className="settings-section">
-         <h3 className="settings-section-title">✨ Pro UX Experience</h3>
-         <div className="settings-field settings-field-row">
-            <label htmlFor="stealth-mode">Hide from Screen Share (Stealth Mode)</label>
-            <input
-               id="stealth-mode"
-               type="checkbox"
-               checked={config.stealthMode}
-               onChange={(e) => updateConfig({ stealthMode: e.target.checked })}
-            />
-         </div>
-         <p className="settings-note">
-            When enabled, the Overlay Window will be invisible to OBS, Zoom, and Teams screen captures.
-         </p>
-      </section>
-
       {/* ── AI Assistant ─────────────────────────────────────────────── */}
       <section className="settings-section settings-section-ai">
         <h3 className="settings-section-title">🤖 AI Assistant</h3>
@@ -497,6 +528,7 @@ export function SettingsPanel() {
           />
         </div>
       </section>
+      </details>
     </div>
   );
 }
