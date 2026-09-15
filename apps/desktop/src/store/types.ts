@@ -17,6 +17,71 @@ export interface SuggestionResult {
 
 export type TranscriptSource = "mic" | "system" | "both" | null;
 
+// An interval of the session timeline whose transcript may be missing or repeated
+// (engine/session/transcript_ledger.py ContinuityWarning). Milliseconds on the session clock.
+export interface ContinuityInterval {
+  source: string;
+  reason: string;
+  startMs: number;
+  endMs: number;
+  epoch: number | null;
+}
+
+// Per stream (mic/system) STT provider state, derived from session transcript metadata.
+// Fallback is sticky: once a stream falls back to Local it stays there for the session.
+export interface StreamSttStatus {
+  source: string;
+  provider: string | null;
+  fallbackFrom: string | null;
+  continuity: ContinuityInterval[];
+  continuityCount: number;
+}
+
+export interface SuggestedReply {
+  strategy: string;
+  text: string;
+  reasoning?: string;
+}
+
+export interface ClarifyingQuestion {
+  question: string;
+  purpose?: string;
+}
+
+// provider: the Assistant provider failed. structured: the engine refused or could not run
+// the request. interrupted: the request ended without its suggestion_result (bridge failure).
+export type AssistErrorKind = "structured" | "provider" | "interrupted";
+
+export interface AssistError {
+  kind: AssistErrorKind;
+  code: string | null;
+  providerCode: string | null;
+  // Fixed engine text or a UI constant; never provider free text.
+  message: string;
+  retryable: boolean;
+}
+
+export interface AssistOutcome {
+  requestId: string;
+  assistId: string | null;
+  conversationId: string | null;
+  suggestedReplies: SuggestedReply[];
+  clarifyingQuestions: ClarifyingQuestion[];
+  providerId: string | null;
+  error: AssistError | null;
+}
+
+// One in-flight manual Assist request. Ephemeral, never persisted.
+export interface AssistRequestState {
+  requestId: string;
+  conversationId: string;
+  messageId: string;
+}
+
+export type AssistPhase = "hidden" | "idle" | "unavailable" | "loading" | "success" | "empty" | "error";
+
+export type AssistUnavailableReason = "no_conversation" | "disconnected";
+
 export interface TranscriptEntry {
   id: string;
   text: string;
@@ -27,12 +92,29 @@ export interface TranscriptEntry {
   suggestions?: SuggestionResult; // persisted with the entry
   // Only set when the engine sends one; the legacy runtime never does.
   revision?: number;
+  // Session metadata (EF-016). Absent on legacy transcripts.
+  itemId?: string;
+  sttProvider?: string;
+  sttFallbackFrom?: string;
+  continuity?: ContinuityInterval;
+  // Engine conversation record ids. Nothing sends them yet; Assist stays unavailable without.
+  conversationId?: string;
+  messageId?: string;
+  // Translation authority: a final translation is never replaced by a partial one.
+  translationFinal?: boolean;
+  translationRevision?: number;
+  translationProvider?: string;
+  translationFallback?: boolean;
+  assist?: AssistOutcome;
 }
 
 export interface PartialTranscript {
   text: string;
   translation: string | null;
   source: TranscriptSource;
+  itemId?: string;
+  revision?: number;
+  sttProvider?: string;
 }
 
 export interface Conversation {

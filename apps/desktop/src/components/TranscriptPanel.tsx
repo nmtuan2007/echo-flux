@@ -1,21 +1,25 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { TranscriptEntry, SuggestionOption, useEngineStore } from "../store/engineStore";
+import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { useEngineStore } from "../store/engineStore";
+import { deriveSttNotice, streamRank, sttProviderLabel } from "../store/transcriptSlice";
+import type {
+  ContinuityInterval,
+  PartialTranscript,
+  TranscriptEntry,
+  TranscriptSource,
+} from "../store/types";
+import { AssistPanel } from "./AssistPanel";
 
-type AudioSource = TranscriptEntry["source"];
-
-const SOURCE_LABELS: Record<NonNullable<AudioSource>, { icon: string; label: string; cls: string }> = {
-  mic:    { icon: "🎤", label: "Mic",     cls: "source-badge-mic" },
-  system: { icon: "🔊", label: "Speaker", cls: "source-badge-system" },
-  both:   { icon: "🔄", label: "Both",    cls: "source-badge-both" },
+const SOURCE_LABELS: Record<NonNullable<TranscriptSource>, { icon: string; label: string; cls: string }> = {
+  mic:    { icon: "🎤", label: "Me",     cls: "source-badge-mic" },
+  system: { icon: "🔊", label: "Others", cls: "source-badge-system" },
+  both:   { icon: "🔄", label: "Both",   cls: "source-badge-both" },
 };
 
-const STRATEGY_META: Record<string, { icon: string; cls: string }> = {
-  Cooperative: { icon: "🤝", cls: "suggestion-card-cooperative" },
-  Clarifying:  { icon: "🔍", cls: "suggestion-card-clarifying" },
-  Assertive:   { icon: "💪", cls: "suggestion-card-assertive" },
-};
+function sourceLabel(source: string): string {
+  return SOURCE_LABELS[source as NonNullable<TranscriptSource>]?.label ?? source;
+}
 
-function SourceBadge({ source }: { source: AudioSource }) {
+function SourceBadge({ source }: { source: TranscriptSource | undefined }) {
   if (!source) return null;
   const meta = SOURCE_LABELS[source];
   if (!meta) return null;
@@ -26,152 +30,130 @@ function SourceBadge({ source }: { source: AudioSource }) {
   );
 }
 
-function sourceBorderClass(source: AudioSource): string {
+function sourceBorderClass(source: TranscriptSource | undefined): string {
   if (!source) return "";
   return `transcript-source-${source}`;
 }
 
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard API unavailable
-    }
-  };
-
-  return (
-    <button className="suggestion-copy-btn" onClick={handleCopy} title="Copy to clipboard">
-      {copied ? "✓" : "Copy"}
-    </button>
-  );
+function formatMs(ms: number): string {
+  const total = Math.max(0, ms) / 1000;
+  const minutes = Math.floor(total / 60);
+  const seconds = (total - minutes * 60).toFixed(1).padStart(4, "0");
+  return `${minutes}:${seconds}`;
 }
 
-function SuggestionCards({ options, error }: { options?: SuggestionOption[]; error?: string }) {
-  if (error) {
-    return <div className="suggestion-error">⚠ {error}</div>;
-  }
-  if (!options || options.length === 0) return null;
-
-  return (
-    <div className="suggestion-cards">
-      {options.map((opt, i) => {
-        const meta = STRATEGY_META[opt.strategy] ?? { icon: "💬", cls: "suggestion-card-default" };
-        return (
-          <div key={i} className={`suggestion-card ${meta.cls}`}>
-            <div className="suggestion-card-header">
-              <span className="suggestion-strategy">{meta.icon} {opt.strategy}</span>
-              <CopyButton text={opt.text} />
-            </div>
-            <p className="suggestion-text">{opt.text}</p>
-          </div>
-        );
-      })}
-    </div>
-  );
+function intervalText(interval: ContinuityInterval): string {
+  return `${formatMs(interval.startMs)}–${formatMs(interval.endMs)}`;
 }
 
-function FinalEntry({ entry, index }: {
-  entry: TranscriptEntry;
-  index: number;
-}) {
-  const { config, suggestionLoading, requestSuggestion } = useEngineStore();
-  // Local UI state — expand/collapse, not persisted
-  const [showSuggestions, setShowSuggestions] = useState(false);
-
-  const isLoading = suggestionLoading[entry.id] ?? false;
-  const hasSuggestion = !!entry.suggestions;
-
-  const handleSuggest = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const contextEntries = useEngineStore.getState().entries;
-    const contextSlice = contextEntries
-      .slice(Math.max(0, index - 5), index)
-      .map((e) => e.text);
-    requestSuggestion(entry.id, entry.text, contextSlice);
-    // Auto-expand after requesting
-    setShowSuggestions(true);
-  };
-
-  // Auto-show when result arrives
-  useEffect(() => {
-    if (hasSuggestion && !isLoading) {
-      setShowSuggestions(true);
-    }
-  }, [hasSuggestion, isLoading]);
+// Memoized on the entry object: the store replaces only entries that changed, so a partial on
+// either stream re-renders no final entry.
+const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry }) {
+  const translationEnabled = useEngineStore((s) => s.config.translationEnabled);
 
   return (
-    <div className={`transcript-entry transcript-final ${sourceBorderClass(entry.source)}`}>
-      {entry.source && (
+    <div
+      className={`transcript-entry transcript-final ${sourceBorderClass(entry.source)}`}
+      data-entry-id={entry.id}
+    >
+      {(entry.source || entry.continuity) && (
         <div className="transcript-entry-header">
           <SourceBadge source={entry.source} />
+          {entry.continuity && (
+            <span
+              className="transcript-continuity"
+              title="Words in this interval may be missing or repeated"
+            >
+              Continuity uncertain {intervalText(entry.continuity)}
+            </span>
+          )}
         </div>
       )}
       <div className="transcript-text">{entry.text}</div>
-      {config.translationEnabled && entry.translation && (
-        <div className="transcript-translation">{entry.translation}</div>
+      {translationEnabled && entry.translation && (
+        <div
+          className="transcript-translation"
+          data-translation-state={entry.translationFinal === false ? "draft" : "final"}
+        >
+          {entry.translation}
+        </div>
       )}
       <span className="transcript-time">{formatTime(entry.timestamp)}</span>
+      <AssistPanel entry={entry} />
+    </div>
+  );
+});
 
-      {/* AI Suggestion area */}
-      {config.llmEnabled && (
-        <div className="suggest-action-row">
-          {/* Loading state */}
-          {isLoading && (
-            <div className="suggestion-spinner">
-              <span className="suggestion-spinner-dot" />
-              <span className="suggestion-spinner-dot" />
-              <span className="suggestion-spinner-dot" />
-              <span className="suggestion-spinner-text">AI is thinking...</span>
-            </div>
-          )}
+// Keyed by stream, and memoized on that stream's partial object, so mic and system updates
+// never re-render or remount each other.
+const PartialEntry = memo(function PartialEntry({
+  stream,
+  partial,
+}: {
+  stream: string;
+  partial: PartialTranscript;
+}) {
+  const translationEnabled = useEngineStore((s) => s.config.translationEnabled);
 
-          {/* Not loading, no suggestion yet → Get button */}
-          {!isLoading && !hasSuggestion && (
-            <button className="suggest-btn" onClick={handleSuggest} title="Get AI reply suggestions (Ctrl+Shift+S)">
-              💡 Suggest Reply
-            </button>
-          )}
-
-          {/* Has suggestion → Show/Hide toggle + Refresh */}
-          {!isLoading && hasSuggestion && (
-            <div className="suggest-toggle-row">
-              <button
-                className={`suggest-btn suggest-btn-toggle ${showSuggestions ? "active" : ""}`}
-                onClick={() => setShowSuggestions((v) => !v)}
-              >
-                {showSuggestions ? "💡 Hide Reply Ideas" : "💡 Show Reply Ideas"}
-              </button>
-              <button
-                className="suggest-btn suggest-btn-refresh"
-                onClick={handleSuggest}
-                title="Refresh suggestions (Ctrl+Shift+S)"
-              >
-                ↺
-              </button>
-            </div>
-          )}
-
-          {/* Expanded suggestion cards */}
-          {!isLoading && hasSuggestion && showSuggestions && (
-            <SuggestionCards
-              options={entry.suggestions?.options}
-              error={entry.suggestions?.error}
-            />
-          )}
+  return (
+    <div
+      className={`transcript-entry transcript-partial ${sourceBorderClass(partial.source)}`}
+      data-stream={stream}
+      aria-live="off"
+    >
+      {partial.source && (
+        <div className="transcript-entry-header">
+          <SourceBadge source={partial.source} />
         </div>
+      )}
+      <div className="transcript-text">
+        {partial.text}
+        <span className="typing-cursor" />
+      </div>
+      {translationEnabled && partial.translation && (
+        <div className="transcript-translation" data-translation-state="draft">
+          {partial.translation}
+        </div>
+      )}
+    </div>
+  );
+});
+
+function SttNoticeBar() {
+  const entries = useEngineStore((s) => s.entries);
+  const sttStreams = useEngineStore((s) => s.sttStreams);
+  const running = useEngineStore((s) => s.running);
+  const notice = useMemo(
+    () => deriveSttNotice(entries, sttStreams, running),
+    [entries, sttStreams, running],
+  );
+
+  if (notice.fallbacks.length === 0 && notice.continuityCount === 0) return null;
+
+  return (
+    <div className="stt-notice" role="status">
+      {notice.fallbacks.map((f) => (
+        <span key={f.source} className="stt-notice-item stt-notice-fallback">
+          {sourceLabel(f.source)}: switched to Local from {sttProviderLabel(f.from)}
+        </span>
+      ))}
+      {notice.latestContinuity && (
+        <span className="stt-notice-item stt-notice-continuity">
+          Continuity uncertain in {notice.continuityCount} interval
+          {notice.continuityCount !== 1 ? "s" : ""} (latest {intervalText(notice.latestContinuity)})
+        </span>
       )}
     </div>
   );
 }
 
 export function TranscriptPanel() {
-  const { entries, partials, running, downloading, downloadModel, downloadPercent } = useEngineStore();
+  const entries = useEngineStore((s) => s.entries);
+  const partials = useEngineStore((s) => s.partials);
+  const running = useEngineStore((s) => s.running);
+  const downloading = useEngineStore((s) => s.downloading);
+  const downloadModel = useEngineStore((s) => s.downloadModel);
+  const downloadPercent = useEngineStore((s) => s.downloadPercent);
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
 
@@ -187,8 +169,11 @@ export function TranscriptPanel() {
     }
   }, [entries, partials]);
 
-  const activePartials = Object.values(partials);
-  const hasContent = entries.length > 0 || activePartials.length > 0;
+  const partialStreams = useMemo(
+    () => Object.keys(partials).sort((a, b) => streamRank(a) - streamRank(b)),
+    [partials],
+  );
+  const hasContent = entries.length > 0 || partialStreams.length > 0;
 
   return (
     <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
@@ -207,6 +192,8 @@ export function TranscriptPanel() {
         </div>
       )}
 
+      <SttNoticeBar />
+
       {!hasContent && !downloading && (
         <div className="transcript-empty">
           <p>No transcript yet.</p>
@@ -214,31 +201,15 @@ export function TranscriptPanel() {
         </div>
       )}
 
-      {entries.map((entry, index) => (
-        <FinalEntry key={entry.id} entry={entry} index={index} />
+      {entries.map((entry) => (
+        <FinalEntry key={entry.id} entry={entry} />
       ))}
 
-      {activePartials.map((partial, idx) => (
-        <div
-          key={`partial-${idx}`}
-          className={`transcript-entry transcript-partial ${sourceBorderClass(partial.source)}`}
-        >
-          {partial.source && (
-            <div className="transcript-entry-header">
-              <SourceBadge source={partial.source} />
-            </div>
-          )}
-          <div className="transcript-text">
-            {partial.text}
-            <span className="typing-cursor" />
-          </div>
-          {useEngineStore.getState().config.translationEnabled && partial.translation && (
-            <div className="transcript-translation">{partial.translation}</div>
-          )}
-        </div>
+      {partialStreams.map((stream) => (
+        <PartialEntry key={`partial-${stream}`} stream={stream} partial={partials[stream]} />
       ))}
 
-      {running && activePartials.length === 0 && entries.length > 0 && (
+      {running && partialStreams.length === 0 && entries.length > 0 && (
         <div className="transcript-listening">
           <span className="listening-dot" />
           <span className="listening-dot" />
