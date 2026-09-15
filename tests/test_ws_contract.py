@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "engine" / "server" / "websocket_server.py"
 MAIN = ROOT / "engine" / "main.py"
 STORE = ROOT / "apps" / "desktop" / "src" / "store" / "engineStore.ts"
+TRANSCRIPT_SLICE = ROOT / "apps" / "desktop" / "src" / "store" / "transcriptSlice.ts"
 RULES = ROOT / ".agent" / "rules" / "03-architecture.md"
 
 
@@ -150,3 +151,84 @@ def test_unknown_command_is_answered_with_an_error(surfaces):
     # The server must reply to unrecognized types rather than drop them.
     assert "Unknown type" in _read(SERVER)
     assert "error" in surfaces["engine_sends"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Realtime STT session payload extensions (EF-016)
+#
+# The session adds no message types. It extends `partial`/`final` with metadata keys and reports
+# provider transitions on `status` with new status values. Both must stay invisible to the
+# current store until the frontend migrates.
+# ---------------------------------------------------------------------------------------------
+
+LEGACY_TRANSCRIPT_KEYS = {
+    "type",
+    "text",
+    "translation",
+    "is_final",
+    "timestamp",
+    "source",
+    "entry_id",
+    "translation_backend",
+}
+
+
+def _session_transcript_event(**overrides):
+    from engine.session.session_orchestrator import STTTranscriptEvent
+
+    values = {
+        "stream_id": "system",
+        "is_final": True,
+        "text": "hello",
+        "item_key": "system:1:local:system:0",
+        "revision": 2,
+        "epoch_id": 1,
+        "provider_id": "local",
+        "language": "en",
+    }
+    values.update(overrides)
+    return STTTranscriptEvent(**values)
+
+
+def test_session_transcript_payloads_extend_the_legacy_shape_additively(surfaces):
+    from engine.main import _stt_transcript_message
+
+    final = _stt_transcript_message(_session_transcript_event(), "e-1.5", "marian")
+    partial = _stt_transcript_message(_session_transcript_event(is_final=False), None, None)
+
+    assert set(final) >= LEGACY_TRANSCRIPT_KEYS
+    assert (final["type"], final["is_final"], final["translation"]) == ("final", True, None)
+    assert (final["source"], final["entry_id"]) == ("system", "e-1.5")
+    assert (partial["type"], partial["is_final"]) == ("partial", False)
+    assert "entry_id" not in partial
+    assert {final["type"], partial["type"]} <= surfaces["documented_out"]
+
+    extensions = set(final) - LEGACY_TRANSCRIPT_KEYS
+    assert {"revision", "stt_provider", "language", "continuity"} <= extensions
+    # The store reads `revision` only to replace an entry with the same entry_id, and every
+    # session final carries a fresh entry_id. No other extension key is read today.
+    read_by_store = set(re.findall(r"message\.(\w+)", _read(TRANSCRIPT_SLICE)))
+    assert extensions & read_by_store <= {"revision"}
+
+
+def test_session_status_values_are_ignored_by_the_current_store(surfaces):
+    from engine.main import _stt_status_message
+    from engine.session.session_orchestrator import STTStatusEvent, STTStatusKind
+
+    acted_on = set(re.findall(r'message\.status\s*===\s*"(\w+)"', _read(STORE)))
+    assert acted_on == {"started", "stopped"}
+
+    for kind in STTStatusKind:
+        message = _stt_status_message(
+            STTStatusEvent(
+                stream_id="mic",
+                status=kind,
+                provider_id="local",
+                previous_provider_id="openai-realtime",
+                reason="timeout",
+                state="local_active",
+            )
+        )
+        assert message["type"] == "status"
+        assert message["type"] in surfaces["documented_out"]
+        assert message["status"] not in acted_on

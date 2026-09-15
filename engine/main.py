@@ -36,6 +36,12 @@ from engine.server.protocol import (
 )
 from engine.server.websocket_server import WebSocketServer
 from engine.asr.base import TranscriptResult
+from engine.session.session_orchestrator import (
+    STTSessionOrchestrator,
+    STTStatusEvent,
+    STTStatusKind,
+    resolve_session_config,
+)
 
 logger = logging.getLogger("echoflux.engine")
 
@@ -191,6 +197,101 @@ def _warning_payload(warning) -> Optional[dict]:
     }
 
 
+class _LegacyASRBackend:
+    """Legacy start configs name a Whisper size; keep it when Local STT loads its runtime.
+
+    ``LocalSTTProvider`` picks a model pack and passes its model to ``load_model``. A legacy
+    start (flat ``asr.*`` keys) predates packs, so this backend loads what the user picked
+    through the same ``AutoModelAdapter`` path as before. Kept until EF-030.
+    """
+
+    def __init__(self, asr_config: TranscriptionConfig):
+        self._config = asr_config
+        self._backend = None
+
+    def load_model(self, _pack_config) -> None:
+        from engine.asr import AutoModelAdapter
+
+        backend = AutoModelAdapter.load(self._config)
+        backend.load_model(self._config)
+        self._backend = backend
+
+    def unload_model(self) -> None:
+        backend, self._backend = self._backend, None
+        if backend is not None:
+            backend.unload_model()
+
+    def __getattr__(self, name: str):
+        backend = self.__dict__.get("_backend")
+        if backend is None:
+            raise AttributeError(name)
+        return getattr(backend, name)
+
+
+def _continuity_payload(warning) -> Optional[dict]:
+    if warning is None:
+        return None
+    return {
+        "reason": warning.reason.value,
+        "start_ms": warning.start_ms,
+        "end_ms": warning.end_ms,
+        "epoch": warning.epoch_id,
+    }
+
+
+def _stt_transcript_message(
+    event, entry_id: Optional[str], translation_backend: Optional[str]
+) -> dict:
+    """The legacy partial/final shape, then additive session metadata the store ignores."""
+    msg = {
+        "type": "final" if event.is_final else "partial",
+        "text": event.text,
+        "translation": None,
+        "is_final": event.is_final,
+        "timestamp": time.time(),
+    }
+    if event.stream_id in ("mic", "system"):
+        msg["source"] = event.stream_id
+    if entry_id:
+        msg["entry_id"] = entry_id
+    if translation_backend:
+        msg["translation_backend"] = translation_backend
+    msg.update(
+        {
+            "revision": event.revision,
+            "item_id": event.item_key,
+            "epoch": event.epoch_id,
+            "stt_provider": event.provider_id,
+            "language": event.language,
+            "retracted": event.retracted,
+            "duplicate_of": event.duplicate_of,
+            "continuity": _continuity_payload(event.continuity),
+        }
+    )
+    return msg
+
+
+def _stt_status_message(event) -> dict:
+    """Provider transitions ride on ``status`` with values the current store does not act on."""
+    replay = None
+    if event.replay_start_ms is not None:
+        replay = {"start_ms": event.replay_start_ms, "end_ms": event.replay_end_ms}
+    gap = None
+    if event.gap is not None:
+        gap = {"reason": "audio_gap", "start_ms": event.gap[0], "end_ms": event.gap[1]}
+    return {
+        "type": "status",
+        "status": event.status.value,
+        "source": event.stream_id,
+        "stt_provider": event.provider_id,
+        "previous_stt_provider": event.previous_provider_id,
+        "reason": event.reason,
+        "stt_state": event.state,
+        "replay": replay,
+        "continuity": gap,
+    }
+
+
 class EchoFluxEngine:
     def __init__(self, insecure_dev: bool = False):
         # Tokens are consumed from the environment here and live only inside the server,
@@ -210,6 +311,15 @@ class EchoFluxEngine:
         
         self._asr_backend = None
         self._translation_backend = None
+        # Realtime STT session: config resolved per Start, orchestrator owned per session.
+        self._session_config = None
+        self._stt_session: Optional[STTSessionOrchestrator] = None
+        self._last_entry_stamp = 0.0
+        # Composition seams. The desktop path has no transport for cloud STT secrets yet, so
+        # nothing sets the resolver in production and cloud STT Start fails closed.
+        self._stt_local_builder = self._build_local_stt
+        self._stt_cloud_builder = None
+        self._stt_secrets_resolver = None
 
         self._running = False
 
@@ -294,9 +404,12 @@ class EchoFluxEngine:
 
         try:
             await asyncio.to_thread(self._initialize_pipeline, config)
+            # Providers and the mandatory Local fallback are ready before any device opens.
+            await self._start_stt_session()
             self._start_threads()
         except Exception as e:
             logger.error("Failed to start pipeline: %s", e, exc_info=True)
+            await self._abort_pipeline_start()
             if self._client:
                 await self._client.send(json.dumps({"type": "error", "message": str(e)}))
 
@@ -364,17 +477,16 @@ class EchoFluxEngine:
                 "sample_rate": sample_rate,
             })
 
-        # 3. ASR Backend
-        from engine.asr import AutoModelAdapter
-
-        asr_config = TranscriptionConfig(
-            model_size=settings.get("asr.model_size", "small"),
-            language=settings.get("asr.language", "en"),
-            device=settings.get("asr.device", "auto"),
+        # 3. STT session config. Resolved once, before any provider or audio device starts;
+        # the Local provider loads its model when the session starts. A legacy flat start
+        # config (asr.*) maps onto the Local service through the adapter kept until EF-030.
+        self._asr_backend = None
+        self._session_config = resolve_session_config(
+            settings,
+            tuple(self._inputs),
+            sample_rate=sample_rate,
             compute_type=os.getenv("ECHOFLUX_COMPUTE_TYPE", "float16"),
         )
-        self._asr_backend = AutoModelAdapter.load(asr_config)
-        self._asr_backend.load_model(asr_config)
 
         # 4. Translation Backend
         if settings.get("translation.enabled", False):
@@ -462,8 +574,13 @@ class EchoFluxEngine:
             self._capture_threads.append(ct)
 
             pt = threading.Thread(
-                target=self._process_loop,
-                args=(stream_id, self._audio_queues[stream_id], self._vads[stream_id]),
+                target=self._session_process_loop,
+                args=(
+                    stream_id,
+                    self._audio_queues[stream_id],
+                    self._vads[stream_id],
+                    self._stt_session,
+                ),
                 name=f"Process-{stream_id}"
             )
             pt.daemon = True
@@ -496,6 +613,12 @@ class EchoFluxEngine:
 
         if self._translation_thread:
             self._translation_thread.join(timeout=2.0)
+
+        if self._stt_session is not None:
+            # Stops every provider once and queues trailing finals before the broadcast flush.
+            session, self._stt_session = self._stt_session, None
+            await session.stop()
+        self._session_config = None
 
         if self._asr_backend:
             for stream_id in self._inputs.keys():
@@ -725,6 +848,134 @@ class EchoFluxEngine:
                     }, timeout=0.5)
                 except Full:
                     pass
+
+    # --- Realtime STT session -------------------------------------------------------------
+    #
+    # Lifecycle: _initialize_pipeline resolves the session config on a worker thread ->
+    # _start_stt_session readies providers (no device open yet) -> _start_threads opens audio ->
+    # Process-{stream} runs VAD and hands audio to the session -> _stop_pipeline stops the
+    # session once. Any Start failure goes through _abort_pipeline_start.
+
+    async def _start_stt_session(self):
+        session = STTSessionOrchestrator(
+            self._session_config,
+            self._on_stt_event,
+            cloud_builder=self._stt_cloud_builder,
+            local_builder=self._stt_local_builder,
+            secrets_resolver=self._stt_secrets_resolver,
+        )
+        self._stt_session = session
+        await session.start()
+
+    async def _abort_pipeline_start(self):
+        """Undo a failed Start: nothing stays loaded, open, or running."""
+        if self._running:
+            await self._stop_pipeline()
+            return
+        if self._stt_session is not None:
+            session, self._stt_session = self._stt_session, None
+            await session.stop()
+        if self._translation_backend:
+            backend, self._translation_backend = self._translation_backend, None
+            await asyncio.to_thread(backend.unload_model)
+        self._session_config = None
+        self._inputs.clear()
+        self._vads.clear()
+        self._audio_queues.clear()
+
+    def _build_local_stt(self, session_config):
+        """Local STT for a session. A legacy start keeps the Whisper size the user picked."""
+        from engine.providers.stt.local import LocalSTTProvider, LocalSTTSettings
+
+        settings = LocalSTTSettings.from_options(dict(session_config.fallback.options))
+        extra = {}
+        if session_config.legacy_model_size:
+            asr_config = TranscriptionConfig(
+                model_size=session_config.legacy_model_size,
+                language=settings.language,
+                device=settings.device,
+                compute_type=settings.compute_type,
+            )
+            extra["backend_factory"] = lambda: _LegacyASRBackend(asr_config)
+        return LocalSTTProvider(
+            settings,
+            provider_id=session_config.fallback.provider_id,
+            stream_ids=session_config.stream_ids,
+            **extra,
+        )
+
+    def _session_process_loop(self, stream_id: str, audio_queue: Queue, vad, session):
+        """VAD and silence endpointing for one stream; recognition runs in the session."""
+        logger.info("Processing thread [%s] started.", stream_id)
+        was_speech = False
+        silence_start_time = None
+        try:
+            while self._running:
+                chunks = []
+                try:
+                    chunks.append(audio_queue.get(timeout=0.1))
+                    while not audio_queue.empty() and len(chunks) < 10:
+                        try:
+                            chunks.append(audio_queue.get_nowait())
+                        except Empty:
+                            break
+                except Empty:
+                    silent_for = time.time() - (silence_start_time or time.time())
+                    if was_speech and silent_for >= SILENCE_FINALIZE_DELAY:
+                        session.request_endpoint(stream_id)
+                        was_speech = False
+                        silence_start_time = None
+                    continue
+
+                combined_audio = b"".join(chunks)
+                is_speech = vad.process(combined_audio)
+                session.submit_audio(stream_id, combined_audio, speech=is_speech)
+                if is_speech:
+                    silence_start_time = None
+                    was_speech = True
+                elif was_speech:
+                    if silence_start_time is None:
+                        silence_start_time = time.time()
+                    if time.time() - silence_start_time >= SILENCE_FINALIZE_DELAY:
+                        logger.info("Process [%s]: silence timeout; finalizing.", stream_id)
+                        session.request_endpoint(stream_id)
+                        was_speech = False
+                        silence_start_time = None
+                        vad.reset()
+        except Exception as e:
+            logger.error("Processing thread [%s] error: %s", stream_id, e, exc_info=True)
+        finally:
+            logger.info("Processing thread [%s] ended.", stream_id)
+
+    def _on_stt_event(self, event):
+        """Session events arrive on the event loop; only non-blocking queue handoffs here."""
+        if isinstance(event, STTStatusEvent):
+            self._result_queue.put(_stt_status_message(event))
+            if event.status is STTStatusKind.FAILED:
+                self._result_queue.put(
+                    {
+                        "type": "error",
+                        "message": "Speech recognition stopped for one audio source.",
+                    }
+                )
+            return
+
+        translation = self._translation_backend
+        active_backend = getattr(translation, "active_backend", None) if translation else None
+        entry_id = None
+        if event.is_final:
+            # Unique per final, in the legacy e-<timestamp> form.
+            stamp = max(time.time(), self._last_entry_stamp + 1e-6)
+            self._last_entry_stamp = stamp
+            entry_id = f"e-{stamp}"
+        self._result_queue.put(_stt_transcript_message(event, entry_id, active_backend))
+
+        if event.is_final and event.text.strip() and translation and translation.is_loaded:
+            task = {"text": event.text, "entry_id": entry_id, "is_final": True}
+            try:
+                self._translation_queue.put_nowait(task)
+            except Full:
+                logger.warning("Translation queue full; one segment not translated")
 
     async def _broadcast_loop(self):
         while self._running:
