@@ -148,6 +148,9 @@ fn main() {
             control_bridge::provider_test_connection,
             control_bridge::engine_forward_start,
             control_bridge::engine_forward_stop,
+            // Allowlisted device, model, Hub, and Assist commands; Rust injects a vault-held
+            // hf_token by reference and never forwards a secret sent by the webview.
+            control_bridge::engine_forward_command,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

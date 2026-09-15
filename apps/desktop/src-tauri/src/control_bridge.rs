@@ -32,6 +32,21 @@
 //! [`CapturingSpawner`] and used only while `EngineManager::status` still reports that run.
 //! Nothing here is called by React yet; the settings and session tasks wire it up.
 //!
+//! Allowlisted command forwarding (`engine_forward_command`):
+//!
+//! ```text
+//! React --{command: {type, ...}, credentials?: {hf_token: ref}}--> Rust
+//! Rust: allowlist, size, and recursive secret-key checks; hf_token ref -> vault (blocking pool)
+//! Rust --auth control, then {"op":"request","id":<id>,"command":{..., "hf_token"?}}--> engine
+//! engine --response* / complete / late worker-thread responses--> Rust
+//! ```
+//!
+//! An authenticated event socket cannot send commands, so device, model, Hub, and Assist
+//! commands take this path. Worker-thread replies (Hub search, suggestions, summary chunks)
+//! arrive after `complete`, so collection continues until the command's terminal message
+//! type or an application `error` message, bounded by a per-command timeout
+//! ([`forward_policy`]). Every exit closes the socket.
+//!
 //! Packaging risk: only debug builds can locate the validator (the repository `.venv`
 //! interpreter). Release builds have no validator entrypoint, just as the frozen engine
 //! sidecar from EF-005 is still unresolved, so Test Connection fails closed there with
@@ -122,6 +137,10 @@ pub enum ErrorCode {
     ControlUnavailable,
     AuthFailed,
     CommandRejected,
+    CommandNotAllowed,
+    InvalidCommand,
+    SecretInCommand,
+    VaultError,
 }
 
 impl ErrorCode {
@@ -139,6 +158,10 @@ impl ErrorCode {
             Self::ControlUnavailable => "The engine control channel is unavailable.",
             Self::AuthFailed => "The engine rejected the control credentials.",
             Self::CommandRejected => "The engine rejected the command.",
+            Self::CommandNotAllowed => "The command cannot be sent through the control bridge.",
+            Self::InvalidCommand => "The command is malformed.",
+            Self::SecretInCommand => "The command must not contain secret values.",
+            Self::VaultError => "The referenced credential could not be read.",
         }
     }
 }
@@ -771,6 +794,206 @@ fn redact_value(value: &mut Value, needles: &[Zeroizing<String>]) {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Allowlisted command forwarding
+// ---------------------------------------------------------------------------------------
+
+/// Summaries carry the transcript, so this sits well above a start config but below the
+/// engine's 1 MiB frame limit.
+const MAX_FORWARD_COMMAND_BYTES: usize = 512 * 1024;
+/// A summary streams one `llm_chunk` per model delta; the cap only stops a runaway engine.
+const MAX_FORWARD_RESPONSES: usize = 8192;
+const FORWARD_FRAME_OVERHEAD_BYTES: usize = 256;
+const HF_TOKEN_KEY: &str = "hf_token";
+
+/// Substrings of secret-looking keys (lowercased, `_`/`-` removed). Broader than
+/// `SECRET_KEY_NAMES` because no legitimate legacy command field contains any of them.
+const FORWARD_SECRET_KEY_PARTS: &[&str] = &[
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "credential",
+    "bearer",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardPolicy {
+    /// Legacy message type that ends collection; `None` returns on `complete`.
+    pub terminal: Option<&'static str>,
+    pub timeout: Duration,
+    /// Only the Hugging Face commands may receive a vault-held `hf_token`.
+    pub accepts_hf_token: bool,
+}
+
+/// The allowlist. `start` and `stop` keep their dedicated commands and are absent on purpose.
+pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
+    let (terminal, seconds, accepts_hf_token) = match kind {
+        "list_devices" => (Some("devices_list"), 10, false),
+        "request_models_list" => (Some("models_list"), 10, false),
+        // Progress and the result are broadcast as events, so `complete` is enough.
+        "download_model" => (None, CONTROL_TIMEOUT.as_secs(), true),
+        "delete_model" => (Some("model_action_result"), 30, false),
+        "search_hub" => (Some("hub_search_results"), 30, true),
+        "request_suggestion" => (Some("suggestion_result"), 120, false),
+        "request_summary" => (Some("llm_done"), 300, false),
+        _ => return None,
+    };
+    Some(ForwardPolicy {
+        terminal,
+        timeout: Duration::from_secs(seconds),
+        accepts_hf_token,
+    })
+}
+
+/// Collapses internal failures onto the fixed codes `engine_forward_command` documents.
+fn forward_error(err: BridgeError) -> BridgeError {
+    let code = match err.code {
+        ErrorCode::CommandNotAllowed
+        | ErrorCode::InvalidCommand
+        | ErrorCode::SecretInCommand
+        | ErrorCode::EngineNotRunning
+        | ErrorCode::Timeout
+        | ErrorCode::CommandRejected
+        | ErrorCode::VaultError => err.code,
+        ErrorCode::InvalidRequest => ErrorCode::InvalidCommand,
+        ErrorCode::CredentialNotConfigured | ErrorCode::CredentialUnavailable => {
+            ErrorCode::VaultError
+        }
+        // No captured endpoint, a refused connection, or a dropped socket: the run is gone.
+        ErrorCode::ControlUnavailable => ErrorCode::EngineNotRunning,
+        ErrorCode::AuthFailed
+        | ErrorCode::InvalidResponse
+        | ErrorCode::CorrelationMismatch
+        | ErrorCode::ValidatorUnavailable
+        | ErrorCode::ValidatorFailed => ErrorCode::CommandRejected,
+    };
+    BridgeError::new(code)
+}
+
+fn is_forward_secret_key(key: &str) -> bool {
+    let normalized: String = key
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    FORWARD_SECRET_KEY_PARTS
+        .iter()
+        .any(|part| normalized.contains(part))
+}
+
+fn contains_forward_secret_key(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, item)| is_forward_secret_key(key) || contains_forward_secret_key(item)),
+        Value::Array(items) => items.iter().any(contains_forward_secret_key),
+        _ => false,
+    }
+}
+
+/// Measures serialized size without buffering, failing as soon as the cap is passed.
+struct BoundedCounter(usize);
+
+impl Write for BoundedCounter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        if self.0 > MAX_FORWARD_COMMAND_BYTES {
+            return Err(io::Error::new(io::ErrorKind::Other, "command too large"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A command that passed every check needing neither the vault nor the engine.
+pub struct CheckedCommand {
+    policy: ForwardPolicy,
+    command: Map<String, Value>,
+    size: usize,
+    hf_token: Option<CredentialId>,
+}
+
+// Manual Debug: the command may carry transcript text.
+impl fmt::Debug for CheckedCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckedCommand")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Validates a webview command: object with an allowlisted string `type`, bounded size, no
+/// secret-named key at any depth, and at most an `hf_token` reference where one is accepted.
+pub fn check_forward_command(
+    command: Value,
+    credentials: Option<Value>,
+) -> Result<CheckedCommand, BridgeError> {
+    let invalid = || BridgeError::new(ErrorCode::InvalidCommand);
+    let Value::Object(command) = command else {
+        return Err(invalid());
+    };
+    let policy = match command.get("type") {
+        Some(Value::String(kind)) => {
+            forward_policy(kind).ok_or_else(|| BridgeError::new(ErrorCode::CommandNotAllowed))?
+        }
+        _ => return Err(invalid()),
+    };
+    let mut counter = BoundedCounter(0);
+    serde_json::to_writer(&mut counter, &command).map_err(|_| invalid())?;
+    if command
+        .iter()
+        .any(|(key, value)| is_forward_secret_key(key) || contains_forward_secret_key(value))
+    {
+        return Err(BridgeError::new(ErrorCode::SecretInCommand));
+    }
+    let hf_token = match credentials {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let mut refs: BTreeMap<String, CredentialRefInput> =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            match refs.remove(HF_TOKEN_KEY) {
+                None if refs.is_empty() => None,
+                Some(reference) if refs.is_empty() && policy.accepts_hf_token => Some(
+                    CredentialId::parse(&reference.capability, &reference.config_id, &reference.slot)
+                        .map_err(|_| invalid())?,
+                ),
+                _ => return Err(invalid()),
+            }
+        }
+    };
+    Ok(CheckedCommand {
+        policy,
+        command,
+        size: counter.0,
+        hf_token,
+    })
+}
+
+#[derive(Serialize)]
+struct ForwardFrame<'a> {
+    op: &'static str,
+    id: &'a str,
+    command: &'a Map<String, Value>,
+}
+
+/// How long to keep reading replies for one request.
+#[derive(Debug, Clone, Copy)]
+struct Collection {
+    /// Reply type that ends the request; `None` ends it at `complete`.
+    terminal: Option<&'static str>,
+    max_messages: usize,
+}
+
+const START_STOP_COLLECTION: Collection = Collection {
+    terminal: None,
+    max_messages: MAX_CONTROL_RESPONSES,
+};
+
 type ControlSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -808,6 +1031,7 @@ async fn exchange(
     token: &str,
     request_id: &str,
     frame: &mut Zeroizing<String>,
+    collection: Collection,
 ) -> Result<Vec<Value>, BridgeError> {
     let auth = AuthFrame {
         op: "auth",
@@ -827,17 +1051,35 @@ async fn exchange(
 
     send_text(socket, std::mem::take(&mut **frame)).await?;
     let mut messages = Vec::new();
+    let mut completed = false;
+    // Worker-thread replies go out after `complete`, so a command with a terminal type is
+    // finished only once both have arrived, in either order.
+    let mut terminal_seen = collection.terminal.is_none();
     loop {
         let mut reply = next_frame(socket).await?;
         let matches = frame_str(&reply, "id") == Some(request_id);
         match frame_str(&reply, "op") {
             Some("response") if matches => {
-                if messages.len() >= MAX_CONTROL_RESPONSES {
+                if messages.len() >= collection.max_messages {
                     return Err(invalid_response());
                 }
-                messages.push(reply.remove("message").unwrap_or(Value::Null));
+                let message = reply.remove("message").unwrap_or(Value::Null);
+                if let Some(terminal) = collection.terminal {
+                    // An application error is the command's answer; nothing follows it.
+                    let kind = message.get("type").and_then(Value::as_str);
+                    terminal_seen |= kind == Some(terminal) || kind == Some("error");
+                }
+                messages.push(message);
+                if completed && terminal_seen {
+                    return Ok(messages);
+                }
             }
-            Some("complete") if matches => return Ok(messages),
+            Some("complete") if matches => {
+                completed = true;
+                if terminal_seen {
+                    return Ok(messages);
+                }
+            }
             // An id-less error answers a frame the engine could not attribute; it is ours.
             Some("error") if matches || !reply.contains_key("id") => {
                 return Err(BridgeError::new(ErrorCode::CommandRejected))
@@ -853,6 +1095,7 @@ async fn control_round_trip(
     token: &str,
     request_id: &str,
     mut frame: Zeroizing<String>,
+    collection: Collection,
 ) -> Result<Vec<Value>, BridgeError> {
     let mut config = WebSocketConfig::default();
     config.max_message_size = Some(MAX_CONTROL_MESSAGE_BYTES);
@@ -860,10 +1103,38 @@ async fn control_round_trip(
     let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), true)
         .await
         .map_err(|_| BridgeError::new(ErrorCode::ControlUnavailable))?;
-    let outcome = exchange(&mut socket, token, request_id, &mut frame).await;
+    let outcome = exchange(&mut socket, token, request_id, &mut frame, collection).await;
     // Best effort; dropping the stream closes the TCP connection either way.
     let _ = socket.close(None).await;
     outcome
+}
+
+/// Sends one prepared request over a fresh control-role connection and redacts the replies.
+/// The connection is closed on every path; on timeout the dropped future closes the socket.
+async fn forward_prepared(
+    endpoint: ControlEndpoint,
+    prepared: PreparedRequest,
+    collection: Collection,
+    timeout: Duration,
+) -> Result<ControlForwardResult, BridgeError> {
+    let PreparedRequest {
+        request_id,
+        frame,
+        mut redactions,
+    } = prepared;
+    let url = format!("ws://127.0.0.1:{}", endpoint.port);
+    let outcome = tokio::time::timeout(
+        timeout,
+        control_round_trip(&url, &endpoint.token, &request_id, frame, collection),
+    )
+    .await
+    .unwrap_or_else(|_| Err(BridgeError::new(ErrorCode::Timeout)));
+    redactions.push(endpoint.token);
+    let mut messages = outcome?;
+    for message in &mut messages {
+        redact_value(message, &redactions);
+    }
+    Ok(ControlForwardResult { messages })
 }
 
 // ---------------------------------------------------------------------------------------
@@ -877,6 +1148,9 @@ pub struct ControlBridge {
     resolve_validator: ValidatorResolver,
     validator_timeout: Duration,
     control_timeout: Duration,
+    /// Upper bound on the per-command forwarding timeouts. Tests shorten it; production
+    /// leaves the `forward_policy` table in charge.
+    forward_timeout_cap: Duration,
     endpoint: EndpointSlot,
     next_id: AtomicU64,
 }
@@ -893,6 +1167,7 @@ impl ControlBridge {
             resolve_validator,
             validator_timeout,
             control_timeout,
+            forward_timeout_cap: Duration::MAX,
             endpoint: Arc::new(Mutex::new(None)),
             next_id: AtomicU64::new(1),
         }
@@ -1049,24 +1324,79 @@ impl ControlBridge {
         endpoint: ControlEndpoint,
         prepared: PreparedRequest,
     ) -> Result<ControlForwardResult, BridgeError> {
-        let PreparedRequest {
-            request_id,
-            frame,
-            mut redactions,
-        } = prepared;
-        let url = format!("ws://127.0.0.1:{}", endpoint.port);
-        let outcome = tokio::time::timeout(
-            self.control_timeout,
-            control_round_trip(&url, &endpoint.token, &request_id, frame),
-        )
-        .await
-        .unwrap_or_else(|_| Err(BridgeError::new(ErrorCode::Timeout)));
-        redactions.push(endpoint.token);
-        let mut messages = outcome?;
-        for message in &mut messages {
-            redact_value(message, &redactions);
+        forward_prepared(endpoint, prepared, START_STOP_COLLECTION, self.control_timeout).await
+    }
+
+    /// `control_endpoint` with its errors collapsed onto the forwarding codes.
+    pub fn forward_endpoint(&self, status: EngineStatus) -> Result<ControlEndpoint, BridgeError> {
+        self.control_endpoint(status).map_err(forward_error)
+    }
+
+    /// Blocking: reads a referenced `hf_token` from the vault and serialises the request
+    /// frame. The injected value is wiped from the command map once the frame exists.
+    pub fn prepare_forward(
+        &self,
+        store: &CredentialStore,
+        checked: CheckedCommand,
+    ) -> Result<PreparedRequest, BridgeError> {
+        let CheckedCommand {
+            mut command,
+            size,
+            hf_token,
+            ..
+        } = checked;
+        let mut redactions = Vec::new();
+        if let Some(id) = &hf_token {
+            let secret = store
+                .read_secret(id)
+                .map_err(|_| BridgeError::new(ErrorCode::VaultError))?;
+            command.insert(HF_TOKEN_KEY.to_owned(), Value::String(secret.as_str().to_owned()));
+            redactions.push(secret);
         }
-        Ok(ControlForwardResult { messages })
+        let request_id = self.request_id("cmd");
+        // Room for JSON escaping of the secret, so serialising never reallocates.
+        let secret_bytes: usize = redactions.iter().map(|secret| secret.len() * 2).sum();
+        let capacity = size + secret_bytes + request_id.len() + FORWARD_FRAME_OVERHEAD_BYTES;
+        let mut buffer = Zeroizing::new(Vec::with_capacity(capacity));
+        let written = serde_json::to_writer(
+            &mut *buffer,
+            &ForwardFrame {
+                op: "request",
+                id: &request_id,
+                command: &command,
+            },
+        );
+        if hf_token.is_some() {
+            if let Some(Value::String(mut value)) = command.remove(HF_TOKEN_KEY) {
+                value.zeroize();
+            }
+        }
+        written.map_err(|_| BridgeError::new(ErrorCode::InvalidCommand))?;
+        let text = String::from_utf8(std::mem::take(&mut *buffer))
+            .map_err(|_| BridgeError::new(ErrorCode::InvalidCommand))?;
+        Ok(PreparedRequest {
+            request_id,
+            frame: Zeroizing::new(text),
+            redactions,
+        })
+    }
+
+    /// Forwards an allowlisted command and collects its replies until the policy's terminal
+    /// message type, under the policy's own timeout.
+    pub async fn forward_command(
+        &self,
+        endpoint: ControlEndpoint,
+        prepared: PreparedRequest,
+        policy: ForwardPolicy,
+    ) -> Result<ControlForwardResult, BridgeError> {
+        let collection = Collection {
+            terminal: policy.terminal,
+            max_messages: MAX_FORWARD_RESPONSES,
+        };
+        let timeout = policy.timeout.min(self.forward_timeout_cap);
+        forward_prepared(endpoint, prepared, collection, timeout)
+            .await
+            .map_err(forward_error)
     }
 }
 
@@ -1133,6 +1463,31 @@ pub async fn engine_forward_stop(
     })
     .await?;
     bridge.forward(endpoint, prepared).await
+}
+
+/// Device, model, Hub, and Assist commands for the authenticated desktop path. The webview
+/// may reference a vault-held `hf_token` for `download_model` and `search_hub`; it may never
+/// send a secret itself.
+#[tauri::command]
+pub async fn engine_forward_command(
+    bridge: tauri::State<'_, SharedControlBridge>,
+    manager: tauri::State<'_, SharedEngineManager>,
+    store: tauri::State<'_, SharedCredentialStore>,
+    command: Value,
+    credentials: Option<Value>,
+) -> Result<ControlForwardResult, BridgeError> {
+    let bridge = Arc::clone(&bridge);
+    let job_bridge = Arc::clone(&bridge);
+    let manager = Arc::clone(&manager);
+    let store = Arc::clone(&store);
+    let (endpoint, policy, prepared) = run_blocking(ErrorCode::VaultError, move || {
+        let checked = check_forward_command(command, credentials)?;
+        let endpoint = job_bridge.forward_endpoint(manager.status())?;
+        let policy = checked.policy;
+        Ok((endpoint, policy, job_bridge.prepare_forward(&store, checked)?))
+    })
+    .await?;
+    bridge.forward_command(endpoint, prepared, policy).await
 }
 
 #[cfg(test)]
@@ -1873,6 +2228,384 @@ mod tests {
             let (bridge, _) = bridge_with(Reply::Echo, Duration::from_secs(5));
             let err = bridge.forward(endpoint(port), bridge.prepare_stop().unwrap()).await.unwrap_err();
             assert_safe_error(&err, ErrorCode::ControlUnavailable);
+        });
+    }
+
+    // -- Allowlisted command forwarding ----------------------------------------------------
+
+    enum Step {
+        Send(Value),
+        Pause(Duration),
+    }
+
+    /// Loopback fake of the control role that plays `script(request_id)` after the request,
+    /// then waits for the client to close. Sends after the client has gone are ignored.
+    async fn scripted_engine<F>(script: F) -> (u16, tokio::task::JoinHandle<ServerLog>)
+    where
+        F: FnOnce(&str) -> Vec<Step> + Send + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut log = ServerLog::default();
+            log.frames.push(recv_json(&mut socket).await);
+            send_json(&mut socket, json!({"op": "auth_ok", "role": "control", "protocol": 1})).await;
+            let request = recv_json(&mut socket).await;
+            let id = request["id"].as_str().unwrap().to_owned();
+            log.frames.push(request);
+            for step in script(&id) {
+                match step {
+                    Step::Send(frame) => {
+                        let _ = socket.send(Message::Text(frame.to_string())).await;
+                    }
+                    Step::Pause(delay) => tokio::time::sleep(delay).await,
+                }
+            }
+            loop {
+                match socket.next().await {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => continue,
+                }
+            }
+            log.client_closed = true;
+            log
+        });
+        (port, handle)
+    }
+
+    fn forward_bridge(cap: Duration) -> ControlBridge {
+        let (mut bridge, _) = bridge_with(Reply::Echo, Duration::from_secs(5));
+        bridge.forward_timeout_cap = cap;
+        bridge
+    }
+
+    fn hf_ref() -> Value {
+        json!({"hf_token": {"capability": "stt", "configId": "huggingface", "slot": "hf_token"}})
+    }
+
+    async fn forward_json(
+        bridge: &ControlBridge,
+        store: &CredentialStore,
+        port: u16,
+        command: Value,
+        credentials: Option<Value>,
+    ) -> Result<ControlForwardResult, BridgeError> {
+        let checked = check_forward_command(command, credentials)?;
+        let policy = checked.policy;
+        let prepared = bridge.prepare_forward(store, checked)?;
+        bridge.forward_command(endpoint(port), prepared, policy).await
+    }
+
+    fn message_types(result: &ControlForwardResult) -> Vec<&str> {
+        result.messages.iter().map(|m| m["type"].as_str().unwrap_or("")).collect()
+    }
+
+    #[test]
+    fn forward_allowlist_maps_each_command_to_its_terminal_and_timeout() {
+        let table = [
+            ("list_devices", Some("devices_list"), 10, false),
+            ("request_models_list", Some("models_list"), 10, false),
+            ("download_model", None, 20, true),
+            ("delete_model", Some("model_action_result"), 30, false),
+            ("search_hub", Some("hub_search_results"), 30, true),
+            ("request_suggestion", Some("suggestion_result"), 120, false),
+            ("request_summary", Some("llm_done"), 300, false),
+        ];
+        for (kind, terminal, seconds, accepts_hf_token) in table {
+            let checked = check_forward_command(json!({"type": kind}), None).unwrap();
+            let expected = ForwardPolicy {
+                terminal,
+                timeout: Duration::from_secs(seconds),
+                accepts_hf_token,
+            };
+            assert_eq!(checked.policy, expected, "{kind}");
+            assert!(checked.hf_token.is_none());
+        }
+
+        for kind in ["start", "stop", "Start", "unknown", "", "partial"] {
+            let err = check_forward_command(json!({"type": kind, "config": {}}), None).unwrap_err();
+            assert_safe_error(&err, ErrorCode::CommandNotAllowed);
+        }
+
+        let text = |len: usize| json!({"type": "request_summary", "entries": [{"source": "mic", "text": "x".repeat(len)}]});
+        let malformed = [
+            json!(null),
+            json!("list_devices"),
+            json!(["list_devices"]),
+            json!({}),
+            json!({"type": 7}),
+            json!({"kind": "list_devices"}),
+            text(MAX_FORWARD_COMMAND_BYTES),
+        ];
+        for command in malformed {
+            assert_safe_error(&check_forward_command(command, None).unwrap_err(), ErrorCode::InvalidCommand);
+        }
+        assert!(check_forward_command(text(MAX_FORWARD_COMMAND_BYTES - 256), None).is_ok());
+    }
+
+    #[test]
+    fn forward_rejects_secret_named_keys_at_any_depth_without_echo() {
+        let commands = [
+            json!({"type": "download_model", "model_id": "tiny", "model_type": "asr", "hf_token": SECRET}),
+            json!({"type": "search_hub", "query": "whisper", "HF-Token": SECRET}),
+            json!({"type": "request_suggestion", "entry_id": "e-1", "llm_config": {"api_key": SECRET}}),
+            json!({"type": "request_summary", "entries": [{"source": "mic", "text": "hi", "meta": {"apiKey": SECRET}}]}),
+            json!({"type": "list_devices", "headers": [{"Authorization": format!("Bearer {SECRET}")}]}),
+            json!({"type": "delete_model", "nested": {"deep": [{"clientSecret": SECRET}]}}),
+            json!({"type": "request_models_list", "PASSWORD": SECRET}),
+            json!({"type": "request_models_list", "credentials": {"x": SECRET}}),
+            json!({"type": "request_models_list", "BEARER": SECRET}),
+        ];
+        for command in commands {
+            let err = check_forward_command(command, None).unwrap_err();
+            assert_safe_error(&err, ErrorCode::SecretInCommand);
+        }
+
+        let reference = || json!({"capability": "stt", "configId": "huggingface", "slot": "hf_token"});
+        let download = || json!({"type": "download_model", "model_id": "tiny", "model_type": "asr"});
+        let bad_credentials = [
+            (json!({"type": "list_devices"}), json!({"hf_token": reference()})),
+            (json!({"type": "request_summary", "entries": []}), json!({"hf_token": reference()})),
+            (download(), json!({"api_key": reference()})),
+            (download(), json!({"hf_token": reference(), "extra": reference()})),
+            (download(), json!({"hf_token": SECRET})),
+            (download(), json!([SECRET])),
+            (
+                download(),
+                json!({"hf_token": {"capability": "stt", "configId": "huggingface", "slot": "hf_token", "value": SECRET}}),
+            ),
+            (
+                download(),
+                json!({"hf_token": {"capability": "vault", "configId": "huggingface", "slot": "hf_token"}}),
+            ),
+        ];
+        for (command, credentials) in bad_credentials {
+            let err = check_forward_command(command, Some(credentials)).unwrap_err();
+            assert_safe_error(&err, ErrorCode::InvalidCommand);
+        }
+
+        for credentials in [json!({}), json!(null)] {
+            let checked = check_forward_command(json!({"type": "list_devices"}), Some(credentials)).unwrap();
+            assert!(checked.hf_token.is_none());
+        }
+    }
+
+    #[test]
+    fn forward_injects_hf_token_from_the_vault_and_redacts_it() {
+        runtime().block_on(async {
+            let store = empty_store();
+            let id = CredentialId::parse("stt", "huggingface", "hf_token").unwrap();
+            store.save(&id, SECRET).unwrap();
+            let (port, server) = scripted_engine(|id| {
+                vec![
+                    Step::Send(json!({"op": "response", "id": id, "message": {
+                        "type": "status", "note": format!("{SECRET} {TOKEN}")
+                    }})),
+                    Step::Send(json!({"op": "complete", "id": id})),
+                ]
+            })
+            .await;
+            let bridge = forward_bridge(Duration::from_secs(5));
+            let checked = check_forward_command(
+                json!({"type": "download_model", "model_id": "tiny", "model_type": "asr"}),
+                Some(hf_ref()),
+            )
+            .unwrap();
+            let policy = checked.policy;
+            let prepared = bridge.prepare_forward(&store, checked).unwrap();
+            assert!(prepared.request_id.starts_with("cmd-"));
+            assert!(!format!("{prepared:?}").contains(SECRET));
+            let request_id = prepared.request_id.clone();
+
+            let result = bridge.forward_command(endpoint(port), prepared, policy).await.unwrap();
+            let log = server.await.unwrap();
+
+            assert_eq!(log.frames[0], json!({"op": "auth", "role": "control", "token": TOKEN, "protocol": 1}));
+            assert_eq!(
+                log.frames[1],
+                json!({"op": "request", "id": request_id, "command": {
+                    "type": "download_model", "model_id": "tiny", "model_type": "asr", "hf_token": SECRET
+                }})
+            );
+            // download_model returns at `complete`; its progress arrives as events.
+            assert_eq!(message_types(&result), ["status"]);
+            let rendered = format!("{} {result:?}", serde_json::to_string(&result).unwrap());
+            assert!(!rendered.contains(SECRET) && !rendered.contains(TOKEN), "{rendered}");
+            assert!(rendered.contains(REDACTED));
+            assert!(log.client_closed);
+
+            let checked =
+                check_forward_command(json!({"type": "search_hub", "query": "whisper"}), Some(hf_ref())).unwrap();
+            assert!(checked.hf_token.is_some());
+            let err = bridge.prepare_forward(&empty_store(), checked).unwrap_err();
+            assert_safe_error(&err, ErrorCode::VaultError);
+        });
+    }
+
+    #[test]
+    fn forward_keeps_collecting_after_complete_until_the_terminal_reply() {
+        runtime().block_on(async {
+            let bridge = forward_bridge(Duration::from_secs(5));
+            let store = empty_store();
+
+            // A worker-thread reply after `complete`, with unrelated traffic in between.
+            let (port, server) = scripted_engine(|id| {
+                vec![
+                    Step::Send(json!({"op": "complete", "id": id})),
+                    Step::Pause(Duration::from_millis(50)),
+                    Step::Send(json!({"op": "event", "event": {"type": "partial", "text": "hi"}})),
+                    Step::Send(json!({"op": "response", "id": "cmd-other", "message": {"type": "suggestion_result"}})),
+                    Step::Send(json!({"op": "response", "id": id, "message": {
+                        "type": "suggestion_result", "entry_id": "e-1", "options": ["a"]
+                    }})),
+                ]
+            })
+            .await;
+            let command = json!({"type": "request_suggestion", "entry_id": "e-1", "target_text": "q?", "context": []});
+            let result = forward_json(&bridge, &store, port, command, None).await.unwrap();
+            assert_eq!(result.messages, [json!({"type": "suggestion_result", "entry_id": "e-1", "options": ["a"]})]);
+            assert!(server.await.unwrap().client_closed);
+
+            // A terminal reply before `complete` is kept and the request still ends cleanly.
+            let (port, server) = scripted_engine(|id| {
+                vec![
+                    Step::Send(json!({"op": "response", "id": id, "message": {
+                        "type": "devices_list", "microphones": [], "speakers": []
+                    }})),
+                    Step::Pause(Duration::from_millis(30)),
+                    Step::Send(json!({"op": "complete", "id": id})),
+                ]
+            })
+            .await;
+            let result = forward_json(&bridge, &store, port, json!({"type": "list_devices"}), None).await.unwrap();
+            assert_eq!(message_types(&result), ["devices_list"]);
+            assert!(server.await.unwrap().client_closed);
+
+            // An application error message is returned as a normal reply and ends the wait.
+            let (port, server) = scripted_engine(|id| {
+                vec![
+                    Step::Send(json!({"op": "complete", "id": id})),
+                    Step::Send(json!({"op": "response", "id": id, "message": {
+                        "type": "error", "message": "LLM not configured."
+                    }})),
+                ]
+            })
+            .await;
+            let command = json!({"type": "request_summary", "entries": []});
+            let result = forward_json(&bridge, &store, port, command, None).await.unwrap();
+            assert_eq!(result.messages, [json!({"type": "error", "message": "LLM not configured."})]);
+            assert!(server.await.unwrap().client_closed);
+        });
+    }
+
+    #[test]
+    fn forward_collects_batched_summary_chunks_through_llm_done() {
+        runtime().block_on(async {
+            let chunk = |id: &str, n: usize| {
+                Step::Send(json!({"op": "response", "id": id, "message": {"type": "llm_chunk", "text": format!("c{n} ")}}))
+            };
+            let (port, server) = scripted_engine(move |id| {
+                let mut steps = vec![chunk(id, 0), Step::Send(json!({"op": "complete", "id": id}))];
+                // More chunks than the start/stop response cap, in bursts.
+                for n in 1..=200 {
+                    steps.push(chunk(id, n));
+                    if n % 50 == 0 {
+                        steps.push(Step::Pause(Duration::from_millis(10)));
+                    }
+                }
+                steps.push(Step::Send(json!({"op": "response", "id": id, "message": {"type": "llm_done"}})));
+                steps.push(chunk(id, 999));
+                steps
+            })
+            .await;
+            let bridge = forward_bridge(Duration::from_secs(5));
+            let command = json!({"type": "request_summary", "entries": [{"source": "mic", "text": "we agreed"}]});
+            let result = forward_json(&bridge, &empty_store(), port, command, None).await.unwrap();
+
+            assert_eq!(result.messages.len(), 202);
+            let texts: Vec<&str> = result.messages[..201].iter().map(|m| m["text"].as_str().unwrap()).collect();
+            let expected: Vec<String> = (0..=200).map(|n| format!("c{n} ")).collect();
+            assert_eq!(texts, expected);
+            assert_eq!(result.messages[201], json!({"type": "llm_done"}));
+            assert!(server.await.unwrap().client_closed);
+        });
+    }
+
+    #[test]
+    fn forward_times_out_per_command_and_closes_the_socket() {
+        runtime().block_on(async {
+            // `complete` without the terminal `models_list`.
+            let (port, server) = scripted_engine(|id| vec![Step::Send(json!({"op": "complete", "id": id}))]).await;
+            let bridge = forward_bridge(Duration::from_millis(200));
+            let started = Instant::now();
+            let command = json!({"type": "request_models_list"});
+            let err = forward_json(&bridge, &empty_store(), port, command, None).await.unwrap_err();
+            assert_safe_error(&err, ErrorCode::Timeout);
+            assert!(started.elapsed() >= Duration::from_millis(200));
+            assert!(started.elapsed() < Duration::from_secs(3));
+            let log = tokio::time::timeout(Duration::from_secs(3), server).await.unwrap().unwrap();
+            assert!(log.client_closed);
+        });
+    }
+
+    #[test]
+    fn forward_engine_error_frames_are_command_rejected() {
+        runtime().block_on(async {
+            let bridge = forward_bridge(Duration::from_secs(5));
+            let scripts: [fn(&str) -> Vec<Step>; 2] = [
+                |id| {
+                    vec![
+                        Step::Send(json!({"op": "response", "id": id, "message": {"type": "status"}})),
+                        Step::Send(json!({"op": "error", "code": "command_failed", "message": "Command failed", "id": id})),
+                        Step::Send(json!({"op": "complete", "id": id})),
+                    ]
+                },
+                |_| vec![Step::Send(json!({"op": "error", "code": "invalid_frame", "message": "Invalid frame"}))],
+            ];
+            for script in scripts {
+                let (port, server) = scripted_engine(script).await;
+                let command = json!({"type": "delete_model", "model_id": "tiny", "model_type": "asr"});
+                let err = forward_json(&bridge, &empty_store(), port, command, None).await.unwrap_err();
+                assert_safe_error(&err, ErrorCode::CommandRejected);
+                assert!(server.await.unwrap().client_closed);
+            }
+
+            let (port, server) = fake_engine(Script::RejectAuth).await;
+            let err = forward_json(&bridge, &empty_store(), port, json!({"type": "list_devices"}), None)
+                .await
+                .unwrap_err();
+            assert_safe_error(&err, ErrorCode::CommandRejected);
+            assert!(server.await.unwrap().client_closed);
+        });
+    }
+
+    #[test]
+    fn forward_requires_a_running_engine() {
+        let bridge = forward_bridge(Duration::from_secs(5));
+        let statuses = [
+            EngineStatus { state: EngineState::Stopped, port: None },
+            EngineStatus { state: EngineState::Exited, port: None },
+            // Reported running, but no endpoint was captured for this run.
+            EngineStatus { state: EngineState::Running, port: Some(9) },
+        ];
+        for status in statuses {
+            assert_safe_error(&bridge.forward_endpoint(status).unwrap_err(), ErrorCode::EngineNotRunning);
+        }
+
+        runtime().block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                if let Ok((stream, _)) = listener.accept().await {
+                    drop(stream);
+                }
+            });
+            let err = forward_json(&bridge, &empty_store(), port, json!({"type": "list_devices"}), None)
+                .await
+                .unwrap_err();
+            assert_safe_error(&err, ErrorCode::EngineNotRunning);
         });
     }
 }
