@@ -42,6 +42,13 @@ from engine.session.session_orchestrator import (
     STTStatusKind,
     resolve_session_config,
 )
+from engine.session.translation_orchestrator import (
+    TranslationErrorEvent,
+    TranslationSessionOrchestrator,
+    TranslationStatusEvent,
+    TranslationStatusKind,
+    resolve_translation_session_config,
+)
 
 logger = logging.getLogger("echoflux.engine")
 
@@ -292,6 +299,69 @@ def _stt_status_message(event) -> dict:
     }
 
 
+def _translation_metadata(event) -> dict:
+    """Additive Translation keys; the current store reads none of them."""
+    return {
+        "translation_provider": event.provider_id,
+        "translation_fallback": event.fallback,
+        "source_lang": event.source_lang,
+        "target_lang": event.target_lang,
+        "detected_source_lang": event.detected_source_lang,
+    }
+
+
+def _translation_update_message(event) -> dict:
+    """A final's translation in the legacy translation_update shape, matched on entry_id.
+
+    ``revision`` is the final's own source revision, so the store's revision check passes.
+    """
+    msg = {
+        "type": "translation_update",
+        "entry_id": event.entry_id,
+        "source_text": event.source_text,
+        "translation": event.translation,
+        "timestamp": time.time(),
+        "is_final": True,
+        "revision": event.source_revision,
+        "item_id": event.item_key,
+    }
+    if event.stream_id in ("mic", "system"):
+        msg["source"] = event.stream_id
+    msg.update(_translation_metadata(event))
+    return msg
+
+
+def _translation_error_message(event) -> dict:
+    """A final that will not be translated. The store ignores an update without text."""
+    msg = {
+        "type": "translation_update",
+        "entry_id": event.entry_id,
+        "source_text": event.source_text,
+        "translation": None,
+        "timestamp": time.time(),
+        "is_final": True,
+        "revision": event.source_revision,
+        "item_id": event.item_key,
+        "translation_provider": event.provider_id,
+        "translation_error": {"code": event.code, "message": event.message},
+    }
+    if event.stream_id in ("mic", "system"):
+        msg["source"] = event.stream_id
+    return msg
+
+
+def _translation_status_message(event) -> dict:
+    """Translation transitions ride on ``status`` with values the store does not act on."""
+    return {
+        "type": "status",
+        "status": event.status.value,
+        "translation_provider": event.provider_id,
+        "previous_translation_provider": event.previous_provider_id,
+        "reason": event.reason,
+        "translation_state": event.state,
+    }
+
+
 class EchoFluxEngine:
     def __init__(self, insecure_dev: bool = False):
         # Tokens are consumed from the environment here and live only inside the server,
@@ -320,6 +390,15 @@ class EchoFluxEngine:
         self._stt_local_builder = self._build_local_stt
         self._stt_cloud_builder = None
         self._stt_secrets_resolver = None
+        # Translation session for v2 services.translation start configs, with the same
+        # fail-closed seams: nothing delivers cloud Translation secrets to the engine yet.
+        self._translation_config = None
+        self._translation_session: Optional[TranslationSessionOrchestrator] = None
+        self._translation_local_builder = None
+        self._translation_cloud_builder = None
+        self._translation_secrets_resolver = None
+        # Latest partial message per stream; a partial translation is re-sent in its shape.
+        self._partial_messages: Dict[str, dict] = {}
 
         self._running = False
 
@@ -404,6 +483,8 @@ class EchoFluxEngine:
 
         try:
             await asyncio.to_thread(self._initialize_pipeline, config)
+            # Translation first: a refused Translation Start never starts an STT provider.
+            await self._start_translation_session()
             # Providers and the mandatory Local fallback are ready before any device opens.
             await self._start_stt_session()
             self._start_threads()
@@ -488,8 +569,11 @@ class EchoFluxEngine:
             compute_type=os.getenv("ECHOFLUX_COMPUTE_TYPE", "float16"),
         )
 
-        # 4. Translation Backend
-        if settings.get("translation.enabled", False):
+        # 4. Translation. A v2 services.translation section runs through the translation
+        # session, started before STT; legacy flat translation.* keys keep the
+        # FallbackTranslationBackend thread until EF-031.
+        self._translation_config = resolve_translation_session_config(settings)
+        if self._translation_config is None and settings.get("translation.enabled", False):
             from engine.translation.fallback_backend import FallbackTranslationBackend
 
             source_lang = settings.get("translation.source_lang", "en")
@@ -619,6 +703,12 @@ class EchoFluxEngine:
             session, self._stt_session = self._stt_session, None
             await session.stop()
         self._session_config = None
+        if self._translation_session is not None:
+            # After STT, so it saw the trailing finals; requests still running are cancelled.
+            translation, self._translation_session = self._translation_session, None
+            await translation.stop()
+        self._translation_config = None
+        self._partial_messages.clear()
 
         if self._asr_backend:
             for stream_id in self._inputs.keys():
@@ -867,6 +957,21 @@ class EchoFluxEngine:
         self._stt_session = session
         await session.start()
 
+    async def _start_translation_session(self):
+        """Ready the Translation session. Translation off or a legacy config starts nothing."""
+        config = self._translation_config
+        if config is None or not config.enabled:
+            return
+        session = TranslationSessionOrchestrator(
+            config,
+            self._on_translation_event,
+            cloud_builder=self._translation_cloud_builder,
+            local_builder=self._translation_local_builder,
+            secrets_resolver=self._translation_secrets_resolver,
+        )
+        self._translation_session = session
+        await session.start()
+
     async def _abort_pipeline_start(self):
         """Undo a failed Start: nothing stays loaded, open, or running."""
         if self._running:
@@ -875,6 +980,10 @@ class EchoFluxEngine:
         if self._stt_session is not None:
             session, self._stt_session = self._stt_session, None
             await session.stop()
+        if self._translation_session is not None:
+            translation, self._translation_session = self._translation_session, None
+            await translation.stop()
+        self._translation_config = None
         if self._translation_backend:
             backend, self._translation_backend = self._translation_backend, None
             await asyncio.to_thread(backend.unload_model)
@@ -968,7 +1077,16 @@ class EchoFluxEngine:
             stamp = max(time.time(), self._last_entry_stamp + 1e-6)
             self._last_entry_stamp = stamp
             entry_id = f"e-{stamp}"
-        self._result_queue.put(_stt_transcript_message(event, entry_id, active_backend))
+        msg = _stt_transcript_message(event, entry_id, active_backend)
+        self._result_queue.put(msg)
+        session = self._translation_session
+        if session is not None:
+            if event.is_final:
+                self._partial_messages.pop(event.stream_id, None)
+            else:
+                self._partial_messages[event.stream_id] = msg
+            # Records the change and schedules work; translations arrive later on this loop.
+            session.on_transcript(event, entry_id)
 
         if event.is_final and event.text.strip() and translation and translation.is_loaded:
             task = {"text": event.text, "entry_id": entry_id, "is_final": True}
@@ -976,6 +1094,36 @@ class EchoFluxEngine:
                 self._translation_queue.put_nowait(task)
             except Full:
                 logger.warning("Translation queue full; one segment not translated")
+
+    def _on_translation_event(self, event):
+        """Translation session events arrive on the event loop; only queue handoffs here."""
+        if isinstance(event, TranslationStatusEvent):
+            self._result_queue.put(_translation_status_message(event))
+            if event.status is TranslationStatusKind.FAILED:
+                self._result_queue.put(
+                    {"type": "error", "message": "Translation stopped for this session."}
+                )
+            return
+        if isinstance(event, TranslationErrorEvent):
+            self._result_queue.put(_translation_error_message(event))
+            return
+        if event.is_final:
+            self._result_queue.put(_translation_update_message(event))
+            return
+        # A partial translation rides on its caption, and only while that caption is shown.
+        caption = self._partial_messages.get(event.stream_id)
+        if caption is None or caption.get("item_id") != event.item_key:
+            return
+        if (caption.get("text") or "").strip() != event.source_text:
+            return
+        self._result_queue.put(
+            {
+                **caption,
+                "translation": event.translation,
+                "timestamp": time.time(),
+                **_translation_metadata(event),
+            }
+        )
 
     async def _broadcast_loop(self):
         while self._running:
