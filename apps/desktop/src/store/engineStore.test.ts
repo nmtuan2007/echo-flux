@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { StateStorage } from "zustand/middleware";
 import {
   createEngineStore,
@@ -10,6 +10,7 @@ import {
   type EngineState,
 } from "./engineStore";
 import { LEGACY_SECRET_CONFIG_KEYS, PERSISTED_CONFIG_KEYS } from "./settingsSlice";
+import { PROTOCOL_FAMILIES, type ProtocolFamily, type ProviderManifest } from "./types";
 
 const emitMock = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("@tauri-apps/api/event", () => ({ emit: emitMock }));
@@ -594,5 +595,49 @@ describe("useEngineStore compatibility", () => {
     expect(assistant.validation.status).toBe("unvalidated");
     expect(assistant.options).toEqual({ temperature: 0.2 });
     expect(JSON.stringify(assistant)).not.toContain(SECRET_KEY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Provider manifest types (engine/providers/manifests.py)
+// ---------------------------------------------------------------------------
+
+describe("provider manifest types", () => {
+  // Mirrors the Python ProtocolFamily enum; the annotation fails tsc if any value is dropped.
+  const PYTHON_FAMILIES: ProtocolFamily[] = [
+    "local",
+    "openai_realtime",
+    "gemini_live",
+    "openai_compatible_text",
+    "gemini_text",
+    "deepgram",
+    "assemblyai_streaming",
+    "azure_speech",
+  ];
+
+  it("accepts every Python protocol family", () => {
+    expectTypeOf<(typeof PYTHON_FAMILIES)[number]>().toEqualTypeOf<ProtocolFamily>();
+    expect([...PROTOCOL_FAMILIES].sort()).toEqual([...PYTHON_FAMILIES].sort());
+  });
+
+  it("describes a profiled Custom STT manifest", () => {
+    const custom: ProviderManifest = {
+      providerId: "custom",
+      displayName: "Custom (realtime-compatible)",
+      capabilities: ["stt"],
+      protocolFamily: "openai_realtime",
+      recommendedEndpoint: "",
+      recommendedModel: "",
+      endpointEditable: true,
+      requiresEndpoint: true,
+      modelSelectable: true,
+      fields: [],
+      protocolProfiles: { "openai-realtime": "openai_realtime", "gemini-live": "gemini_live" },
+      profileField: "protocol_profile",
+    };
+    expectTypeOf(custom.protocolProfiles).toEqualTypeOf<
+      Record<string, ProtocolFamily> | undefined
+    >();
+    expect(custom.protocolProfiles?.["gemini-live"]).toBe("gemini_live");
   });
 });

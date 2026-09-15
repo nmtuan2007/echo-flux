@@ -156,7 +156,18 @@ export interface PublicConfigV2 {
 // Provider manifests (engine/providers/manifests.py)
 // ---------------------------------------------------------------------------
 
-export type ProtocolFamily = "local" | "openai_realtime" | "gemini_live" | "openai_compatible_text";
+export const PROTOCOL_FAMILIES = [
+  "local",
+  "openai_realtime",
+  "gemini_live",
+  "openai_compatible_text",
+  "gemini_text",
+  "deepgram",
+  "assemblyai_streaming",
+  "azure_speech",
+] as const;
+
+export type ProtocolFamily = (typeof PROTOCOL_FAMILIES)[number];
 
 export type FieldType = "string" | "integer" | "number" | "boolean" | "choice" | "secret";
 
@@ -188,6 +199,10 @@ export interface ProviderManifest {
   requiresEndpoint: boolean;
   modelSelectable: boolean;
   fields: ManifestField[];
+  // Bounded protocol profiles (Custom STT): the option named by `profileField` picks the
+  // family, and `protocolFamily` is then the first-listed profile's family.
+  protocolProfiles?: Record<string, ProtocolFamily>;
+  profileField?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -32,7 +32,9 @@ export default defineConfig({
 
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
+    // Globals let @testing-library/react register its afterEach cleanup without a setup file.
+    globals: true,
     restoreMocks: true,
   },
 });
