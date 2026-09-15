@@ -7,14 +7,33 @@ import threading
 import time
 from queue import Queue, Empty, Full
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from collections import deque
 
 from dotenv import load_dotenv
 
 from engine.core.config import TranscriptionConfig
 from engine.core.progress import install_progress_hijack, set_progress_callback
-from engine.server.protocol import BootstrapTokens
+from engine.server.protocol import (
+    ASSISTANT_ERROR_MESSAGES,
+    ERROR_ASSISTANT_UNAVAILABLE,
+    ERROR_CANCELLED,
+    ERROR_FORBIDDEN,
+    ERROR_INTERNAL,
+    ERROR_INVALID_REQUEST,
+    BootstrapTokens,
+    ProtocolError,
+    SecurityMode,
+    is_conversation_command,
+    parse_assist_command,
+    parse_summary_command,
+    safe_command_id,
+    suggestion_error_message,
+    suggestion_result_message,
+    summary_chunk_message,
+    summary_done_message,
+    summary_error_replies,
+)
 from engine.server.websocket_server import WebSocketServer
 from engine.asr.base import TranscriptResult
 
@@ -94,6 +113,84 @@ def _setup_logging():
     logger.info("Logging initialized – file: %s", log_file)
 
 
+def _legacy_suggestion_fields(message: dict) -> dict:
+    """Coerce a legacy request_suggestion so malformed fields still end in a terminal reply."""
+    entry_id = message.get("entry_id")
+    target_text = message.get("target_text")
+    context = message.get("context")
+    return {
+        **message,
+        "entry_id": entry_id if isinstance(entry_id, str) else "",
+        "target_text": target_text if isinstance(target_text, str) else "",
+        "context": [c for c in context if isinstance(c, str)] if isinstance(context, list) else [],
+    }
+
+
+def _legacy_summary_fields(message: dict) -> dict:
+    """Coerce a legacy request_summary so malformed entries cannot raise mid-handler."""
+    entries = message.get("entries")
+    if not isinstance(entries, list):
+        entries = []
+    usable = [
+        e
+        for e in entries
+        if isinstance(e, dict)
+        and isinstance(e.get("text", ""), str)
+        and isinstance(e.get("source", "speaker"), str)
+    ]
+    return {**message, "entries": usable}
+
+
+def _assist_failure(message_id: str, code: str, conversation_id: Optional[str] = None) -> dict:
+    return suggestion_error_message(
+        message_id, code, ASSISTANT_ERROR_MESSAGES[code], conversation_id
+    )
+
+
+def _assist_reply(command, outcome) -> dict:
+    if not outcome.ok:
+        error = outcome.error
+        return suggestion_error_message(
+            command.message_id,
+            error.code.value,
+            error.message,
+            command.conversation_id,
+            error.retryable,
+            error.provider_code,
+        )
+    stored = outcome.stored
+    return suggestion_result_message(
+        conversation_id=command.conversation_id,
+        message_id=command.message_id,
+        assist_id=stored.assist_id,
+        suggested_replies=[
+            {"strategy": s.strategy, "text": s.text, "reasoning": s.reasoning}
+            for s in stored.suggested_replies
+        ],
+        clarifying_questions=[
+            {"question": q.question, "purpose": q.purpose} for q in stored.clarifying_questions
+        ],
+        provider=stored.provider.to_dict() if stored.provider is not None else None,
+        context_window={
+            "message_count": outcome.context_message_count,
+            "omitted_message_count": outcome.omitted_message_count,
+            "profile_count": outcome.profile_count,
+            "omitted_profile_count": outcome.omitted_profile_count,
+        },
+    )
+
+
+def _warning_payload(warning) -> Optional[dict]:
+    if warning is None:
+        return None
+    return {
+        "omitted_message_count": warning.omitted_message_count,
+        "first_omitted_timestamp_ms": warning.first_omitted_timestamp_ms,
+        "last_omitted_timestamp_ms": warning.last_omitted_timestamp_ms,
+        "reason": warning.reason,
+    }
+
+
 class EchoFluxEngine:
     def __init__(self, insecure_dev: bool = False):
         # Tokens are consumed from the environment here and live only inside the server,
@@ -127,6 +224,10 @@ class EchoFluxEngine:
         self._client = None
         self._current_config = {}
         self._llm_assistant = None  # Created on each pipeline start if LLM is enabled
+        # Repository-backed Assist/Summary, composed by configure_assistant_services().
+        self._assistant_service = None
+        self._summary_service = None
+        self._assistant_tasks: Set[asyncio.Task] = set()
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
@@ -200,9 +301,11 @@ class EchoFluxEngine:
                 await self._client.send(json.dumps({"type": "error", "message": str(e)}))
 
     async def _on_client_stop(self):
+        await self._cancel_assistant_work()
         await self._stop_pipeline()
 
     async def _shutdown(self):
+        await self._cancel_assistant_work()
         await self._stop_pipeline()
         await self._ws_server.stop()
 
@@ -649,12 +752,17 @@ class EchoFluxEngine:
         if self._llm_assistant and self._llm_assistant.is_available():
             return True
 
-        llm_cfg = message.get("llm_config", {})
-        api_key = llm_cfg.get("api_key", "")
-        model = llm_cfg.get("model", "")
-        provider_url = llm_cfg.get("provider_url") or None
+        llm_cfg = message.get("llm_config")
+        if not isinstance(llm_cfg, dict):
+            llm_cfg = {}
+        # The secure desktop path strips secret-named keys from these commands and injects the
+        # key into the start config instead, so fall back to what the session started with.
+        started = self._current_config if isinstance(self._current_config, dict) else {}
+        api_key = llm_cfg.get("api_key") or started.get("llm.api_key") or ""
+        model = llm_cfg.get("model") or started.get("llm.model") or "openai/gpt-4o-mini"
+        provider_url = llm_cfg.get("provider_url") or started.get("llm.provider_url") or None
 
-        if not api_key or not model:
+        if not isinstance(api_key, str) or not isinstance(model, str) or not api_key:
             return False
 
         try:
@@ -672,6 +780,10 @@ class EchoFluxEngine:
 
     async def _on_suggestion_request(self, message: dict, websocket):
         """Handle request_suggestion from UI — calls LLM on a thread and forwards result."""
+        if is_conversation_command(message):
+            await self._on_conversation_assist(message, websocket)
+            return
+        message = _legacy_suggestion_fields(message)
         if not self._ensure_llm_assistant(message):
             await websocket.send(json.dumps({
                 "type": "suggestion_result",
@@ -702,6 +814,10 @@ class EchoFluxEngine:
 
     async def _on_summary_request(self, message: dict, websocket):
         """Handle request_summary from UI — streams LLM output back as llm_chunk messages."""
+        if is_conversation_command(message):
+            await self._on_conversation_summary(message, websocket)
+            return
+        message = _legacy_summary_fields(message)
         if not self._ensure_llm_assistant(message):
             await websocket.send(json.dumps({
                 "type": "llm_chunk",
@@ -742,6 +858,198 @@ class EchoFluxEngine:
             chunk_callback=_chunk_cb,
             done_callback=_done_cb,
         )
+
+    # --- Repository-backed Assist and Summary ---------------------------------------------
+    #
+    # Compatibility condition: a request_suggestion / request_summary command that carries
+    # "conversation_id" takes this path. One without it takes the legacy LLMAssistant path
+    # above, kept until EF-031. This path reads context only from the conversation repository,
+    # refuses client-assembled context, needs an authenticated control connection (or explicit
+    # --insecure-dev), and always ends with exactly one suggestion_result or llm_done.
+
+    def configure_assistant_services(
+        self,
+        repository: Any,
+        provider: Any,
+        model: Optional[str] = None,
+        summary_budget: Any = None,
+    ) -> None:
+        """Compose repository-backed Assist and Summary around one Assistant provider.
+
+        ``repository`` is a ConversationRepository; ``provider`` an AssistantProvider built with
+        ``EngineAssistantPromptPolicy``. The caller owns the provider lifecycle and credentials:
+        nothing here reads keys from commands. None for either clears the services.
+        """
+        if repository is None or provider is None:
+            self._assistant_service = None
+            self._summary_service = None
+            logger.info("Repository-backed assistant services cleared")
+            return
+
+        from engine.assistant.service import AssistantService
+        from engine.assistant.summary_service import SummaryService
+        from engine.conversation.context_profiles import ContextProfileService
+
+        self._assistant_service = AssistantService(
+            repository, ContextProfileService(repository), provider, model=model
+        )
+        self._summary_service = SummaryService(
+            repository, provider, model=model, budget=summary_budget
+        )
+        logger.info(
+            "Repository-backed assistant services configured: provider=%s", provider.provider_id
+        )
+
+    def _conversation_requests_allowed(self) -> bool:
+        # Event clients never reach dispatch. The unauthenticated legacy socket must not read
+        # stored conversations.
+        return self._ws_server.security_mode is not SecurityMode.LEGACY_TRANSITIONAL
+
+    async def _send_reply(self, websocket, message: dict) -> None:
+        try:
+            await websocket.send(json.dumps(message))
+        except Exception as e:
+            logger.debug("Dropped assistant reply for closed client (%s)", type(e).__name__)
+
+    def _track_assistant_task(self, coro) -> None:
+        # Detached so a slow provider never holds the control connection's dispatch loop.
+        task = asyncio.create_task(coro)
+        self._assistant_tasks.add(task)
+        task.add_done_callback(self._assistant_tasks.discard)
+
+    async def _cancel_assistant_work(self):
+        """Cancel in-flight repository-backed requests; each still sends its terminal reply."""
+        pending = [task for task in self._assistant_tasks if not task.done()]
+        if not pending:
+            return
+        logger.info("Cancelling %d in-flight assistant request(s)", len(pending))
+        for task in pending:
+            task.cancel()
+        await asyncio.wait(pending, timeout=2.0)
+
+    async def _on_conversation_assist(self, message: dict, websocket):
+        echo_id = safe_command_id(message, "message_id") or safe_command_id(message, "entry_id")
+        if not self._conversation_requests_allowed():
+            await self._send_reply(websocket, _assist_failure(echo_id, ERROR_FORBIDDEN))
+            return
+        try:
+            command = parse_assist_command(message)
+        except ProtocolError:
+            await self._send_reply(websocket, _assist_failure(echo_id, ERROR_INVALID_REQUEST))
+            return
+        service = self._assistant_service
+        if service is None:
+            reply = _assist_failure(
+                command.message_id, ERROR_ASSISTANT_UNAVAILABLE, command.conversation_id
+            )
+            await self._send_reply(websocket, reply)
+            return
+        self._track_assistant_task(self._run_assist(service, command, websocket))
+
+    async def _run_assist(self, service, command, websocket):
+        try:
+            outcome = await service.request_assist(command.conversation_id, command.message_id)
+        except asyncio.CancelledError:
+            reply = _assist_failure(command.message_id, ERROR_CANCELLED, command.conversation_id)
+            await asyncio.shield(self._send_reply(websocket, reply))
+            raise
+        except Exception as e:
+            logger.error("Assist request failed unexpectedly (%s)", type(e).__name__)
+            reply = _assist_failure(command.message_id, ERROR_INTERNAL, command.conversation_id)
+        else:
+            reply = _assist_reply(command, outcome)
+        await asyncio.shield(self._send_reply(websocket, reply))
+
+    async def _send_summary_failure(
+        self,
+        websocket,
+        code: str,
+        conversation_id: str,
+        after_chunks: bool = False,
+        message: Optional[str] = None,
+        retryable: bool = False,
+        provider_code: Optional[str] = None,
+        warning: Optional[dict] = None,
+    ) -> None:
+        chunk, done = summary_error_replies(
+            code,
+            message or ASSISTANT_ERROR_MESSAGES[code],
+            conversation_id,
+            after_chunks=after_chunks,
+            retryable=retryable,
+            provider_code=provider_code,
+            warning=warning,
+        )
+        await self._send_reply(websocket, chunk)
+        await self._send_reply(websocket, done)
+
+    async def _on_conversation_summary(self, message: dict, websocket):
+        echo_id = safe_command_id(message, "conversation_id")
+        if not self._conversation_requests_allowed():
+            await self._send_summary_failure(websocket, ERROR_FORBIDDEN, echo_id)
+            return
+        try:
+            command = parse_summary_command(message)
+        except ProtocolError:
+            await self._send_summary_failure(websocket, ERROR_INVALID_REQUEST, echo_id)
+            return
+        service = self._summary_service
+        if service is None:
+            await self._send_summary_failure(
+                websocket, ERROR_ASSISTANT_UNAVAILABLE, command.conversation_id
+            )
+            return
+        self._track_assistant_task(self._run_summary(service, command, websocket))
+
+    async def _run_summary(self, service, command, websocket):
+        conversation_id = command.conversation_id
+        streamed = []
+
+        async def _on_chunk(text: str) -> None:
+            streamed.append(len(text))
+            await self._send_reply(websocket, summary_chunk_message(text, conversation_id))
+
+        try:
+            outcome = await service.request_summary(conversation_id, on_chunk=_on_chunk)
+        except asyncio.CancelledError:
+            failure = self._send_summary_failure(
+                websocket, ERROR_CANCELLED, conversation_id, after_chunks=bool(streamed)
+            )
+            await asyncio.shield(failure)
+            raise
+        except Exception as e:
+            logger.error("Summary request failed unexpectedly (%s)", type(e).__name__)
+            failure = self._send_summary_failure(
+                websocket, ERROR_INTERNAL, conversation_id, after_chunks=bool(streamed)
+            )
+            await asyncio.shield(failure)
+            return
+
+        warning = _warning_payload(outcome.warning)
+        if not outcome.ok:
+            error = outcome.error
+            failure = self._send_summary_failure(
+                websocket,
+                error.code.value,
+                conversation_id,
+                after_chunks=bool(streamed),
+                message=error.message,
+                retryable=error.retryable,
+                provider_code=error.provider_code,
+                warning=warning,
+            )
+            await asyncio.shield(failure)
+            return
+
+        done = summary_done_message(
+            conversation_id=conversation_id,
+            summary_id=outcome.stored.summary_id,
+            warning=warning,
+            provider=outcome.provider.to_dict() if outcome.provider is not None else None,
+            included_message_count=outcome.included_message_count,
+            omitted_message_count=outcome.omitted_message_count,
+        )
+        await asyncio.shield(self._send_reply(websocket, done))
 
     async def _on_request_models_list(self, message: dict, websocket):
         from engine.core.model_manager import get_models_list
