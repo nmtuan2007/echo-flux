@@ -82,10 +82,6 @@ use crate::secure_store::{
 /// Python module run as the Test Connection child.
 pub const VALIDATOR_MODULE: &str = "engine.providers.validation";
 
-/// Same grace period `EngineManager::production` uses; main.rs builds the manager itself so
-/// it can install the capturing spawner.
-pub const ENGINE_STOP_GRACE: Duration = Duration::from_secs(2);
-
 /// Longer than the validator's own 15 s probe timeout plus interpreter start-up.
 const VALIDATOR_TIMEOUT: Duration = Duration::from_secs(30);
 const VALIDATOR_EXIT_GRACE: Duration = Duration::from_millis(500);
@@ -225,9 +221,16 @@ fn is_secret_key_name(key: &str) -> bool {
 
 fn contains_secret_key(value: &Value) -> bool {
     match value {
-        Value::Object(map) => map
-            .iter()
-            .any(|(key, item)| is_secret_key_name(key) || contains_secret_key(item)),
+        Value::Object(map) => map.iter().any(|(key, item)| {
+            if key == "credentialRefs" {
+                match item {
+                    Value::Object(slots) => slots.values().any(contains_secret_key),
+                    _ => contains_secret_key(item),
+                }
+            } else {
+                is_secret_key_name(key) || contains_secret_key(item)
+            }
+        }),
         Value::Array(items) => items.iter().any(contains_secret_key),
         _ => false,
     }
@@ -584,11 +587,11 @@ fn parse_validation_result(
     if wire_capability != capability || wire_provider != provider_id {
         return Err(invalid_response());
     }
-    if wire.error_code.as_deref().map_or(false, |code| !is_error_code(code))
-        || wire.fingerprint.as_deref().map_or(false, |fp| !is_fingerprint(fp))
+    if wire.error_code.as_deref().is_some_and(|code| !is_error_code(code))
+        || wire.fingerprint.as_deref().is_some_and(|fp| !is_fingerprint(fp))
         || !wire.tested_at.is_finite()
         || wire.tested_at <= 0.0
-        || wire.latency_ms.map_or(false, |ms| !ms.is_finite() || ms < 0.0)
+        || wire.latency_ms.is_some_and(|ms| !ms.is_finite() || ms < 0.0)
     {
         return Err(invalid_response());
     }
@@ -837,7 +840,41 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
         "delete_model" => (Some("model_action_result"), 30, false),
         "search_hub" => (Some("hub_search_results"), 30, true),
         "request_suggestion" => (Some("suggestion_result"), 120, false),
+        "request_assist" => (None, 120, false),
         "request_summary" => (Some("llm_done"), 300, false),
+        "test_connection" => (Some("test_connection_result"), 30, false),
+
+        // Phase B: Context Profiles (EF-020)
+        "profile_create" => (None, 10, false),
+        "profile_list" => (None, 10, false),
+        "profile_get" => (None, 10, false),
+        "profile_update" => (None, 10, false),
+        "profile_delete" => (None, 10, false),
+        "profile_attach" => (None, 10, false),
+
+        // Phase B: Conversations (EF-020 / EF-021)
+        "conversation_create" => (None, 10, false),
+        "conversation_start" => (None, 10, false),
+        "conversation_list" => (None, 10, false),
+        "conversation_get" => (None, 15, false),
+        "conversation_rename" => (None, 10, false),
+        "conversation_delete" => (None, 10, false),
+        "conversation_export" => (None, 30, false),
+        "conversation_import" => (None, 30, false),
+
+        // Phase B: Local Model Packs (EF-008)
+        "pack_status" => (None, 10, false),
+        "pack_install" => (None, 30, false),
+        "pack_cancel" => (None, 10, false),
+        "pack_retry" => (None, 30, false),
+        "pack_check_readiness" => (None, 15, false),
+
+        // Phase B: Provider Manifests (EF-003 / EF-022)
+        "get_provider_manifests" => (None, 10, false),
+
+        // Phase B: Summary Streaming & Cancellation (EF-022)
+        "summary_cancel" => (None, 10, false),
+
         _ => return None,
     };
     Some(ForwardPolicy {
@@ -900,7 +937,7 @@ impl Write for BoundedCounter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0 += buf.len();
         if self.0 > MAX_FORWARD_COMMAND_BYTES {
-            return Err(io::Error::new(io::ErrorKind::Other, "command too large"));
+            return Err(io::Error::other("command too large"));
         }
         Ok(buf.len())
     }
@@ -1063,7 +1100,10 @@ async fn exchange(
                 if messages.len() >= collection.max_messages {
                     return Err(invalid_response());
                 }
-                let message = reply.remove("message").unwrap_or(Value::Null);
+                let message = reply
+                    .remove("message")
+                    .or_else(|| reply.remove("data"))
+                    .unwrap_or(Value::Null);
                 if let Some(terminal) = collection.terminal {
                     // An application error is the command's answer; nothing follows it.
                     let kind = message.get("type").and_then(Value::as_str);
@@ -1097,9 +1137,11 @@ async fn control_round_trip(
     mut frame: Zeroizing<String>,
     collection: Collection,
 ) -> Result<Vec<Value>, BridgeError> {
-    let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(MAX_CONTROL_MESSAGE_BYTES);
-    config.max_frame_size = Some(MAX_CONTROL_MESSAGE_BYTES);
+    let config = WebSocketConfig {
+        max_message_size: Some(MAX_CONTROL_MESSAGE_BYTES),
+        max_frame_size: Some(MAX_CONTROL_MESSAGE_BYTES),
+        ..Default::default()
+    };
     let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), true)
         .await
         .map_err(|_| BridgeError::new(ErrorCode::ControlUnavailable))?;
@@ -2044,6 +2086,29 @@ mod tests {
         assert_eq!(prepared.redactions.len(), 1);
         assert_eq!(prepared.redactions[0].as_str(), SECRET);
 
+        let prepared_with_services = bridge
+            .prepare_start(
+                &store,
+                start_request(json!({
+                    "config": {
+                        "services": {
+                            "stt": {
+                                "credentialRefs": {
+                                    "api_key": {"configId": "dg-main", "slot": "api_key", "version": 1}
+                                }
+                            }
+                        }
+                    },
+                    "credentials": {}
+                })),
+            )
+            .unwrap();
+        let frame_services: Value = serde_json::from_str(&prepared_with_services.frame).unwrap();
+        assert_eq!(
+            frame_services["command"]["config"]["services"]["stt"]["credentialRefs"]["api_key"]["slot"],
+            "api_key"
+        );
+
         let stop = bridge.prepare_stop().unwrap();
         let frame: Value = serde_json::from_str(&stop.frame).unwrap();
         assert_eq!(frame, json!({"op": "request", "id": stop.request_id, "command": {"type": "stop"}}));
@@ -2311,7 +2376,30 @@ mod tests {
             ("delete_model", Some("model_action_result"), 30, false),
             ("search_hub", Some("hub_search_results"), 30, true),
             ("request_suggestion", Some("suggestion_result"), 120, false),
+            ("request_assist", None, 120, false),
             ("request_summary", Some("llm_done"), 300, false),
+            ("test_connection", Some("test_connection_result"), 30, false),
+            ("profile_create", None, 10, false),
+            ("profile_list", None, 10, false),
+            ("profile_get", None, 10, false),
+            ("profile_update", None, 10, false),
+            ("profile_delete", None, 10, false),
+            ("profile_attach", None, 10, false),
+            ("conversation_create", None, 10, false),
+            ("conversation_start", None, 10, false),
+            ("conversation_list", None, 10, false),
+            ("conversation_get", None, 15, false),
+            ("conversation_rename", None, 10, false),
+            ("conversation_delete", None, 10, false),
+            ("conversation_export", None, 30, false),
+            ("conversation_import", None, 30, false),
+            ("pack_status", None, 10, false),
+            ("pack_install", None, 30, false),
+            ("pack_cancel", None, 10, false),
+            ("pack_retry", None, 30, false),
+            ("pack_check_readiness", None, 15, false),
+            ("get_provider_manifests", None, 10, false),
+            ("summary_cancel", None, 10, false),
         ];
         for (kind, terminal, seconds, accepts_hf_token) in table {
             let checked = check_forward_command(json!({"type": kind}), None).unwrap();

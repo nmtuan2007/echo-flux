@@ -36,6 +36,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -562,6 +563,43 @@ class DeepgramSTTProvider(StreamingSTTProvider):
     - ``stop`` sends ``CloseStream`` after queued audio, waits for the server to flush
       and close, finalizes anything shown, then closes sockets and cancels tasks.
     """
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: Any,
+        secrets: Mapping[str, str],
+        *,
+        stream_ids: Sequence[str] = ("default",),
+        connect_factory: Optional[ConnectFactory] = None,
+    ) -> "DeepgramSTTProvider":
+        api_key = secrets.get("api_key", "")
+        options = getattr(resolved, "options", {}) or {}
+        language = options.get("language")
+        if isinstance(language, str) and (not language.strip() or language.strip().lower() == "auto"):
+            language = None
+        endpoint = getattr(resolved, "endpoint", "") or "wss://api.deepgram.com/v1/listen"
+        model = getattr(resolved, "model", "") or "nova-3"
+        provider_id = getattr(resolved, "provider_id", "deepgram")
+        settings = DeepgramSettings(
+            model=model,
+            api_key=api_key,
+            endpoint=endpoint,
+            auth_scheme=options.get("auth_scheme", "token"),
+            sample_rate=options.get("sample_rate", 16000),
+            language=language,
+            endpointing_ms=options.get("endpointing_ms"),
+            utterance_end_ms=options.get("utterance_end_ms"),
+            smart_format=options.get("smart_format"),
+            punctuate=options.get("punctuate"),
+            keyterms=tuple(options.get("keyterms", ())),
+        )
+        return cls(
+            settings,
+            provider_id=provider_id,
+            stream_ids=stream_ids,
+            connect_factory=connect_factory,
+        )
 
     def __init__(
         self,

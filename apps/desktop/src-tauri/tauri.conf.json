@@ -69,9 +69,12 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
+      "externalBin": [
+        "binaries/echoflux-engine"
+      ],
       "category": "Utility",
       "shortDescription": "Real-time speech-to-text and translation",
-      "longDescription": "EchoFlux is a fully local, low-latency, real-time speech-to-text and translation desktop application."
+      "longDescription": "EchoFlux is a local-first, low-latency, real-time speech-to-text and translation desktop application."
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; style-src 'self' 'unsafe-inline'"

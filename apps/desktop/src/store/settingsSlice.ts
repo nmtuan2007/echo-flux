@@ -1,5 +1,5 @@
 import type { StateStorage } from "zustand/middleware";
-import { errorCodeOf, testProviderConnection } from "../lib/engineBridge";
+import { errorCodeOf, forwardCommand, testProviderConnection } from "../lib/engineBridge";
 import {
   deleteCredential,
   getCredentialStatus,
@@ -15,9 +15,12 @@ import {
 import type { EngineSliceCreator } from "./engineStore";
 import type {
   AppView,
+  CloudConsentState,
   EngineConfig,
   FieldType,
+  HardwareInfo,
   ManifestField,
+  PackStatusItem,
   ProviderCapability,
   ProviderManifest,
   ServiceConfig,
@@ -27,6 +30,7 @@ import type {
   Theme,
   ValidationMetadata,
 } from "./types";
+import { CLOUD_CONSENT_VERSION } from "./types";
 
 // Public settings, credential references/configured state, and provider validation state.
 // Raw secrets reach the OS vault through lib/secureStore and are never persisted.
@@ -570,6 +574,102 @@ export function credentialConfigId(providerId: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Zero-secrets v2 services sanitization (EF-025)
+// ---------------------------------------------------------------------------
+
+const SECRET_KEY_PATTERNS = ["sk-", "Bearer ", "token-", "key-", "hf_"];
+
+export function sanitizeServiceConfig(raw: unknown, fallback: ServiceConfig): ServiceConfig {
+  if (!isRecord(raw)) return fallback;
+
+  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : fallback.enabled;
+  const providerId =
+    typeof raw.providerId === "string" && isValidConfigId(raw.providerId)
+      ? raw.providerId
+      : fallback.providerId;
+  const endpoint = typeof raw.endpoint === "string" ? raw.endpoint.trim() : "";
+  const modelOverride = typeof raw.modelOverride === "string" ? raw.modelOverride.trim() : "";
+
+  // Sanitize options: primitives only, absolutely ZERO secret keys or secret-like values
+  const options: Record<string, ServiceOptionValue> = {};
+  if (isRecord(raw.options)) {
+    for (const [key, value] of Object.entries(raw.options)) {
+      if (isSecretKeyName(key)) continue;
+      if (typeof value === "string") {
+        if (SECRET_KEY_PATTERNS.some((p) => value.startsWith(p))) continue;
+        if (KEY_LIKE_PREFIXES.some((p) => value.toLowerCase().startsWith(p))) continue;
+        options[key] = value;
+      } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+        options[key] = value;
+      }
+    }
+  }
+
+  // Sanitize credentialRefs: preserve only { configId, slot, version }, never secret data
+  const credentialRefs: Record<string, { configId: string; slot: string; version: number }> = {};
+  if (isRecord(raw.credentialRefs)) {
+    for (const [slot, ref] of Object.entries(raw.credentialRefs)) {
+      if (!isRecord(ref)) continue;
+      const configId = ref.configId;
+      const innerSlot = ref.slot;
+      const version = ref.version;
+      if (
+        typeof configId === "string" &&
+        isValidConfigId(configId) &&
+        typeof innerSlot === "string" &&
+        innerSlot === slot &&
+        typeof version === "number" &&
+        Number.isInteger(version) &&
+        version >= 0
+      ) {
+        credentialRefs[slot] = { configId, slot, version };
+      }
+    }
+  }
+
+  // Sanitize validation: outcome status and fingerprint only, never free text
+  let validation = unvalidated();
+  if (isRecord(raw.validation)) {
+    const status = raw.validation.status;
+    if (status === "valid" || status === "invalid" || status === "unvalidated") {
+      const fingerprint =
+        typeof raw.validation.fingerprint === "string" && raw.validation.fingerprint.length <= 128
+          ? raw.validation.fingerprint
+          : null;
+      const checkedAt =
+        typeof raw.validation.checkedAt === "number" && raw.validation.checkedAt > 0
+          ? raw.validation.checkedAt
+          : null;
+      const errorCode =
+        typeof raw.validation.errorCode === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(raw.validation.errorCode)
+          ? raw.validation.errorCode
+          : null;
+      validation = { status, fingerprint, checkedAt, errorCode };
+    }
+  }
+
+  return {
+    enabled,
+    providerId,
+    endpoint,
+    modelOverride,
+    options,
+    credentialRefs,
+    validation,
+  };
+}
+
+export function sanitizeServices(raw: unknown): ServicesConfig {
+  const defaults = defaultServices();
+  if (!isRecord(raw)) return defaults;
+  return {
+    stt: sanitizeServiceConfig(raw.stt, defaults.stt),
+    translation: sanitizeServiceConfig(raw.translation, defaults.translation),
+    assistant: sanitizeServiceConfig(raw.assistant, defaults.assistant),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Field input and required-field checks
 // ---------------------------------------------------------------------------
 
@@ -848,6 +948,24 @@ export interface SettingsSlice {
   saveServiceSecret: (service: ServiceName, slot: string, secret: string) => Promise<boolean>;
   deleteServiceSecret: (service: ServiceName, slot: string) => Promise<boolean>;
   refreshServiceCredentials: (service: ServiceName) => Promise<void>;
+
+  // EF-026 Onboarding & Cloud Consent
+  onboardingCompleted: boolean;
+  hasConsentedToCloud: boolean;
+  cloudConsentVersion: number;
+  consent: CloudConsentState;
+  packStatus: Record<string, PackStatusItem>;
+  hardwareInfo: HardwareInfo | null;
+  isPackChecking: boolean;
+
+  setOnboardingCompleted: (completed: boolean) => void;
+  setHasConsentedToCloud: (consented: boolean) => void;
+  acceptCloudConsent: (consents?: Partial<CloudConsentState>) => void;
+  revokeCloudConsent: () => void;
+  checkPackReadiness: (capability?: "stt" | "translation") => Promise<void>;
+  installLocalPack: (packId: string) => Promise<boolean>;
+  cancelLocalPack: (packId: string) => Promise<boolean>;
+  retryLocalPack: (packId: string) => Promise<boolean>;
 }
 
 export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get) => {
@@ -931,12 +1049,36 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
     return outcomes;
   };
 
+  const initialOnboarding =
+    typeof window !== "undefined" && window.localStorage?.getItem("echoflux:onboarding_completed") === "true";
+  const initialConsent =
+    typeof window !== "undefined" && window.localStorage?.getItem("echoflux:cloud_consent") === "true";
+
+  const defaultConsentState: CloudConsentState = {
+    version: CLOUD_CONSENT_VERSION,
+    accepted: initialConsent,
+    acceptedAt: initialConsent ? Date.now() : null,
+    revoked: false,
+    revokedAt: null,
+    stt: initialConsent,
+    translation: initialConsent,
+    assistant: initialConsent,
+    summary: initialConsent,
+  };
+
   return {
     config: { ...DEFAULT_CONFIG },
     theme: preferredTheme(),
     activeView: "transcript",
     services: defaultServices(),
     secretStatus: { llmApiKey: false, hfToken: false },
+    onboardingCompleted: initialOnboarding,
+    hasConsentedToCloud: initialConsent,
+    cloudConsentVersion: CLOUD_CONSENT_VERSION,
+    consent: defaultConsentState,
+    packStatus: {},
+    hardwareInfo: null,
+    isPackChecking: false,
 
     setActiveView: (view) => {
       const { activeView, transport, config } = get();
@@ -1180,6 +1322,160 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
         } else if (!configured && currentRef?.configId === configId) {
           setCredentialRef(service, field.key, null);
         }
+      }
+    },
+
+    setOnboardingCompleted: (completed: boolean) => {
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage?.setItem("echoflux:onboarding_completed", String(completed));
+        }
+      } catch {}
+      set({ onboardingCompleted: completed });
+    },
+
+    setHasConsentedToCloud: (consented: boolean) => {
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage?.setItem("echoflux:cloud_consent", String(consented));
+        }
+      } catch {}
+      set((state) => ({
+        hasConsentedToCloud: consented,
+        consent: {
+          ...state.consent,
+          accepted: consented,
+          acceptedAt: consented ? Date.now() : state.consent.acceptedAt,
+          revoked: !consented,
+          revokedAt: !consented ? Date.now() : null,
+        },
+      }));
+    },
+
+    acceptCloudConsent: (consents?: Partial<CloudConsentState>) => {
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage?.setItem("echoflux:cloud_consent", "true");
+        }
+      } catch {}
+      set((state) => ({
+        hasConsentedToCloud: true,
+        cloudConsentVersion: CLOUD_CONSENT_VERSION,
+        consent: {
+          ...state.consent,
+          ...consents,
+          version: CLOUD_CONSENT_VERSION,
+          accepted: true,
+          acceptedAt: Date.now(),
+          revoked: false,
+          revokedAt: null,
+        },
+      }));
+    },
+
+    revokeCloudConsent: () => {
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage?.setItem("echoflux:cloud_consent", "false");
+        }
+      } catch {}
+      set((state) => ({
+        hasConsentedToCloud: false,
+        consent: {
+          ...state.consent,
+          accepted: false,
+          revoked: true,
+          revokedAt: Date.now(),
+          stt: false,
+          translation: false,
+          assistant: false,
+          summary: false,
+        },
+      }));
+    },
+
+    checkPackReadiness: async (capability?: "stt" | "translation") => {
+      set({ isPackChecking: true });
+      try {
+        const caps: ("stt" | "translation")[] = capability ? [capability] : ["stt", "translation"];
+        for (const cap of caps) {
+          try {
+            const res = await forwardCommand({ type: "pack_check_readiness", capability: cap });
+            const statusMsg = res.messages.find(
+              (m) => m.type === "pack_status" || (m as any).ready !== undefined || (m as any).packs,
+            );
+            if (statusMsg) {
+              const data = ((statusMsg as any).data as any) || statusMsg;
+              const packId = (data.pack_id as string) || (cap === "stt" ? "whisper-base" : "marian-en-vi");
+              const ready = Boolean(data.ready);
+              set((state) => ({
+                packStatus: {
+                  ...state.packStatus,
+                  [cap]: {
+                    packId,
+                    kind: cap,
+                    displayName: cap === "stt" ? "Whisper Base (Local STT)" : "Marian MT (Local Translation)",
+                    version: (data.version as string) || "1.0",
+                    sizeBytes: (data.size_bytes as number) || (cap === "stt" ? 145000000 : 250000000),
+                    isReady: ready,
+                    state: ready ? "ready" : "unknown",
+                    downloadPercent: ready ? 100 : 0,
+                    downloadedBytes: ready ? 145000000 : 0,
+                    totalBytes: (data.size_bytes as number) || (cap === "stt" ? 145000000 : 250000000),
+                    issues: Array.isArray(data.issues) ? data.issues : [],
+                    tier: (data.tier as string) || "standard",
+                  },
+                },
+              }));
+            }
+          } catch {
+            // bridge unavailable or non-Tauri
+          }
+        }
+        try {
+          const statusRes = await forwardCommand({ type: "pack_status" });
+          const first = statusRes.messages[0] as any;
+          if (first?.hardware) {
+            set({
+              hardwareInfo: {
+                cpuCores: first.hardware.cpu_cores || 8,
+                ramGb: first.hardware.ram_gb || 16,
+                platform: first.hardware.platform || "windows",
+                architecture: first.hardware.architecture || "x86_64",
+                hasGpu: Boolean(first.hardware.has_gpu),
+              },
+            });
+          }
+        } catch {}
+      } finally {
+        set({ isPackChecking: false });
+      }
+    },
+
+    installLocalPack: async (packId: string) => {
+      try {
+        await forwardCommand({ type: "pack_install", pack_id: packId });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    cancelLocalPack: async (packId: string) => {
+      try {
+        await forwardCommand({ type: "pack_cancel", pack_id: packId });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    retryLocalPack: async (packId: string) => {
+      try {
+        await forwardCommand({ type: "pack_retry", pack_id: packId });
+        return true;
+      } catch {
+        return false;
       }
     },
   };

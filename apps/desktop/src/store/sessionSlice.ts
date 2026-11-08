@@ -27,9 +27,7 @@ import type {
   AudioDeviceInfo,
   EngineConfig,
   EngineMessage,
-  HubSearchResult,
-  ModelItem,
-  ModelType,
+  ProviderCapability,
   TranscriptEntry,
 } from "./types";
 
@@ -48,10 +46,6 @@ export interface EngineCommands {
   start: (config: EngineConfig) => string;
   stop: () => string;
   listDevices: () => string;
-  requestModelsList: () => string;
-  downloadModel: (modelId: string, modelType: ModelType, hfToken: string) => string;
-  deleteModel: (modelId: string, modelType: ModelType) => string;
-  searchHub: (query: string, task: ModelType, hfToken: string) => string;
   requestSuggestion: (
     entryId: string,
     targetText: string,
@@ -59,6 +53,7 @@ export interface EngineCommands {
     config: EngineConfig,
   ) => string;
   requestSummary: (entries: TranscriptEntry[], config: EngineConfig) => string;
+  testConnection?: () => string;
 }
 
 export interface SessionDeps {
@@ -82,7 +77,6 @@ export function connectionResetState(): Partial<EngineState> {
     downloading: false,
     downloadModel: "",
     downloadPercent: 0,
-    modelsList: { asr: [], translation: [] },
   };
 }
 
@@ -114,36 +108,7 @@ export function sessionStoppedState(): Partial<EngineState> {
   };
 }
 
-export function downloadIdleState(): Partial<EngineState> {
-  return { downloading: false, downloadModel: "", downloadPercent: 0 };
-}
 
-export function applyDownloadProgress(
-  state: EngineState,
-  message: EngineMessage,
-): Partial<EngineState> {
-  return {
-    downloading: true,
-    downloadModel: state.downloadModel || (message.model as string) || "AI Model",
-    downloadPercent: (message.percent as number) || 0,
-  };
-}
-
-export function applyModelsList(message: EngineMessage): Partial<EngineState> {
-  return {
-    modelsList: {
-      asr: (message.asr as ModelItem[]) ?? [],
-      translation: (message.translation as ModelItem[]) ?? [],
-    },
-  };
-}
-
-export function applyHubSearchResults(message: EngineMessage): Partial<EngineState> {
-  return {
-    hubSearchResults: (message.results as HubSearchResult[]) ?? [],
-    searchingHub: false,
-  };
-}
 
 export function applyDevicesList(message: EngineMessage): Partial<EngineState> {
   return {
@@ -195,7 +160,30 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   delete_model: "model_action_result",
   search_hub: "hub_search_results",
   request_suggestion: "suggestion_result",
+  request_assist: null,
   request_summary: "llm_done",
+  summary_cancel: null,
+  conversation_create: null,
+  conversation_start: null,
+  conversation_list: null,
+  conversation_get: null,
+  conversation_rename: null,
+  conversation_delete: null,
+  conversation_export: null,
+  conversation_import: null,
+  profile_create: null,
+  profile_list: null,
+  profile_get: null,
+  profile_update: null,
+  profile_delete: null,
+  profile_attach: null,
+  pack_status: null,
+  pack_install: null,
+  pack_cancel: null,
+  pack_retry: null,
+  pack_check_readiness: null,
+  get_provider_manifests: null,
+  test_connection: "test_connection_result",
 };
 
 const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
@@ -205,7 +193,30 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   delete_model: "Model delete",
   search_hub: "Hub search",
   request_suggestion: "Suggestion",
+  request_assist: "Assist",
   request_summary: "Summary",
+  summary_cancel: "Cancel summary",
+  conversation_create: "Create conversation",
+  conversation_start: "Start conversation",
+  conversation_list: "List conversations",
+  conversation_get: "Get conversation",
+  conversation_rename: "Rename conversation",
+  conversation_delete: "Delete conversation",
+  conversation_export: "Export conversation",
+  conversation_import: "Import conversation",
+  profile_create: "Create profile",
+  profile_list: "List profiles",
+  profile_get: "Get profile",
+  profile_update: "Update profile",
+  profile_delete: "Delete profile",
+  profile_attach: "Attach profile",
+  pack_status: "Pack status",
+  pack_install: "Install pack",
+  pack_cancel: "Cancel pack",
+  pack_retry: "Retry pack",
+  pack_check_readiness: "Check pack readiness",
+  get_provider_manifests: "Get provider manifests",
+  test_connection: "Test connection",
 };
 
 // What components and the other slices see as `socket` in secure mode. Legacy call sites
@@ -242,13 +253,10 @@ export interface SessionSlice {
   running: boolean;
   isToggling: boolean;
 
-  // Downloads & Hub
+  // Downloads
   downloading: boolean;
   downloadModel: string;
   downloadPercent: number;
-  hubSearchResults: HubSearchResult[];
-  searchingHub: boolean;
-  modelsList: { asr: ModelItem[]; translation: ModelItem[] };
 
   // Audio device lists
   availableMics: AudioDeviceInfo[];
@@ -267,10 +275,6 @@ export interface SessionSlice {
   togglePipeline: () => void;
   requestDeviceList: () => void;
   clearAppError: () => void;
-  requestModelsList: () => void;
-  downloadModelById: (id: string, type: ModelType) => void;
-  deleteModelById: (id: string, type: ModelType) => void;
-  searchHub: (query: string, task: ModelType) => void;
 }
 
 export const createSessionSlice =
@@ -317,12 +321,6 @@ export const createSessionSlice =
           return;
         case "request_summary":
           set({ summaryLoading: false });
-          return;
-        case "download_model":
-          set(downloadIdleState());
-          return;
-        case "search_hub":
-          set({ searchingHub: false });
           return;
         default:
           return;
@@ -553,12 +551,29 @@ export const createSessionSlice =
       if (LEGACY_SECRET_FIELDS.some((field) => get().config[field])) {
         await get().commitLegacySecrets();
       }
-      const { config, secretStatus } = get();
+      const { config, secretStatus, services } = get();
       const credentials: Record<string, StartCredentialRef> = {};
       if (secretStatus.llmApiKey) {
         credentials["llm.api_key"] = { ...LEGACY_CREDENTIALS.llmApiKey };
       }
+      if (services) {
+        for (const [serviceName, serviceConfig] of Object.entries(services)) {
+          if (!serviceConfig?.credentialRefs) continue;
+          for (const [slot, ref] of Object.entries(serviceConfig.credentialRefs)) {
+            if (ref && ref.configId && ref.configId !== "legacy-llm") {
+              credentials[`${serviceName}.${slot}`] = {
+                capability: serviceName as ProviderCapability,
+                configId: ref.configId,
+                slot: ref.slot || slot,
+              };
+            }
+          }
+        }
+      }
       const publicConfig = publicStartConfig(deps.commands, config);
+      if (services) {
+        publicConfig.services = services;
+      }
       await runControl(gen, () => forwardStart(publicConfig, credentials));
     };
 
@@ -572,9 +587,6 @@ export const createSessionSlice =
       downloading: false,
       downloadModel: "",
       downloadPercent: 0,
-      hubSearchResults: [],
-      searchingHub: false,
-      modelsList: { asr: [], translation: [] },
       availableMics: [],
       availableSpeakers: [],
       appError: null,
@@ -660,30 +672,6 @@ export const createSessionSlice =
 
       clearAppError: () => {
         set({ appError: null });
-      },
-
-      requestModelsList: () => {
-        connectedSocket()?.send(deps.commands.requestModelsList());
-      },
-
-      downloadModelById: (id, type) => {
-        const { downloading, config } = get();
-        const socket = connectedSocket();
-        if (!socket || downloading) return;
-        set({ downloading: true, downloadModel: id, downloadPercent: 0 });
-        socket.send(deps.commands.downloadModel(id, type, config.hfToken));
-      },
-
-      deleteModelById: (id, type) => {
-        connectedSocket()?.send(deps.commands.deleteModel(id, type));
-      },
-
-      searchHub: (query, task) => {
-        const { config } = get();
-        const socket = connectedSocket();
-        if (!socket) return;
-        set({ searchingHub: true, hubSearchResults: [] });
-        socket.send(deps.commands.searchHub(query, task, config.hfToken));
       },
     };
   };

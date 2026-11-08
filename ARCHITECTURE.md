@@ -1,159 +1,118 @@
 # EchoFlux Architecture
 
-Two processes that share nothing but a localhost WebSocket.
+EchoFlux is a local-first, privacy-preserving desktop application for real-time speech-to-text, live translation, and context-aware conversation assistance.
+
+The application is structured into three strictly decoupled tiers:
 
 ```
-Desktop App (Tauri + React)            Engine (Python)
-  engineStore.ts  ── JSON ──────────>  websocket_server.py
-                  <───── JSON ───────  main.py  ──> audio / ASR / NMT / LLM
+┌────────────────────────────────────────────────────────┐
+│               Frontend UI (React / TypeScript)         │
+│  - Zustand Slices: session, transcript, settings, conv │
+│  - Panels: Transcript, Assist, History, Profiles, etc. │
+│  - Holds ZERO raw secrets; uses credential references  │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Tauri IPC (invoke)
+┌──────────────────────────▼─────────────────────────────┐
+│             Desktop Bridge (Rust / Tauri)              │
+│  - OS Credential Vault (Windows Credential Manager /   │
+│    macOS Keychain) via secure_store.rs                 │
+│  - Engine process lifecycle & sidecar supervisor       │
+│  - Privileged control dispatcher & secret injector     │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Authenticated WebSocket (localhost)
+┌──────────────────────────▼─────────────────────────────┐
+│               Backend Engine (Python)                  │
+│  - Dual-stream audio capture & Silero VAD              │
+│  - Provider Registry (STT, Translation, Assistant)     │
+│  - Session Orchestration & Sticky Fallback to Local    │
+│  - SQLite repository: conversations, messages, snapshots│
+└────────────────────────────────────────────────────────┘
 ```
 
-The engine never knows a UI exists — it broadcasts JSON. The UI never touches the
-filesystem, Python, or models — it sends commands and renders replies. The CLI
-(`apps/cli/main.py`) drives the same engine headlessly. Breaking that separation is the
-single most damaging change you can make here; see `.agent/rules/03-architecture.md`.
+The engine never knows a UI exists — it communicates over authenticated localhost WebSockets. The UI never touches the filesystem, Python environment, or models — it dispatches commands and renders event streams. The CLI (`apps/cli/main.py`) drives the same engine headlessly. Breaking this separation is prohibited; see `.agent/rules/03-architecture.md`.
 
-The message contract itself lives in `.agent/rules/03-architecture.md` and is pinned by
-`tests/test_ws_contract.py`. It is not repeated here.
+---
 
-Everything below this section, except **Approved target state**, describes the **current
-runtime**. The target state is approved and being migrated to in stages; none of its
-security or provider features exist yet.
+## 1. System Tiers and Ownership
 
-## Approved target state
-
-A local-first meeting assistant with three independently configured services: realtime
-speech-to-text (STT), LLM translation, and an LLM Assistant (manual message assist and
-meeting summaries). Local STT and Local Translation are the defaults; Assistant is off
-until configured.
-
-```
-React (webview)          Tauri (Rust)                     Engine (Python)
-  Zustand slices ─ IPC ─> credential vault                  composition root
-  useEngineStore          engine process lifecycle           session orchestration
-                          ephemeral tokens                   provider adapters
-                          ── privileged control role ──────> control handler
-  <──────────── authenticated event plane (WebSocket) ────── events
-                                                             SQLite: conversations,
-                                                             context snapshots
-```
-
-### Ownership
-
-| Layer | Owns | Never |
+| Layer | Owns | Prohibitions |
 | --- | --- | --- |
-| React | Presentation, non-secret UI state, slices composed behind `useEngineStore` | Reads raw secrets, touches files, Python, or models |
-| Tauri | OS credential vault, engine process lifecycle, ephemeral process tokens, sensitive control forwarding | Session, provider, or transcript logic |
-| Python | Audio, provider adapters, provider/session orchestration, fallback, transcript reconciliation, context assembly, local SQLite persistence | Knows a UI exists |
-| Adapters | Normalized results and errors for one provider | Choose fallback, call UI code, emit UI-specific behavior |
+| **Frontend UI (React)** | Presentation, interaction states, sanitized preferences, modular Zustand slices (`useEngineStore`). | NEVER reads or stores raw third-party API keys; NEVER interacts directly with local filesystem or model files. |
+| **Desktop Bridge (Rust)** | System integration, OS Credential Vault (Windows Credential Manager / macOS Keychain), child process lifecycle (sidecar `echoflux-engine`), privileged control proxying, secret redaction. | NEVER implements session, transcription, translation, or prompt generation logic. |
+| **Backend Engine (Python)** | Audio capture, Silero VAD, STT streaming, translation scheduling, assistant summaries, local SQLite persistence (`ConversationRepository`), context profile snapshotting. | NEVER assumes a GUI exists; NEVER persists raw secrets to disk, database, or logs. |
+| **Provider Adapters** | Normalized audio/text streams and standardized errors for cloud/local backends. | NEVER decide fallback, manage UI state, or emit raw UI notifications. |
 
-`EchoFluxEngine` becomes a composition root that wires services together instead of
-owning every behavior itself.
+---
 
-### Provider and session concepts
+## 2. Core Architectural Invariants
 
-- **Service** — one of `stt`, `translation`, `assistant`, each with its own config section.
-- **Provider manifest** — registry entry declaring capability, protocol family, defaults,
-  field schema, secret metadata, and adapter factory. Custom STT reuses the OpenAI
-  Realtime- or Gemini Live-compatible protocol; custom Translation and Assistant use an
-  OpenAI-compatible text API.
-- **Service config** — `providerId`, editable `endpoint`, optional `modelOverride`, typed
-  `options`, `credentialRefs`, and validation metadata. Secrets are referenced, never stored.
-- **Session** — one Start-to-Stop run. It snapshots the resolved provider/model and the
-  attached Context Profiles. Providers cannot change while it runs.
-- **Fallback** — decided by orchestration, not adapters. A runtime failure of cloud STT or
-  Translation switches that service to Local for the rest of the session and emits a
-  visible event. Assistant failures are reported and never fall back.
+### 2.1 Zero-Secret Persistence
+- Third-party API keys (OpenAI, Gemini, Deepgram, AssemblyAI, Azure Speech) are stored exclusively in the OS vault:
+  - Windows: **Windows Credential Manager**
+  - macOS: **macOS Keychain**
+- The webview only handles opaque credential references (`CredentialRef`) and configured status flags.
+- Tauri's privileged bridge (`control_bridge.rs`) resolves credential references into short-lived in-memory strings strictly at command execution time, injecting them into the engine over the control channel.
+- The Python engine consumes secrets ephemerally for the duration of the session and discards them upon termination. Secrets are never saved to SQLite, `config.json`, logs, or error responses.
 
-### Migration boundary
+### 2.2 Immutable Session Profile Snapshotting
+- When a user starts a meeting session with an attached Context Profile, `ConversationRepository` immutably captures the profile definition into `session_profile_snapshots`.
+- Subsequent edits to the user's Context Profiles do not mutate active or historical meeting contexts.
 
-- The current WebSocket contract and legacy runtime stay working until the task that
-  replaces each piece. New modes, adapters, and storage are added dormant first.
-- A message type enters `.agent/rules/03-architecture.md` only in the change that
-  implements it; the contract test enforces this.
-- Legacy pieces slated for removal once replaced: the universal Hugging Face model hub and
-  the unauthenticated online translation path.
+### 2.3 Sticky Fallback Orchestration
+- If a cloud STT or Translation provider encounters a network error, rate limit, or authentication failure during a live meeting, `SessionOrchestrator` automatically degrades that capability to the **Local** provider for the remainder of the session without speech or transcript loss.
+- Sticky fallback emits a structured status event to notify the UI without terminating the audio pipeline.
+- Assistant errors fail visibly without fallback, as assistant queries are user-triggered rather than continuous streaming.
 
-## Thread model
+### 2.4 Dual-Stream Audio & Concurrency
+- `engine/main.py` coordinates concurrent `threading` (blocking PortAudio / WASAPI capture, VAD, model inference) with `asyncio` (WebSocket event broadcasting and control requests).
+- Supports independent `mic` and `system` (loopback) audio streams, each running isolated capture and process worker threads connected via thread-safe bounded `queue.Queue`.
+- `_broadcast_loop` drains up to 10 messages per batch via non-blocking `get_nowait()` polling, preventing thread contention on the event loop.
 
-This is where the engine is easy to break. `engine/main.py` mixes `asyncio` (WebSocket
-I/O) with `threading` (blocking audio and ML work). Nothing blocking may touch the event
-loop.
+---
 
-```
-Capture-{stream}  thread   audio device ──> _audio_queues[stream]  (Queue, maxsize=500)
-Process-{stream}  thread   audio queue  ──> VAD ──> ASR ──> _result_queue
-TranslationThread thread   _translation_queue (maxsize=100) ──> _result_queue
-_broadcast_loop   asyncio  _result_queue ──get_nowait()──> ws_server.broadcast()
-```
-
-- One `Capture-*` and one `Process-*` thread **per audio stream**. With
-  `audio.source = "both"` there are two of each, keyed `mic` and `system`, each with its
-  own queue and its own VAD instance. This is why every ASR method takes a `stream_id`
-  and why backends must hold per-stream state.
-- All threads are daemons. Cross-thread handoff is always `queue.Queue`, never shared
-  mutable state.
-- `_broadcast_loop` is the only bridge back into asyncio. It drains at most 10 messages
-  per pass with `get_nowait()`, then sleeps 20 ms when the queue is empty. Code running
-  on a thread that needs the loop uses `asyncio.run_coroutine_threadsafe`.
-- Model download and Hub search each spawn their own short-lived daemon thread for the
-  same reason: they block.
-
-## Transcription flow
-
-1. `_capture_loop` reads `int16` PCM `bytes` and puts them on the stream's queue.
-2. `_process_loop` runs VAD, then `transcribe_stream()`, and on a speech boundary
-   `finalize_current()`.
-3. `_enqueue_asr_result` emits `partial` while speech is in progress and `final` at a
-   boundary. Every `final` gets a stable `entry_id` (`e-<timestamp>`).
-4. Translation is **always asynchronous**. `final` ships with `translation: null`; the
-   text is queued, translated on `TranslationThread`, and returned later as a
-   `translation_update` carrying the same `entry_id`. The UI matches them on that id.
-
-The UI must therefore tolerate a final transcript that has no translation yet — and
-`partial` messages arriving every few hundred milliseconds.
-
-## Modules
+## 3. Module Layout
 
 | Path | Role |
 | --- | --- |
-| `engine/main.py` | `EchoFluxEngine` — pipeline construction, threads, broadcast loop |
-| `engine/server/websocket_server.py` | Socket lifecycle, command dispatch, device enumeration |
-| `engine/core/config.py` | `Config`, `TranscriptionConfig`, env map, data dirs |
-| `engine/core/model_manager.py` | Download / delete / list / Hub search, progress callback |
-| `engine/audio/` | `MicrophoneInput`, `SystemAudioInput` (WASAPI loopback), `VAD`, mixer |
-| `engine/asr/` | `ASRBackend` ABC, `AutoModelAdapter`, faster-whisper + transformers adapters |
-| `engine/translation/` | `TranslationBackend` ABC, Marian / online / fallback backends |
-| `engine/llm/assistant.py` | Optional suggestions and streamed summaries |
-| `apps/desktop/src/store/engineStore.ts` | All UI business logic, socket handling, reconnect |
-| `apps/cli/main.py` | Headless entry point |
+| `engine/main.py` | `EchoFluxEngine` composition root, thread orchestration, pipeline runner |
+| `engine/server/websocket_server.py` | Authenticated WebSocket server (control role & event broadcast plane) |
+| `engine/server/control_dispatcher.py` | Control command dispatcher and error boundary |
+| `engine/session/session_orchestrator.py` | Live STT/Translation session lifecycle, stream coordination, sticky fallback |
+| `engine/conversation/repository.py` | Local SQLite database schema, conversations, messages, translations, snapshots |
+| `engine/conversation/context_profiles.py` | Context profile management, vocabulary, instructions |
+| `engine/assistant/service.py` | Assistant suggestion and clarification generation |
+| `engine/assistant/summary_service.py` | Real-time meeting summary chunk streaming |
+| `engine/providers/` | Capability provider registry (`stt/`, `translation/`, `assistant/`) |
+| `engine/local_models/` | Local model pack catalog, hardware tier inspection, on-demand downloader |
+| `engine/audio/` | Microphone, WASAPI system audio loopback, Silero VAD, stream mixer |
+| `apps/desktop/src/store/` | Unified Zustand store composed from typed slices (`session`, `transcript`, `settings`, `conversation`) |
+| `apps/desktop/src/components/` | Modular React panels (`TranscriptPanel`, `AssistPanel`, `HistoryPanel`, `ContextProfilesPanel`, `OnboardingDialog`, etc.) |
+| `apps/desktop/src-tauri/src/` | Rust desktop bridge (`control_bridge`, `engine_process`, `secure_store`, `main`) |
+| `packaging/echoflux-engine.spec` | PyInstaller standalone freeze specification for sidecar binary |
+| `scripts/build_sidecar.ps1` | Sidecar cross-compilation & deployment automation script |
 
-Backend selection is indirect: `AutoModelAdapter.load()` reads the downloaded model's
-`manifest.json` and picks the `ctranslate2` or `transformers` runtime from it. Translation
-always goes through `FallbackTranslationBackend`, which wraps the configured backend and
-degrades rather than raising.
+---
 
-## Configuration
+## 4. Transcription & Translation Flow
 
-Resolved later-wins: built-in defaults → `config.json` in the data dir → `.env` (project
-root, then data dir) → environment variables. `_load_dotenv` will not overwrite a variable
-that is already set, which is what makes real environment variables outrank `.env`.
+```
+1. Audio Capture (PortAudio / WASAPI Loopback)
+   └─> int16 PCM bytes ──> Queue ──> Silero VAD
+2. Speech Processing
+   └─> Transcribe chunk ──> partial event (streamed to UI)
+   └─> Boundary detected ──> final event (persisted to SQLite with message_id)
+3. Asynchronous Translation
+   └─> final text enqueued to TranslationThread
+   └─> NMT / LLM translation completed
+   └─> translation_update event emitted (correlated by message_id & entry_id)
+   └─> Updated translation persisted to SQLite
+4. Real-time Assistance (Optional)
+   └─> ID-only request_assist ──> context assembled from SQLite ──> suggestion_result
+   └─> request_summary ──> streaming llm_chunk ──> llm_done
+```
 
-The UI sends **dotted keys** in its `start` payload (`"asr.model_size"`), which
-`_initialize_pipeline` reads directly from the settings dict, falling back to
-`ECHOFLUX_*` for CLI use. Adding a setting means touching `_DEFAULT_CONFIG`, `_ENV_MAP`,
-`_initialize_pipeline`, and the store — see `.agent/workflows/new-feature.md`.
+---
 
-Pinned by `tests/test_config.py`.
+## 5. Reliability & Soak Target
 
-## Models and failure behaviour
-
-Models are never bundled. They download on demand to the platform data directory
-(`%USERPROFILE%\.echoflux\models` on Windows, `~/Library/Application Support/EchoFlux/models`
-on macOS, `~/.local/share/echoflux/models` on Linux), overridable with
-`ECHOFLUX_MODELS_DIR`.
-
-Degradation is a design rule, not a nicety: GPU load failure falls back to CPU, VAD
-initialisation failure disables VAD instead of killing the pipeline, translation failure
-falls through to the next backend, and device enumeration returns a placeholder while
-capture is active rather than crashing PyAudio. Preserve this when adding backends.
+EchoFlux is validated against a 4-hour continuous session soak test simulating continuous dual-stream meeting speech. The pipeline maintains strict queue caps (`maxsize=500` for audio chunks, `maxsize=100` for translation items) to guarantee memory stability, zero unbounded buffer growth, and consistent event ordering under sustained load.

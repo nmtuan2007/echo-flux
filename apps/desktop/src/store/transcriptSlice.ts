@@ -315,7 +315,10 @@ export function applyFinal(state: EngineState, message: EngineMessage): Partial<
   // a revision the legacy append behavior applies.
   const revision = revisionOf(message);
   if (revision !== undefined && message.entry_id) {
-    const index = findLast(state.entries, (e) => e.id === entry.id);
+    const index = findLast(
+      state.entries,
+      (e) => e.id === entry.id || (Boolean(entry.messageId) && e.messageId === entry.messageId),
+    );
     if (index !== -1) {
       const existing = state.entries[index];
       if (existing.revision !== undefined && existing.revision > revision) return update;
@@ -764,12 +767,21 @@ export const createTranscriptSlice =
 
       requestAssist: (entryId) => {
         const state = get();
-        const entry = state.entries.find((e) => e.id === entryId);
+        const entry = state.entries.find((e) => e.id === entryId || (e.messageId && e.messageId === entryId));
         if (!entry || !entry.isFinal || !entry.text.trim()) return;
         if (!isAssistantConfigured(state)) return;
         const key = assistKeyOf(entry);
         if (state.suggestionLoading[key]) return;
         if (assistUnavailableReason(state, entry) !== null) return;
+
+        if (!state.socket || !state.connected) {
+          if (typeof window !== "undefined" && (window as unknown as { __TAURI__?: unknown }).__TAURI__) {
+            void import("@tauri-apps/api/event").then(({ emit }) => {
+              void emit("relay_request_assist", { entryId });
+            });
+          }
+          return;
+        }
 
         const conversationId = (entry.conversationId ?? state.engineConversationId) as string;
         assistCounter += 1;

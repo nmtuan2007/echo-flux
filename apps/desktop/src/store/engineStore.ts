@@ -8,11 +8,7 @@ import {
 } from "./conversationSlice";
 import {
   applyDevicesList,
-  applyDownloadProgress,
-  applyHubSearchResults,
-  applyModelsList,
   createSessionSlice,
-  downloadIdleState,
   RECONNECT_DELAY_MS,
   sessionStartedState,
   sessionStoppedState,
@@ -22,6 +18,7 @@ import {
 import {
   createSettingsSlice,
   sanitizeConfig,
+  sanitizeServices,
   sanitizeTheme,
   type PersistedConfig,
   type SettingsSlice,
@@ -34,7 +31,7 @@ import {
   createTranscriptSlice,
   type TranscriptSlice,
 } from "./transcriptSlice";
-import type { Conversation, EngineConfig, EngineMessage, Theme } from "./types";
+import type { Conversation, EngineConfig, EngineMessage, ServicesConfig, Theme } from "./types";
 
 // Composition root for the UI store. Components keep importing `useEngineStore` and the
 // types below from this module.
@@ -47,8 +44,6 @@ export type {
   AudioDeviceInfo,
   Conversation,
   EngineConfig,
-  HubSearchResult,
-  ModelItem,
   SuggestionOption,
   SuggestionResult,
   TranscriptEntry,
@@ -98,22 +93,6 @@ export const engineCommands: EngineCommands = {
 
   listDevices: () => JSON.stringify({ type: "list_devices" }),
 
-  requestModelsList: () => JSON.stringify({ type: "request_models_list" }),
-
-  downloadModel: (modelId, modelType, hfToken) =>
-    JSON.stringify({
-      type: "download_model",
-      model_id: modelId,
-      model_type: modelType,
-      hf_token: hfToken,
-    }),
-
-  deleteModel: (modelId, modelType) =>
-    JSON.stringify({ type: "delete_model", model_id: modelId, model_type: modelType }),
-
-  searchHub: (query, task, hfToken) =>
-    JSON.stringify({ type: "search_hub", query, task, hf_token: hfToken }),
-
   requestSuggestion: (entryId, targetText, context, config) =>
     JSON.stringify({
       type: "request_suggestion",
@@ -137,6 +116,11 @@ export const engineCommands: EngineCommands = {
         provider_url: config.llmProviderUrl || undefined,
       },
     }),
+
+  testConnection: () =>
+    JSON.stringify({
+      type: "test_connection",
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -158,38 +142,6 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
     case "translation_update":
       set((state) => applyTranslationUpdate(state, message));
       break;
-
-    case "download_progress": {
-      if (message.percent === 100) {
-        set(downloadIdleState());
-        const { connected, socket } = get();
-        if (connected && socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(engineCommands.requestModelsList());
-        }
-      } else {
-        set((state) => applyDownloadProgress(state, message));
-      }
-      break;
-    }
-
-    case "models_list":
-      set(applyModelsList(message));
-      break;
-
-    case "hub_search_results":
-      set(applyHubSearchResults(message));
-      break;
-
-    case "model_action_result": {
-      set(downloadIdleState());
-      if (message.success) {
-        get().requestModelsList();
-      } else {
-        console.error("Model action failed:", message.error);
-        set({ appError: `Model Error: ${message.error}` });
-      }
-      break;
-    }
 
     case "status":
       if (message.status === "started") {
@@ -225,6 +177,9 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
       get().saveCurrentSession();
       break;
     }
+
+    case "test_connection_result":
+      break;
   }
 }
 
@@ -243,6 +198,7 @@ export const PERSIST_VERSION = 1;
 export interface PersistedEngineState {
   theme: Theme;
   config: PersistedConfig;
+  services: ServicesConfig;
   history: Conversation[];
 }
 
@@ -250,6 +206,7 @@ export function selectPersistedState(state: EngineState): PersistedEngineState {
   return {
     theme: state.theme,
     config: sanitizeConfig(state.config) as PersistedConfig,
+    services: sanitizeServices(state.services),
     history: sanitizeHistory(state.history) ?? [],
   };
 }
@@ -261,6 +218,7 @@ export function sanitizePersistedState(raw: unknown): Partial<PersistedEngineSta
   const theme = sanitizeTheme(source.theme);
   if (theme) out.theme = theme;
   if (source.config !== undefined) out.config = sanitizeConfig(source.config) as PersistedConfig;
+  if (source.services !== undefined) out.services = sanitizeServices(source.services);
   const history = sanitizeHistory(source.history);
   if (history) out.history = history;
   return out;
@@ -355,6 +313,7 @@ export function createEngineStore(options: CreateEngineStoreOptions = {}) {
             ...current,
             theme: safe.theme ?? current.theme,
             history: safe.history ?? current.history,
+            services: safe.services ? { ...current.services, ...safe.services } : current.services,
             config: { ...current.config, ...safe.config, ...secrets },
           };
         },

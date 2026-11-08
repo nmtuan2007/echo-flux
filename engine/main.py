@@ -1,19 +1,31 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import sys
 import threading
 import time
-from queue import Queue, Empty, Full
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Set
 from collections import deque
+from pathlib import Path
+from queue import Empty, Full, Queue
+from typing import Any, Dict, Optional, Set
 
 from dotenv import load_dotenv
 
-from engine.core.config import TranscriptionConfig
-from engine.core.progress import install_progress_hijack, set_progress_callback
+from engine.asr.base import TranscriptResult
+from engine.conversation.context_profiles import ContextProfileService
+from engine.conversation.models import (
+    ConversationRecord,
+    ProviderMetadata,
+    SessionRecord,
+    TranscriptMessage,
+)
+from engine.conversation.repository import (
+    ConversationRepository,
+    new_record_id,
+)
+from engine.core.progress import install_progress_hijack
 from engine.server.protocol import (
     ASSISTANT_ERROR_MESSAGES,
     ERROR_ASSISTANT_UNAVAILABLE,
@@ -24,7 +36,6 @@ from engine.server.protocol import (
     BootstrapTokens,
     ProtocolError,
     SecurityMode,
-    is_conversation_command,
     parse_assist_command,
     parse_summary_command,
     safe_command_id,
@@ -35,7 +46,6 @@ from engine.server.protocol import (
     summary_error_replies,
 )
 from engine.server.websocket_server import WebSocketServer
-from engine.asr.base import TranscriptResult
 from engine.session.session_orchestrator import (
     STTSessionOrchestrator,
     STTStatusEvent,
@@ -75,10 +85,8 @@ def _setup_cuda_paths():
             # Windows requires absolute paths for DLL loading
             abs_path = str(target.resolve())
 
-            try:
+            with contextlib.suppress(Exception):
                 os.add_dll_directory(abs_path)
-            except Exception:
-                pass
 
             # Prepend to PATH so CTranslate2 finds these first
             os.environ["PATH"] = abs_path + os.pathsep + os.environ["PATH"]
@@ -123,35 +131,7 @@ def _setup_logging():
             logging.StreamHandler(),
         ],
     )
-    logger.info("Logging initialized – file: %s", log_file)
-
-
-def _legacy_suggestion_fields(message: dict) -> dict:
-    """Coerce a legacy request_suggestion so malformed fields still end in a terminal reply."""
-    entry_id = message.get("entry_id")
-    target_text = message.get("target_text")
-    context = message.get("context")
-    return {
-        **message,
-        "entry_id": entry_id if isinstance(entry_id, str) else "",
-        "target_text": target_text if isinstance(target_text, str) else "",
-        "context": [c for c in context if isinstance(c, str)] if isinstance(context, list) else [],
-    }
-
-
-def _legacy_summary_fields(message: dict) -> dict:
-    """Coerce a legacy request_summary so malformed entries cannot raise mid-handler."""
-    entries = message.get("entries")
-    if not isinstance(entries, list):
-        entries = []
-    usable = [
-        e
-        for e in entries
-        if isinstance(e, dict)
-        and isinstance(e.get("text", ""), str)
-        and isinstance(e.get("source", "speaker"), str)
-    ]
-    return {**message, "entries": usable}
+    logger.info("Logging initialized - file: %s", log_file)
 
 
 def _assist_failure(message_id: str, code: str, conversation_id: Optional[str] = None) -> dict:
@@ -204,36 +184,6 @@ def _warning_payload(warning) -> Optional[dict]:
     }
 
 
-class _LegacyASRBackend:
-    """Legacy start configs name a Whisper size; keep it when Local STT loads its runtime.
-
-    ``LocalSTTProvider`` picks a model pack and passes its model to ``load_model``. A legacy
-    start (flat ``asr.*`` keys) predates packs, so this backend loads what the user picked
-    through the same ``AutoModelAdapter`` path as before. Kept until EF-030.
-    """
-
-    def __init__(self, asr_config: TranscriptionConfig):
-        self._config = asr_config
-        self._backend = None
-
-    def load_model(self, _pack_config) -> None:
-        from engine.asr import AutoModelAdapter
-
-        backend = AutoModelAdapter.load(self._config)
-        backend.load_model(self._config)
-        self._backend = backend
-
-    def unload_model(self) -> None:
-        backend, self._backend = self._backend, None
-        if backend is not None:
-            backend.unload_model()
-
-    def __getattr__(self, name: str):
-        backend = self.__dict__.get("_backend")
-        if backend is None:
-            raise AttributeError(name)
-        return getattr(backend, name)
-
 
 def _continuity_payload(warning) -> Optional[dict]:
     if warning is None:
@@ -247,7 +197,11 @@ def _continuity_payload(warning) -> Optional[dict]:
 
 
 def _stt_transcript_message(
-    event, entry_id: Optional[str], translation_backend: Optional[str]
+    event,
+    entry_id: Optional[str],
+    translation_backend: Optional[str],
+    conversation_id: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> dict:
     """The legacy partial/final shape, then additive session metadata the store ignores."""
     msg = {
@@ -273,6 +227,8 @@ def _stt_transcript_message(
             "retracted": event.retracted,
             "duplicate_of": event.duplicate_of,
             "continuity": _continuity_payload(event.continuity),
+            "conversation_id": conversation_id if conversation_id is not None else getattr(event, "conversation_id", None),
+            "message_id": message_id if message_id is not None else getattr(event, "message_id", None),
         }
     )
     return msg
@@ -363,7 +319,11 @@ def _translation_status_message(event) -> dict:
 
 
 class EchoFluxEngine:
-    def __init__(self, insecure_dev: bool = False):
+    def __init__(
+        self,
+        insecure_dev: bool = False,
+        conversation_repo: Optional[ConversationRepository] = None,
+    ):
         # Tokens are consumed from the environment here and live only inside the server,
         # so they never reach Config, config dumps, logs, or child processes.
         tokens = BootstrapTokens.from_environ(os.environ)
@@ -378,7 +338,7 @@ class EchoFluxEngine:
         self._inputs = {}
         self._vads = {}
         self._audio_queues = {}
-        
+
         self._asr_backend = None
         self._translation_backend = None
         # Realtime STT session: config resolved per Start, orchestrator owned per session.
@@ -412,29 +372,34 @@ class EchoFluxEngine:
 
         self._client = None
         self._current_config = {}
-        self._llm_assistant = None  # Created on each pipeline start if LLM is enabled
-        # Repository-backed Assist/Summary, composed by configure_assistant_services().
+        self._conversation_repo = (
+            conversation_repo if conversation_repo is not None else ConversationRepository()
+        )
+        self._active_conversation_id: Optional[str] = None
+        self._active_session_id: Optional[str] = None
+        self._ephemeral_secrets: Dict[str, str] = {}
         self._assistant_service = None
         self._summary_service = None
         self._assistant_tasks: Set[asyncio.Task] = set()
 
+        from engine.server.control_dispatcher import ControlCommandDispatcher
+
+        self._control_dispatcher = ControlCommandDispatcher(
+            engine=self, conversation_repo=self._conversation_repo
+        )
+        self._ws_server.set_control_dispatcher(self._control_dispatcher)
+
+    @property
+    def control_dispatcher(self):
+        return self._control_dispatcher
+
     async def start(self):
         self._loop = asyncio.get_running_loop()
-        
-        def _progress_cb(model_name: str, percent: int):
-            msg = {"type": "download_progress", "model": model_name, "percent": percent}
-            asyncio.run_coroutine_threadsafe(self._ws_server.broadcast(msg), self._loop)
-                
-        set_progress_callback(_progress_cb)
 
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
         self._ws_server.on_suggestion(self._on_suggestion_request)
         self._ws_server.on_summary(self._on_summary_request)
-        self._ws_server.on_request_models_list(self._on_request_models_list)
-        self._ws_server.on_download_model(self._on_download_model)
-        self._ws_server.on_delete_model(self._on_delete_model)
-        self._ws_server.on_search_hub(self._on_search_hub)
 
         logger.info("EchoFlux Engine starting...")
         self._main_task = asyncio.current_task()
@@ -472,11 +437,12 @@ class EchoFluxEngine:
         if self._main_task is not None and not self._main_task.done():
             self._main_task.cancel()
 
-    async def _on_client_start(self, config: dict):
+    async def _on_client_start(self, config: dict, secrets: Optional[dict] = None):
         # Log the shape only: the start config carries provider settings and API keys.
         key_count = len(config) if isinstance(config, dict) else 0
         logger.info("Starting pipeline (%d client config keys)", key_count)
         self._client = self._ws_server.current_requester()
+        self._ephemeral_secrets = dict(secrets) if isinstance(secrets, dict) else {}
 
         if self._running:
             await self._stop_pipeline()
@@ -493,6 +459,7 @@ class EchoFluxEngine:
             await self._abort_pipeline_start()
             if self._client:
                 await self._client.send(json.dumps({"type": "error", "message": str(e)}))
+            return False
 
     async def _on_client_stop(self):
         await self._cancel_assistant_work()
@@ -549,7 +516,7 @@ class EchoFluxEngine:
         from engine.audio.vad import VAD
         self._vads.clear()
         self._audio_queues.clear()
-        
+
         for stream_id in self._inputs:
             self._audio_queues[stream_id] = Queue(maxsize=500)
             self._vads[stream_id] = VAD({
@@ -569,57 +536,58 @@ class EchoFluxEngine:
             compute_type=os.getenv("ECHOFLUX_COMPUTE_TYPE", "float16"),
         )
 
-        # 4. Translation. A v2 services.translation section runs through the translation
-        # session, started before STT; legacy flat translation.* keys keep the
-        # FallbackTranslationBackend thread until EF-031.
+        # 4. Translation.
         self._translation_config = resolve_translation_session_config(settings)
-        if self._translation_config is None and settings.get("translation.enabled", False):
-            from engine.translation.fallback_backend import FallbackTranslationBackend
 
-            source_lang = settings.get("translation.source_lang", "en")
-            target_lang = settings.get("translation.target_lang", "vi")
-            backend = settings.get("translation.backend", "online")
-            custom_model = settings.get("translation.model")
-
-            translation_config = {
-                "translation.backend": backend,
-                "translation.source_lang": source_lang,
-                "translation.target_lang": target_lang,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "device": settings.get("asr.device", "auto"),
-            }
-
-            if custom_model:
-                translation_config["translation.model"] = custom_model
-
-            logger.info(
-                "Translation config: backend=%s, pair=%s→%s, model=%s",
-                backend, source_lang, target_lang,
-                custom_model or "(default preset)",
-            )
-
-            self._translation_backend = FallbackTranslationBackend()
-            self._translation_backend.load_model(translation_config)
-
-        # 5. LLM Assistant
-        if settings.get("llm.enabled", False):
-            from engine.llm.assistant import LLMAssistant
-            api_key = settings.get("llm.api_key", "")
-            model = settings.get("llm.model", "openai/gpt-4o-mini")
-            provider_url = settings.get("llm.provider_url") or None
-            if api_key and model:
-                self._llm_assistant = LLMAssistant(
-                    api_key=api_key,
-                    model=model,
-                    base_url=provider_url,
-                )
-                logger.info("LLM assistant initialized: model=%s", model)
+        # 5. Conversation and Session Tracking
+        repo = self._conversation_repo
+        if repo is not None:
+            conv_id = settings.get("conversation_id") or settings.get("conversationId")
+            if conv_id and repo.get_conversation(conv_id) is not None:
+                self._active_conversation_id = conv_id
             else:
-                logger.warning("LLM enabled but api_key or model not set — skipping")
-                self._llm_assistant = None
-        else:
-            self._llm_assistant = None
+                conv_id = conv_id or new_record_id()
+                now_ms = time.time() * 1000.0
+                repo.create_conversation(
+                    ConversationRecord(
+                        conversation_id=conv_id,
+                        title=settings.get("conversation_title") or f"Conversation {conv_id[:8]}",
+                        created_at_ms=now_ms,
+                        updated_at_ms=now_ms,
+                    )
+                )
+                self._active_conversation_id = conv_id
+
+            session_id = new_record_id()
+            providers: Dict[str, ProviderMetadata] = {}
+            if self._session_config and self._session_config.primary:
+                providers["stt"] = ProviderMetadata(
+                    provider_id=self._session_config.primary.provider_id,
+                    model=self._session_config.primary.model or None,
+                )
+            if self._translation_config and self._translation_config.enabled and self._translation_config.primary:
+                providers["translation"] = ProviderMetadata(
+                    provider_id=self._translation_config.primary.provider_id,
+                    model=self._translation_config.primary.model or None,
+                )
+
+            session_record = SessionRecord(
+                session_id=session_id,
+                conversation_id=self._active_conversation_id,
+                started_at_ms=time.time() * 1000.0,
+                providers=providers,
+            )
+            ContextProfileService(repo).start_session(session_record)
+            self._active_session_id = session_id
+
+        if (
+            self._assistant_service is None
+            and self._conversation_repo is not None
+            and getattr(self, "_assistant_provider", None) is not None
+        ):
+            self.configure_assistant_services(
+                self._conversation_repo, self._assistant_provider
+            )
 
     def _start_threads(self):
         self._running = True
@@ -629,7 +597,7 @@ class EchoFluxEngine:
         for q in self._audio_queues.values():
             with q.mutex:
                 q.queue.clear()
-                
+
         with self._translation_queue.mutex:
             self._translation_queue.queue.clear()
         with self._result_queue.mutex:
@@ -649,7 +617,7 @@ class EchoFluxEngine:
 
         for stream_id, audio_input in self._inputs.items():
             ct = threading.Thread(
-                target=self._capture_loop, 
+                target=self._capture_loop,
                 args=(stream_id, audio_input, self._audio_queues[stream_id]),
                 name=f"Capture-{stream_id}"
             )
@@ -691,7 +659,7 @@ class EchoFluxEngine:
 
         for ct in self._capture_threads:
             ct.join(timeout=1.0)
-            
+
         for pt in self._process_threads:
             pt.join(timeout=2.0)
 
@@ -709,9 +677,16 @@ class EchoFluxEngine:
             await translation.stop()
         self._translation_config = None
         self._partial_messages.clear()
+        if self._active_session_id and self._conversation_repo:
+            try:
+                self._conversation_repo.end_session(self._active_session_id)
+            except Exception as e:
+                logger.warning("Failed to end session in repo: %s", e)
+            self._active_session_id = None
+        self._ephemeral_secrets.clear()
 
         if self._asr_backend:
-            for stream_id in self._inputs.keys():
+            for stream_id in self._inputs:
                 result = self._asr_backend.finalize_current(stream_id)
                 if result:
                     self._enqueue_asr_result(result)
@@ -730,10 +705,8 @@ class EchoFluxEngine:
 
         if self._result_task:
             self._result_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._result_task
-            except asyncio.CancelledError:
-                pass
 
         if self._translation_backend:
             self._translation_backend.unload_model()
@@ -747,6 +720,8 @@ class EchoFluxEngine:
         self._inputs.clear()
         self._vads.clear()
         self._audio_queues.clear()
+        self._capture_threads.clear()
+        self._process_threads.clear()
         logger.info("Pipeline stopped.")
 
     def _capture_loop(self, stream_id: str, audio_input, audio_queue: Queue):
@@ -759,7 +734,7 @@ class EchoFluxEngine:
                     chunk_count += 1
                     if chunk_count % 100 == 0:
                         logger.debug("Capture [%s]: Read 100 chunks. Current queue size: %d", stream_id, audio_queue.qsize())
-                    
+
                     if not audio_queue.full():
                         audio_queue.put(chunk)
                     else:
@@ -812,7 +787,7 @@ class EchoFluxEngine:
                     silence_start_time = None
                     has_pending_audio = True
                     was_speech = True
-                    
+
                     result = self._asr_backend.transcribe_stream(combined_audio, stream_id)
                     if result:
                         logger.debug("Process [%s]: Received ASR Result -> '%s' (is_final=%s)", stream_id, result.text, result.is_final)
@@ -822,7 +797,7 @@ class EchoFluxEngine:
                     if was_speech and silence_start_time is None:
                         logger.info("Process [%s]: SPEECH ENDED. Entering silence countdown.", stream_id)
                         silence_start_time = time.time()
-                    
+
                     if silence_start_time is not None:
                         elapsed = time.time() - silence_start_time
                         if elapsed >= SILENCE_FINALIZE_DELAY and has_pending_audio:
@@ -928,16 +903,18 @@ class EchoFluxEngine:
         self._result_queue.put(msg)
 
         # Translation Logic: Queue immediately if FINAL, carry the same entry_id
-        if self._translation_backend and self._translation_backend.is_loaded:
-            if asr_result.is_final and asr_result.text.strip():
-                try:
-                    self._translation_queue.put({
-                        "text": asr_result.text,
-                        "entry_id": entry_id,
-                        "is_final": True
-                    }, timeout=0.5)
-                except Full:
-                    pass
+        if (
+            self._translation_backend
+            and self._translation_backend.is_loaded
+            and asr_result.is_final
+            and asr_result.text.strip()
+        ):
+            with contextlib.suppress(Full):
+                self._translation_queue.put({
+                    "text": asr_result.text,
+                    "entry_id": entry_id,
+                    "is_final": True
+                }, timeout=0.5)
 
     # --- Realtime STT session -------------------------------------------------------------
     #
@@ -947,12 +924,16 @@ class EchoFluxEngine:
     # session once. Any Start failure goes through _abort_pipeline_start.
 
     async def _start_stt_session(self):
+        secrets_resolver = self._stt_secrets_resolver
+        if secrets_resolver is None:
+            def secrets_resolver(resolved):
+                return self._ephemeral_secrets
         session = STTSessionOrchestrator(
             self._session_config,
             self._on_stt_event,
             cloud_builder=self._stt_cloud_builder,
             local_builder=self._stt_local_builder,
-            secrets_resolver=self._stt_secrets_resolver,
+            secrets_resolver=secrets_resolver,
         )
         self._stt_session = session
         await session.start()
@@ -962,12 +943,16 @@ class EchoFluxEngine:
         config = self._translation_config
         if config is None or not config.enabled:
             return
+        secrets_resolver = self._translation_secrets_resolver
+        if secrets_resolver is None:
+            def secrets_resolver(resolved):
+                return self._ephemeral_secrets
         session = TranslationSessionOrchestrator(
             config,
             self._on_translation_event,
             cloud_builder=self._translation_cloud_builder,
             local_builder=self._translation_local_builder,
-            secrets_resolver=self._translation_secrets_resolver,
+            secrets_resolver=secrets_resolver,
         )
         self._translation_session = session
         await session.start()
@@ -988,6 +973,13 @@ class EchoFluxEngine:
             backend, self._translation_backend = self._translation_backend, None
             await asyncio.to_thread(backend.unload_model)
         self._session_config = None
+        if self._active_session_id and self._conversation_repo:
+            try:
+                self._conversation_repo.end_session(self._active_session_id)
+            except Exception as e:
+                logger.warning("Failed to end session in repo during abort: %s", e)
+            self._active_session_id = None
+        self._ephemeral_secrets.clear()
         self._inputs.clear()
         self._vads.clear()
         self._audio_queues.clear()
@@ -997,20 +989,10 @@ class EchoFluxEngine:
         from engine.providers.stt.local import LocalSTTProvider, LocalSTTSettings
 
         settings = LocalSTTSettings.from_options(dict(session_config.fallback.options))
-        extra = {}
-        if session_config.legacy_model_size:
-            asr_config = TranscriptionConfig(
-                model_size=session_config.legacy_model_size,
-                language=settings.language,
-                device=settings.device,
-                compute_type=settings.compute_type,
-            )
-            extra["backend_factory"] = lambda: _LegacyASRBackend(asr_config)
         return LocalSTTProvider(
             settings,
             provider_id=session_config.fallback.provider_id,
             stream_ids=session_config.stream_ids,
-            **extra,
         )
 
     def _session_process_loop(self, stream_id: str, audio_queue: Queue, vad, session):
@@ -1077,7 +1059,30 @@ class EchoFluxEngine:
             stamp = max(time.time(), self._last_entry_stamp + 1e-6)
             self._last_entry_stamp = stamp
             entry_id = f"e-{stamp}"
-        msg = _stt_transcript_message(event, entry_id, active_backend)
+            if self._conversation_repo and self._active_conversation_id:
+                try:
+                    msg_record = TranscriptMessage(
+                        message_id=entry_id,
+                        source=event.stream_id if event.stream_id in ("mic", "system") else "unknown",
+                        text=event.text,
+                        timestamp_ms=time.time() * 1000.0,
+                        is_final=True,
+                        revision=event.revision,
+                        session_id=self._active_session_id,
+                        detected_language=event.language,
+                        stt_provider=ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None,
+                    )
+                    self._conversation_repo.upsert_message(self._active_conversation_id, msg_record)
+                except Exception as e:
+                    logger.warning("Failed to upsert transcript message to repo: %s", e)
+
+        msg = _stt_transcript_message(
+            event,
+            entry_id,
+            active_backend,
+            conversation_id=self._active_conversation_id,
+            message_id=entry_id if event.is_final else None,
+        )
         self._result_queue.put(msg)
         session = self._translation_session
         if session is not None:
@@ -1109,6 +1114,18 @@ class EchoFluxEngine:
             return
         if event.is_final:
             self._result_queue.put(_translation_update_message(event))
+            if self._conversation_repo and self._active_conversation_id and event.entry_id:
+                try:
+                    provider_meta = ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None
+                    self._conversation_repo.set_translation(
+                        self._active_conversation_id,
+                        event.entry_id,
+                        event.translation,
+                        provider=provider_meta,
+                        revision=event.source_revision,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to attach translation in repo: %s", e)
             return
         # A partial translation rides on its caption, and only while that caption is shown.
         caption = self._partial_messages.get(event.stream_id)
@@ -1141,128 +1158,17 @@ class EchoFluxEngine:
                 logger.error("Broadcast error: %s", e)
                 await asyncio.sleep(1)
 
-    def _ensure_llm_assistant(self, message: dict) -> bool:
-        """
-        Ensure _llm_assistant is initialized and available.
-        If it's not set (pipeline never started or already stopped),
-        try to create one from the llm_config embedded in the request message.
-        Returns True if the assistant is ready, False otherwise.
-        """
-        if self._llm_assistant and self._llm_assistant.is_available():
-            return True
-
-        llm_cfg = message.get("llm_config")
-        if not isinstance(llm_cfg, dict):
-            llm_cfg = {}
-        # The secure desktop path strips secret-named keys from these commands and injects the
-        # key into the start config instead, so fall back to what the session started with.
-        started = self._current_config if isinstance(self._current_config, dict) else {}
-        api_key = llm_cfg.get("api_key") or started.get("llm.api_key") or ""
-        model = llm_cfg.get("model") or started.get("llm.model") or "openai/gpt-4o-mini"
-        provider_url = llm_cfg.get("provider_url") or started.get("llm.provider_url") or None
-
-        if not isinstance(api_key, str) or not isinstance(model, str) or not api_key:
-            return False
-
-        try:
-            from engine.llm.assistant import LLMAssistant
-            self._llm_assistant = LLMAssistant(
-                api_key=api_key,
-                model=model,
-                base_url=provider_url,
-            )
-            logger.info("LLM assistant initialized on-demand: model=%s", model)
-            return self._llm_assistant.is_available()
-        except Exception as e:
-            logger.error("Failed to initialize LLM assistant on-demand: %s", e)
-            return False
-
     async def _on_suggestion_request(self, message: dict, websocket):
-        """Handle request_suggestion from UI — calls LLM on a thread and forwards result."""
-        if is_conversation_command(message):
-            await self._on_conversation_assist(message, websocket)
-            return
-        message = _legacy_suggestion_fields(message)
-        if not self._ensure_llm_assistant(message):
-            await websocket.send(json.dumps({
-                "type": "suggestion_result",
-                "entry_id": message.get("entry_id", ""),
-                "error": "AI Assistant is not configured. Please add your API key in Settings.",
-            }))
-            return
-
-        entry_id = message.get("entry_id", "")
-        target_text = message.get("target_text", "")
-        context = message.get("context", [])
-
-        def _callback(result: dict):
-            msg = {
-                "type": "suggestion_result",
-                **result,
-            }
-            asyncio.run_coroutine_threadsafe(
-                websocket.send(json.dumps(msg)), self._loop
-            )
-
-        self._llm_assistant.request_suggestion(
-            entry_id=entry_id,
-            target_text=target_text,
-            context=context,
-            callback=_callback,
-        )
+        """Handle request_suggestion from UI — routes to repository-backed assist."""
+        await self._on_conversation_assist(message, websocket)
 
     async def _on_summary_request(self, message: dict, websocket):
-        """Handle request_summary from UI — streams LLM output back as llm_chunk messages."""
-        if is_conversation_command(message):
-            await self._on_conversation_summary(message, websocket)
-            return
-        message = _legacy_summary_fields(message)
-        if not self._ensure_llm_assistant(message):
-            await websocket.send(json.dumps({
-                "type": "llm_chunk",
-                "text": "**Error:** AI Assistant is not configured. Please add your API key in Settings.",
-            }))
-            await websocket.send(json.dumps({"type": "llm_done"}))
-            return
-
-        entries = message.get("entries", [])
-        transcript_text = "\n".join(
-            f"[{e.get('source', 'speaker').upper()}] {e.get('text', '')}"
-            for e in entries
-            if e.get("text", "").strip()
-        )
-
-        if not transcript_text.strip():
-            await websocket.send(json.dumps({
-                "type": "llm_chunk",
-                "text": "**Error:** Transcript is empty — nothing to summarize.",
-            }))
-            await websocket.send(json.dumps({"type": "llm_done"}))
-            return
-
-        def _chunk_cb(text: str):
-            asyncio.run_coroutine_threadsafe(
-                websocket.send(json.dumps({"type": "llm_chunk", "text": text})),
-                self._loop,
-            )
-
-        def _done_cb():
-            asyncio.run_coroutine_threadsafe(
-                websocket.send(json.dumps({"type": "llm_done"})),
-                self._loop,
-            )
-
-        self._llm_assistant.request_summary(
-            transcript_text=transcript_text,
-            chunk_callback=_chunk_cb,
-            done_callback=_done_cb,
-        )
+        """Handle request_summary from UI — routes to repository-backed summary."""
+        await self._on_conversation_summary(message, websocket)
 
     # --- Repository-backed Assist and Summary ---------------------------------------------
     #
-    # Compatibility condition: a request_suggestion / request_summary command that carries
-    # "conversation_id" takes this path. One without it takes the legacy LLMAssistant path
-    # above, kept until EF-031. This path reads context only from the conversation repository,
+    # This path reads context only from the conversation repository,
     # refuses client-assembled context, needs an authenticated control connection (or explicit
     # --insecure-dev), and always ends with exactly one suggestion_result or llm_done.
 
@@ -1302,7 +1208,10 @@ class EchoFluxEngine:
     def _conversation_requests_allowed(self) -> bool:
         # Event clients never reach dispatch. The unauthenticated legacy socket must not read
         # stored conversations.
-        return self._ws_server.security_mode is not SecurityMode.LEGACY_TRANSITIONAL
+        return (
+            self._ws_server.is_authenticated
+            or self._ws_server.security_mode is SecurityMode.INSECURE_DEV
+        )
 
     async def _send_reply(self, websocket, message: dict) -> None:
         try:
@@ -1327,6 +1236,7 @@ class EchoFluxEngine:
         await asyncio.wait(pending, timeout=2.0)
 
     async def _on_conversation_assist(self, message: dict, websocket):
+        # Wire contract reply: {"type": "suggestion_result"}
         echo_id = safe_command_id(message, "message_id") or safe_command_id(message, "entry_id")
         if not self._conversation_requests_allowed():
             await self._send_reply(websocket, _assist_failure(echo_id, ERROR_FORBIDDEN))
@@ -1383,6 +1293,7 @@ class EchoFluxEngine:
         await self._send_reply(websocket, done)
 
     async def _on_conversation_summary(self, message: dict, websocket):
+        # Wire contract replies: {"type": "llm_chunk"}, {"type": "llm_done"}
         echo_id = safe_command_id(message, "conversation_id")
         if not self._conversation_requests_allowed():
             await self._send_summary_failure(websocket, ERROR_FORBIDDEN, echo_id)
@@ -1450,105 +1361,11 @@ class EchoFluxEngine:
         )
         await asyncio.shield(self._send_reply(websocket, done))
 
-    async def _on_request_models_list(self, message: dict, websocket):
-        from engine.core.model_manager import get_models_list
-        from engine.core.config import Config
-        try:
-            config = Config()
-            models = get_models_list(config)
-            await websocket.send(json.dumps({
-                "type": "models_list",
-                "asr": models["asr"],
-                "translation": models["translation"]
-            }))
-        except Exception as e:
-            logger.error("Error getting models list: %s", e)
-
-    async def _on_delete_model(self, message: dict, websocket):
-        from engine.core.model_manager import delete_model
-        from engine.core.config import Config
-        model_id = message.get("model_id")
-        model_type = message.get("model_type")
-        success = False
-        error = None
-        try:
-            config = Config()
-            delete_model(model_id, model_type, config)
-            success = True
-        except Exception as e:
-            logger.error("Error deleting model: %s", e)
-            error = str(e)
-            
-        await websocket.send(json.dumps({
-            "type": "model_action_result",
-            "action": "delete",
-            "model_id": model_id,
-            "success": success,
-            "error": error
-        }))
-
-    async def _on_download_model(self, message: dict, websocket):
-        model_id = message.get("model_id")
-        model_type = message.get("model_type")
-        hf_token = message.get("hf_token")
-
-        # Must be in daemon thread
-        def _download_task():
-            from engine.core.model_manager import download_model
-            from engine.core.config import Config
-            success = False
-            error = None
-            try:
-                config = Config()
-                download_model(model_id, model_type, config, hf_token=hf_token)
-                success = True
-            except Exception as e:
-                logger.error("Error downloading model: %s", e)
-                error = str(e)
-
-            result_msg = {
-                "type": "model_action_result",
-                "action": "download",
-                "model_id": model_id,
-                "success": success,
-                "error": error
-            }
-            asyncio.run_coroutine_threadsafe(
-                self._ws_server.broadcast(result_msg),
-                self._loop
-            )
-
-        t = threading.Thread(target=_download_task, daemon=True)
-        t.start()
-
-    async def _on_search_hub(self, message: dict, websocket):
-        query = message.get("query", "")
-        task = message.get("task", "asr")
-        hf_token = message.get("hf_token")
-        
-        def _search_task():
-            from engine.core.model_manager import search_hub
-            try:
-                results = search_hub(query, task, hf_token=hf_token)
-                result_msg = {
-                    "type": "hub_search_results",
-                    "results": results
-                }
-                asyncio.run_coroutine_threadsafe(
-                    websocket.send(json.dumps(result_msg)),
-                    self._loop
-                )
-            except Exception as e:
-                logger.error("Error searching hub: %s", e)
-
-        t = threading.Thread(target=_search_task, daemon=True)
-        t.start()
-
 
 def run_engine(config_path=None, insecure_dev: bool = False):
     _load_dotenv()
     _setup_logging()
-    
+
     # Eagerly initialize PyTorch cuDNN to prevent DLL collision with CTranslate2 later on Windows
     try:
         import torch
@@ -1556,14 +1373,12 @@ def run_engine(config_path=None, insecure_dev: bool = False):
             torch.nn.functional.conv2d(torch.zeros(1, 1, 1, 1, device="cuda"), torch.zeros(1, 1, 1, 1, device="cuda"))
     except Exception:
         pass
-    
+
     install_progress_hijack()
 
     engine = EchoFluxEngine(insecure_dev=insecure_dev)
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(engine.start())
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

@@ -51,6 +51,41 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
+function InsertButton({ text, label }: { text: string; label: string }) {
+  const [inserted, setInserted] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const handleInsert = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setInserted(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setInserted(false), 1500);
+    } catch {
+      // Clipboard API unavailable
+    }
+  };
+
+  return (
+    <button
+      className="suggestion-insert-btn"
+      onClick={handleInsert}
+      aria-label={label}
+      title="Insert / Copy to clipboard"
+    >
+      {inserted ? "Inserted" : "Insert"}
+    </button>
+  );
+}
+
 function ReplyGroup({ replies }: { replies: SuggestedReply[] }) {
   return (
     <div className="assist-group" role="group" aria-label="Suggested replies">
@@ -65,7 +100,10 @@ function ReplyGroup({ replies }: { replies: SuggestedReply[] }) {
           >
             <div className="suggestion-card-header">
               <span className="suggestion-strategy">{reply.strategy || "Reply"}</span>
-              <CopyButton text={reply.text} label={`Copy reply: ${reply.text}`} />
+              <div className="suggestion-card-actions">
+                <CopyButton text={reply.text} label={`Copy reply: ${reply.text}`} />
+                <InsertButton text={reply.text} label={`Insert reply: ${reply.text}`} />
+              </div>
             </div>
             <p className="suggestion-text">{reply.text}</p>
             {reply.reasoning && <p className="assist-note">{reply.reasoning}</p>}
@@ -87,7 +125,10 @@ function QuestionGroup({ questions }: { questions: ClarifyingQuestion[] }) {
           <div key={i} className="suggestion-card assist-question">
             <div className="suggestion-card-header">
               <span className="suggestion-strategy">Question</span>
-              <CopyButton text={q.question} label={`Copy question: ${q.question}`} />
+              <div className="suggestion-card-actions">
+                <CopyButton text={q.question} label={`Copy question: ${q.question}`} />
+                <InsertButton text={q.question} label={`Insert question: ${q.question}`} />
+              </div>
             </div>
             <p className="suggestion-text">{q.question}</p>
             {q.purpose && <p className="assist-note">{q.purpose}</p>}
@@ -164,7 +205,7 @@ export const AssistPanel = memo(function AssistPanel({ entry }: { entry: Transcr
             {expanded ? "Hide Assist" : "Show Assist"}
           </button>
           {expanded && (
-            <div className="suggestion-cards">
+            <div className="suggestion-cards assist-split-view">
               <ReplyGroup replies={view.suggestedReplies} />
               <QuestionGroup questions={view.clarifyingQuestions} />
             </div>

@@ -1526,8 +1526,7 @@ body,
 .service-card input:focus-visible,
 .service-card select:focus-visible,
 .service-card button:focus-visible,
-.service-advanced summary:focus-visible,
-.settings-legacy summary:focus-visible {
+.service-advanced summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1589,8 +1588,7 @@ body,
   padding-top: 8px;
 }
 
-.service-advanced summary,
-.settings-legacy summary {
+.service-advanced summary {
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
@@ -1635,14 +1633,6 @@ body,
 .service-test-loading,
 .service-test-retry {
   color: var(--accent);
-}
-
-.settings-legacy {
-  margin-bottom: 24px;
-}
-
-.settings-legacy > summary {
-  margin-bottom: 12px;
 }
 
 @media (max-width: 560px) {
@@ -1846,4 +1836,648 @@ body,
   .suggestion-cards {
     animation: none;
   }
+}
+
+/* ==========================================================================
+   Milestone 3 UX Styles (EF-026, EF-027, EF-028, EF-029)
+   ========================================================================== */
+
+/* ── EF-026 Onboarding & Consent Wizard ── */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  backdrop-filter: blur(4px);
+}
+
+.onboarding-modal {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 640px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.onboarding-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.onboarding-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.onboarding-stepper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboarding-step-indicator {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.onboarding-step-indicator.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.onboarding-step-indicator.completed {
+  background: var(--success);
+  color: #fff;
+}
+
+.onboarding-body {
+  padding: 24px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.onboarding-step-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.onboarding-step-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.onboarding-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.onboarding-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-welcome-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.onboarding-feature-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.onboarding-feature-icon {
+  font-size: 20px;
+}
+
+.onboarding-feature-text h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.onboarding-feature-text p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Local Pack Status */
+.local-pack-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.local-pack-item {
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+}
+
+.pack-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.pack-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pack-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.pack-badge.ready {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+
+.pack-badge.downloading {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.pack-progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.pack-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+/* Cloud Consent */
+.cloud-consent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.consent-disclosure-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.consent-disclosure-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.consent-opt-in-box {
+  padding: 14px;
+  border-radius: var(--radius);
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.consent-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* ── EF-027 Context Profiles & Setup Dialog ── */
+.profiles-panel {
+  padding: 24px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.profiles-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.profiles-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.profile-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.2s ease;
+}
+
+.profile-card:hover {
+  border-color: var(--accent);
+}
+
+.profile-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.profile-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.profile-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.profile-card-format {
+  text-transform: uppercase;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+}
+
+.profile-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+
+.profile-editor-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  max-width: 580px;
+  width: 90%;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.profile-byte-counter {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.profile-byte-counter.limit-exceeded {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Pre-Session Setup Dialog */
+.setup-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.setup-dialog-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  max-width: 500px;
+  width: 90%;
+  box-shadow: var(--shadow-lg);
+}
+
+.setup-stream-labels-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.setup-profiles-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.setup-profile-check-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── EF-028 Assist Split-View & Transcript Fallback ── */
+.suggestion-cards.assist-split-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 680px) {
+  .suggestion-cards.assist-split-view {
+    grid-template-columns: 1fr;
+  }
+}
+
+.suggestion-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.suggestion-insert-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.transcript-fallback-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(245, 166, 35, 0.15);
+  color: var(--warning);
+  border: 1px solid rgba(245, 166, 35, 0.3);
+  margin-left: 6px;
+}
+
+/* ── EF-029 Summary & SQLite History ── */
+.summary-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 8px 16px 0;
+  border-radius: var(--radius);
+  background-color: rgba(245, 166, 35, 0.15);
+  color: var(--warning);
+  font-size: 12px;
+  border: 1px solid rgba(245, 166, 35, 0.3);
+}
+
+.summary-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 8px 16px 0;
+  border-radius: var(--radius);
+  background-color: rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+  font-size: 12px;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.summary-cancel-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.history-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-search-input {
+  padding: 6px 12px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-width: 220px;
+}
+
+.history-import-btn {
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+.history-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  backdrop-filter: blur(2px);
+}
+
+.history-modal-content {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  max-width: 440px;
+  width: 90%;
+  box-shadow: var(--shadow-lg);
+}
+
+.history-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.history-modal-body {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  line-height: 1.5;
+}
+
+.history-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.history-delete-confirm-btn {
+  background-color: var(--danger);
+  color: #fff;
+}
+
+.history-detail-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.history-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-detail-title-group {
+  flex: 1;
+}
+
+.history-detail-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.history-detail-date {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-detail-summary-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.history-detail-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.history-detail-summary-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+
+.history-detail-messages-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-detail-messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.history-detail-message {
+  padding: 10px 14px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.history-detail-message-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.history-detail-speaker {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.history-detail-message-text {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.history-detail-message-trans {
+  font-size: 12px;
+  color: var(--accent);
+  margin-top: 4px;
+}
+
+.history-summary-tag {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+  margin-left: 6px;
 }

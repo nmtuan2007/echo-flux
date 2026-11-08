@@ -2,18 +2,20 @@ import { useEngineStore } from "../store/engineStore";
 import { invoke } from "@tauri-apps/api/tauri";
 
 export function Header() {
-  const { 
-    running, 
-    connected, 
-    isToggling, 
+  const {
+    running,
+    connected,
+    isToggling,
     activeView,
     theme,
     entries,
     config,
+    services,
+    activeConversationId,
     summaryText,
-    startPipeline, 
-    stopPipeline, 
-    clearTranscript, 
+    startPipeline,
+    stopPipeline,
+    clearTranscript,
     setActiveView,
     setTheme,
     requestSummary,
@@ -29,7 +31,7 @@ export function Header() {
     }
   };
 
-  const toggleView = (view: "history" | "settings" | "model_manager") => {
+  const toggleView = (view: "history" | "settings" | "profiles") => {
     if (activeView === view) {
       setActiveView("transcript");
     } else {
@@ -41,7 +43,9 @@ export function Header() {
     setTheme(theme === "light" ? "dark" : "light");
   };
 
-  const canSummarize = config.llmEnabled && entries.length > 0 && connected;
+  const isAssistantEnabled = services?.assistant?.enabled || config.llmEnabled;
+  const hasActiveConversation = Boolean(activeConversationId || entries.length > 0);
+  const canSummarize = isAssistantEnabled && hasActiveConversation && connected;
   const hasSummary = !!summaryText;
 
   return (
@@ -53,9 +57,9 @@ export function Header() {
       </div>
 
       <div className="header-center">
-        <button 
-          className={`btn ${running ? "btn-stop" : "btn-start"}`} 
-          onClick={handleStartStop} 
+        <button
+          className={`btn ${running ? "btn-stop" : "btn-start"}`}
+          onClick={handleStartStop}
           disabled={!connected || isToggling}
           title={running ? "Stop Transcription (Ctrl+Shift+M)" : "Start Transcription (Ctrl+Shift+M)"}
         >
@@ -81,10 +85,10 @@ export function Header() {
         >
           PiP Overlay
         </button>
-        
-        <button 
-          className="btn btn-secondary" 
-          onClick={clearTranscript} 
+
+        <button
+          className="btn btn-secondary"
+          onClick={clearTranscript}
           disabled={isToggling || activeView !== "transcript"}
           title="Clear current transcript"
         >
@@ -118,30 +122,30 @@ export function Header() {
       </div>
 
       <div className="header-right">
-        <button 
+        <button
           className="btn btn-icon"
-          onClick={toggleTheme} 
+          onClick={toggleTheme}
           title={theme === "light" ? "Switch to Dark Mode" : "Switch to Light Mode"}
         >
           {theme === "light" ? <MoonIcon /> : <SunIcon />}
         </button>
-        <button 
-          className={`btn btn-icon ${activeView === "model_manager" ? "active" : ""}`}
-          onClick={() => toggleView("model_manager")} 
-          title="Model Manager"
+        <button
+          className={`btn btn-icon ${activeView === "profiles" ? "active" : ""}`}
+          onClick={() => toggleView("profiles")}
+          title="Context Profiles"
         >
-          <DatabaseIcon />
+          <ProfileIcon />
         </button>
-        <button 
+        <button
           className={`btn btn-icon ${activeView === "history" ? "active" : ""}`}
-          onClick={() => toggleView("history")} 
+          onClick={() => toggleView("history")}
           title="History"
         >
           <HistoryIcon />
         </button>
-        <button 
+        <button
           className={`btn btn-icon ${activeView === "settings" ? "active" : ""}`}
-          onClick={() => toggleView("settings")} 
+          onClick={() => toggleView("settings")}
           title="Settings"
         >
           <SettingsIcon />
@@ -195,15 +199,15 @@ function MoonIcon() {
 
 function Spinner() {
   return (
-    <svg 
-      className="spinner" 
-      width="14" 
-      height="14" 
-      viewBox="0 0 24 24" 
-      fill="none" 
-      stroke="currentColor" 
-      strokeWidth="3" 
-      strokeLinecap="round" 
+    <svg
+      className="spinner"
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="3"
+      strokeLinecap="round"
       strokeLinejoin="round"
       style={{ marginRight: "6px" }}
     >
@@ -212,12 +216,11 @@ function Spinner() {
   );
 }
 
-function DatabaseIcon() {
+function ProfileIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
     </svg>
   );
 }

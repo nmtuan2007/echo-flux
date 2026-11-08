@@ -342,36 +342,13 @@ describe("forwarded commands through the control bridge", () => {
     return calls("engine_forward_command").map((a) => (a.command as { type: string }).type);
   }
 
-  it("routes all seven allowlisted actions through invoke and applies the replies", async () => {
+  it("routes allowlisted actions through invoke and applies the replies", async () => {
     const { store, ws } = await authenticatedStore();
     final(ws, "e-1", "question?");
 
     store.getState().requestDeviceList();
     await flush();
     expect(store.getState().availableMics).toEqual([{ id: "m1", name: "Mic" }]);
-
-    store.getState().requestModelsList();
-    await flush();
-    expect(store.getState().modelsList.asr).toEqual([{ id: "tiny" }]);
-
-    store.getState().searchHub("whisper", "asr");
-    expect(store.getState().searchingHub).toBe(true);
-    await flush();
-    expect(store.getState()).toMatchObject({
-      searchingHub: false,
-      hubSearchResults: [{ id: "openai/whisper-tiny" }],
-    });
-
-    store.getState().downloadModelById("tiny", "asr");
-    await flush();
-    // Progress and the result arrive later on the event socket.
-    expect(store.getState()).toMatchObject({ downloading: true, downloadModel: "tiny" });
-    ws.receive({ op: "event", event: { type: "download_progress", model: "tiny", percent: 100 } });
-    await flush();
-    expect(store.getState().downloading).toBe(false);
-
-    store.getState().deleteModelById("tiny", "asr");
-    await flush();
 
     await store.getState().requestSuggestion("e-1", "question?", ["question?"]);
     await flush();
@@ -384,16 +361,10 @@ describe("forwarded commands through the control bridge", () => {
     expect(new Set(forwardedTypes())).toEqual(
       new Set([
         "list_devices",
-        "request_models_list",
-        "search_hub",
-        "download_model",
-        "delete_model",
         "request_suggestion",
         "request_summary",
       ]),
     );
-    // download_progress 100 and a successful delete each refresh the model list the same way.
-    expect(forwardedTypes().filter((t) => t === "request_models_list").length).toBeGreaterThan(1);
     expect(calls("engine_forward_start")).toHaveLength(0);
     expect(store.getState().appError).toBeNull();
 
@@ -405,16 +376,17 @@ describe("forwarded commands through the control bridge", () => {
   it("passes the hf_token vault reference only when configured and never a raw secret", async () => {
     const { store, ws } = await authenticatedStore();
 
-    store.getState().searchHub("whisper", "asr");
+    await forwardCommand({ type: "search_hub", query: "whisper", task: "asr" });
     await flush();
     expect(calls("engine_forward_command")[0]).not.toHaveProperty("credentials");
 
     // A draft typed in Settings is committed to the vault before the command leaves.
     store.getState().updateConfig({ hfToken: SECRET_HF, llmApiKey: SECRET_KEY });
-    store.getState().downloadModelById("tiny", "asr");
-    await flush();
-    store.getState().searchHub("whisper", "asr");
-    await flush();
+    await store.getState().commitLegacySecrets();
+
+    const ref = { hf_token: { capability: "stt" as const, configId: "legacy-hf-hub", slot: "hf_token" } };
+    await forwardCommand({ type: "download_model", model_id: "tiny", model_type: "asr" }, ref);
+    await forwardCommand({ type: "search_hub", query: "whisper", task: "asr" }, ref);
     store.getState().requestDeviceList();
     await flush();
 
@@ -422,7 +394,6 @@ describe("forwarded commands through the control bridge", () => {
     expect(store.getState().config.hfToken).toBe("");
 
     const [, download, search, devices] = calls("engine_forward_command");
-    const ref = { hf_token: { capability: "stt", configId: "legacy-hf-hub", slot: "hf_token" } };
     expect(download.credentials).toEqual(ref);
     expect(search.credentials).toEqual(ref);
     expect(devices).not.toHaveProperty("credentials");
@@ -520,15 +491,13 @@ describe("forwarded commands through the control bridge", () => {
     expect(store.getState().appError).toBe("Summary: The engine rejected this request (command_rejected)");
 
     failWith("engine_not_running");
-    store.getState().searchHub("whisper", "asr");
+    store.getState().requestSummary();
     await flush();
-    expect(store.getState().searchingHub).toBe(false);
-    expect(store.getState().appError).toBe("Hub search: The engine is not running (engine_not_running)");
+    expect(store.getState().appError).toBe("Summary: The engine is not running (engine_not_running)");
 
     failWith("vault_error");
-    store.getState().downloadModelById("tiny", "asr");
+    store.getState().requestDeviceList();
     await flush();
-    expect(store.getState()).toMatchObject({ downloading: false, downloadModel: "" });
     expect(store.getState().appError).toContain("(vault_error)");
 
     for (const code of ["secret_in_command", "invalid_command", "command_not_allowed"]) {
@@ -542,9 +511,9 @@ describe("forwarded commands through the control bridge", () => {
     handlers.engine_forward_command = () => {
       throw `free text ${SECRET_KEY}`;
     };
-    store.getState().deleteModelById("tiny", "asr");
+    store.getState().requestDeviceList();
     await flush();
-    expect(store.getState().appError).toBe("Model delete: The engine request failed (bridge_failed)");
+    expect(store.getState().appError).toBe("Device list: The engine request failed (bridge_failed)");
 
     expect(serializedState(store.getState())).not.toContain(SECRET_KEY);
     expect(serializedState(store.getState())).not.toContain("private");
@@ -558,12 +527,10 @@ describe("forwarded commands through the control bridge", () => {
 
     await store.getState().requestSuggestion("e-1", "question?", ["question?"]);
     store.getState().requestSummary();
-    store.getState().downloadModelById("tiny", "asr");
     await flush();
     expect(store.getState()).toMatchObject({
       suggestionLoading: {},
       summaryLoading: false,
-      downloading: false,
       appError: "LLM is not configured",
     });
   });
@@ -602,8 +569,7 @@ describe("browser legacy path for the same actions", () => {
     const ws = lastSocket();
     ws.open();
     store.getState().requestDeviceList();
-    store.getState().searchHub("whisper", "asr");
-    expect(ws.sent.map((s) => JSON.parse(s).type)).toEqual(["list_devices", "search_hub"]);
+    expect(ws.sent.map((s) => JSON.parse(s).type)).toEqual(["list_devices"]);
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });

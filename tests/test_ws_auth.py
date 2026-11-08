@@ -43,10 +43,6 @@ ALL_COMMANDS: List[Dict[str, Any]] = [
     {"type": "start", "config": {"llm.enabled": True, "llm.api_key": SECRET}},
     {"type": "stop"},
     {"type": "list_devices"},
-    {"type": "request_models_list"},
-    {"type": "download_model", "model_id": "m", "model_type": "asr", "hf_token": SECRET},
-    {"type": "delete_model", "model_id": "m", "model_type": "asr"},
-    {"type": "search_hub", "query": "whisper", "task": "asr", "hf_token": SECRET},
     {"type": "request_suggestion", "entry_id": "e-1", "target_text": "hi", "context": []},
     {"type": "request_summary", "entries": [], "llm_config": {"api_key": SECRET}},
 ]
@@ -63,10 +59,6 @@ class Recorder:
         server.on_stop(self._stop)
         server.on_suggestion(self._suggestion)
         server.on_summary(self._record("request_summary"))
-        server.on_request_models_list(self._record("request_models_list"))
-        server.on_download_model(self._record("download_model"))
-        server.on_delete_model(self._record("delete_model"))
-        server.on_search_hub(self._record("search_hub"))
         self._server = server
 
     async def _start(self, config: dict):
@@ -534,7 +526,6 @@ def test_engine_without_tokens_uses_the_legacy_path():
 async def test_supervised_engine_shuts_down_when_stdin_closes(bootstrap_env, monkeypatch):
     import engine.main as engine_main
 
-    monkeypatch.setattr(engine_main, "set_progress_callback", lambda cb: None)
     monkeypatch.setattr(engine_main.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"")))
 
     engine = engine_main.EchoFluxEngine()
@@ -546,7 +537,6 @@ async def test_unsupervised_engine_does_not_watch_stdin(monkeypatch):
     import engine.main as engine_main
 
     monkeypatch.setenv("ECHOFLUX_PORT", "0")
-    monkeypatch.setattr(engine_main, "set_progress_callback", lambda cb: None)
     engine = engine_main.EchoFluxEngine()
     watched = []
     monkeypatch.setattr(engine, "_start_stdin_watch", lambda: watched.append(True))

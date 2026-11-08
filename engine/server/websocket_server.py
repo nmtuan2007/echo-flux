@@ -1,11 +1,13 @@
-import json
 import asyncio
+import contextlib
 import contextvars
+import inspect
+import json
 import logging
-from typing import Any, Callable, Awaitable, Dict, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Optional
 
-from engine.core.logging import get_logger
 from engine.core.exceptions import ServerError
+from engine.core.logging import get_logger
 from engine.server.protocol import (
     AUTH_TIMEOUT_SECONDS,
     CLOSE_AUTH_FAILED,
@@ -72,6 +74,7 @@ class WebSocketServer:
         tokens: Optional[BootstrapTokens] = None,
         insecure_dev: bool = False,
         auth_timeout: float = AUTH_TIMEOUT_SECONDS,
+        control_dispatcher: Optional[Any] = None,
     ):
         if tokens is not None and insecure_dev:
             raise ServerError("Insecure development mode cannot be combined with bootstrap tokens")
@@ -80,6 +83,7 @@ class WebSocketServer:
         self._port = port
         self._tokens = tokens
         self._auth_timeout = auth_timeout
+        self._control_dispatcher = control_dispatcher
         if tokens is not None:
             self._mode = SecurityMode.AUTHENTICATED
         elif insecure_dev:
@@ -99,11 +103,6 @@ class WebSocketServer:
         self._on_stop: Optional[Callable[[], Awaitable[None]]] = None
         self._on_suggestion: Optional[Callable[[dict, object], Awaitable[None]]] = None
         self._on_summary: Optional[Callable[[dict, object], Awaitable[None]]] = None
-        self._on_request_models_list: Optional[Callable[[dict, object], Awaitable[None]]] = None
-        self._on_download_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
-        self._on_delete_model: Optional[Callable[[dict, object], Awaitable[None]]] = None
-        self._on_search_hub: Optional[Callable[[dict, object], Awaitable[None]]] = None
-        self._running = False
 
     def on_start(self, handler: Callable[[dict], Awaitable[None]]):
         self._on_start = handler
@@ -117,23 +116,18 @@ class WebSocketServer:
     def on_summary(self, handler: Callable[[dict, object], Awaitable[None]]):
         self._on_summary = handler
 
-    def on_request_models_list(self, handler: Callable[[dict, object], Awaitable[None]]):
-        self._on_request_models_list = handler
+    def set_control_dispatcher(self, dispatcher: Any) -> None:
+        self._control_dispatcher = dispatcher
 
-    def on_download_model(self, handler: Callable[[dict, object], Awaitable[None]]):
-        self._on_download_model = handler
-
-    def on_delete_model(self, handler: Callable[[dict, object], Awaitable[None]]):
-        self._on_delete_model = handler
-
-    def on_search_hub(self, handler: Callable[[dict, object], Awaitable[None]]):
-        self._on_search_hub = handler
+    @property
+    def control_dispatcher(self) -> Optional[Any]:
+        return self._control_dispatcher
 
     async def start(self):
         try:
             import websockets
         except ImportError:
-            raise ServerError("websockets library is not installed")
+            raise ServerError("websockets library is not installed") from None
 
         if not is_loopback_host(self._host):
             raise ServerError("The engine socket must bind to a loopback address")
@@ -169,10 +163,8 @@ class WebSocketServer:
     async def stop(self):
         self._running = False
         for client in list(self._clients):
-            try:
+            with contextlib.suppress(Exception):
                 await client.close()
-            except Exception:
-                pass
         self._clients.clear()
         self._subscribers.clear()
 
@@ -288,6 +280,19 @@ class WebSocketServer:
     async def _serve_control_client(self, websocket):
         remote = websocket.remote_address
         async for raw in websocket:
+            if self._control_dispatcher is not None:
+                try:
+                    decoded = json.loads(raw) if isinstance(raw, str) else None
+                except Exception:
+                    decoded = None
+                extracted = self._control_dispatcher.extract_command(decoded)
+                if extracted is not None:
+                    req_id, cmd_name, payload = extracted
+                    await self._control_dispatcher.dispatch(
+                        req_id, cmd_name, payload, websocket, self._tokens
+                    )
+                    continue
+
             try:
                 request = parse_control_frame(raw)
             except ProtocolError as err:
@@ -341,12 +346,52 @@ class WebSocketServer:
 
         if msg_type == "start":
             config = message.get("config", {})
+            secrets = message.get("secrets", {})
             # Never log the config itself: it carries provider settings and API keys.
             key_count = len(config) if isinstance(config, dict) else 0
             logger.info("Received start command (%d config keys)", key_count)
             if self._on_start:
-                await self._on_start(config)
+                sig = inspect.signature(self._on_start)
+                if "secrets" in sig.parameters:
+                    res = await self._on_start(config, secrets=secrets)
+                else:
+                    res = await self._on_start(config)
+                if res is False:
+                    raise ServerError("Start callback indicated failure")
             await websocket.send(json.dumps({"type": "status", "status": "started"}))
+
+        elif msg_type == "test_connection":
+            capability = message.get("capability")
+            service_data = message.get("service")
+            secrets = message.get("secrets", {})
+            req_id = message.get("id")
+            logger.info("Received test_connection command for capability=%s", capability)
+            from engine.core.config import ServiceConfig
+            from engine.providers.registry import build_default_registry
+            from engine.providers.validation import (
+                ERROR_INTERNAL,
+                VALIDATION_INVALID,
+                _unvalidated,
+                validate_service,
+            )
+            try:
+                service = ServiceConfig.from_dict(capability, service_data)
+                val_res = await validate_service(
+                    service, dict(secrets or {}), registry=build_default_registry()
+                )
+                await websocket.send(json.dumps({
+                    "type": "test_connection_result",
+                    "id": req_id,
+                    "result": val_res.to_dict(),
+                }))
+            except Exception as exc:
+                logger.error("Test connection failed: %s", type(exc).__name__)
+                val_res = _unvalidated(req_id, capability, None, ERROR_INTERNAL, status=VALIDATION_INVALID)
+                await websocket.send(json.dumps({
+                    "type": "test_connection_result",
+                    "id": req_id,
+                    "result": val_res.to_dict(),
+                }))
 
         elif msg_type == "stop":
             logger.info("Received stop command")
@@ -378,26 +423,6 @@ class WebSocketServer:
                     "message": "LLM not configured.",
                 }))
 
-        elif msg_type == "request_models_list":
-            logger.info("Received request_models_list")
-            if self._on_request_models_list:
-                await self._on_request_models_list(message, websocket)
-
-        elif msg_type == "download_model":
-            logger.info("Received download_model")
-            if self._on_download_model:
-                await self._on_download_model(message, websocket)
-
-        elif msg_type == "delete_model":
-            logger.info("Received delete_model")
-            if self._on_delete_model:
-                await self._on_delete_model(message, websocket)
-
-        elif msg_type == "search_hub":
-            logger.info("Received search_hub")
-            if self._on_search_hub:
-                await self._on_search_hub(message, websocket)
-
         else:
             logger.warning("Unknown message type: %s", msg_type)
             await websocket.send(json.dumps({
@@ -409,7 +434,7 @@ class WebSocketServer:
         """Enumerate available microphone and speaker (loopback) devices.
 
         Runs blocking PyAudio calls in a thread executor to avoid blocking the
-        event loop. Prevents PyAudio crashes by using cached devices or a 
+        event loop. Prevents PyAudio crashes by using cached devices or a
         placeholder when the engine is actively capturing.
         """
         if self.is_capturing:

@@ -39,6 +39,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
@@ -592,6 +593,44 @@ class AssemblyAISTTProvider(StreamingSTTProvider):
     - ``stop`` flushes audio, sends ``Terminate``, waits for ``Termination``, finalizes
       open turns, then closes sockets and cancels tasks.
     """
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: Any,
+        secrets: Mapping[str, str],
+        *,
+        stream_ids: Sequence[str] = ("default",),
+        connect_factory: Optional[ConnectFactory] = None,
+    ) -> "AssemblyAISTTProvider":
+        api_key = secrets.get("api_key", "")
+        options = getattr(resolved, "options", {}) or {}
+        language = options.get("language")
+        language_codes: Tuple[str, ...] = ()
+        if isinstance(language, str) and language.strip() and language.strip().lower() != "auto":
+            language_codes = (language.strip(),)
+        endpoint = getattr(resolved, "endpoint", "") or "wss://streaming.assemblyai.com/v3/ws"
+        model = getattr(resolved, "model", "") or "universal-streaming"
+        provider_id = getattr(resolved, "provider_id", "assemblyai")
+        settings = AssemblyAISettings(
+            endpoint=endpoint,
+            speech_model=model,
+            api_key=api_key,
+            sample_rate=options.get("sample_rate", 16000),
+            format_turns=options.get("format_turns"),
+            language_detection=options.get("language_detection"),
+            language_codes=language_codes,
+            keyterms_prompt=tuple(options.get("keyterms_prompt", ())),
+            end_of_turn_confidence_threshold=options.get("end_of_turn_confidence_threshold"),
+            min_turn_silence_ms=options.get("min_turn_silence_ms"),
+            max_turn_silence_ms=options.get("max_turn_silence_ms"),
+        )
+        return cls(
+            settings,
+            provider_id=provider_id,
+            stream_ids=stream_ids,
+            connect_factory=connect_factory,
+        )
 
     def __init__(
         self,

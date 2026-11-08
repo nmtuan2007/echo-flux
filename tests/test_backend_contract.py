@@ -80,8 +80,6 @@ def test_translate_is_concrete_and_translate_raw_is_abstract():
     [
         ("engine.asr.faster_whisper_backend", "FasterWhisperBackend"),
         ("engine.translation.marian_backend", "MarianBackend"),
-        ("engine.translation.online_backend", "OnlineBackend"),
-        ("engine.translation.fallback_backend", "FallbackTranslationBackend"),
     ],
 )
 def test_shipped_backends_satisfy_their_abc(module_path, class_name):

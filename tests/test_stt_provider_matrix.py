@@ -909,19 +909,20 @@ def test_default_family_builders_and_generic_hook_construct_custom():
         ("azure-speech", {"region": "eastus", "recognition_language": "en-US"}),
     ],
 )
-async def test_vendor_streaming_test_connection_reports_factory_unavailable(provider_id, options):
-    # EF-007 has no family builder for these protocols and their adapters expose no
-    # ``from_resolved`` hook, so Test Connection fails deterministically before any socket.
+async def test_vendor_streaming_providers_construct_from_resolved(provider_id, options):
+    # Phase A / EF-016: all vendor streaming STT providers expose from_resolved hook.
+    registry = build_default_registry()
     service = ServiceConfig(
         service="stt",
         provider_id=provider_id,
         options=options,
         credential_refs={"api_key": _ref("api_key")},
     )
-    result = await validation.validate_service(
-        service, {"api_key": SECRET}, registry=build_default_registry(), timeout_s=5.0
-    )
-    assert (result.status, result.error_code) == ("invalid", "factory_unavailable")
+    resolved = registry.resolve_service(service)
+    factory = registry.load_factory(resolved.capability, resolved.provider_id)
+    assert hasattr(factory, "from_resolved")
+    provider = factory.from_resolved(resolved, {"api_key": SECRET})
+    assert provider.provider_id == provider_id
 
 
 async def test_azure_speech_factory_loads_without_sdk_and_reports_it_deterministically():

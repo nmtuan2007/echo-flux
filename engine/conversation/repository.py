@@ -81,7 +81,9 @@ class ImportOutcome:
     imported: bool
 
 
-def default_database_path(config: Config) -> Path:
+def default_database_path(config: Optional[Config] = None) -> Path:
+    if config is None:
+        config = Config()
     return config.data_dir / DB_FILENAME
 
 
@@ -372,7 +374,9 @@ def _summary_from_row(row: sqlite3.Row) -> StoredSummary:
 class ConversationRepository:
     """Synchronous, thread-safe SQLite repository. Call from worker threads only."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Optional[Path | str] = None) -> None:
+        if db_path is None:
+            db_path = default_database_path()
         self._db_path = Path(db_path)
         self._lock = threading.RLock()
         self._depth = 0

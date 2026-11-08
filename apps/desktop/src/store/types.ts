@@ -181,7 +181,7 @@ export interface EngineConfig {
   hfToken: string;
 }
 
-export type AppView = "transcript" | "settings" | "history" | "model_manager";
+export type AppView = "transcript" | "settings" | "history" | "profiles";
 
 export type Theme = "dark" | "light";
 
@@ -298,10 +298,6 @@ export type EngineEventType =
   | "status"
   | "error"
   | "devices_list"
-  | "models_list"
-  | "download_progress"
-  | "model_action_result"
-  | "hub_search_results"
   | "suggestion_result"
   | "llm_chunk"
   | "llm_done";
@@ -310,10 +306,6 @@ export type EngineCommandType =
   | "start"
   | "stop"
   | "list_devices"
-  | "request_models_list"
-  | "download_model"
-  | "delete_model"
-  | "search_hub"
   | "request_suggestion"
   | "request_summary";
 
@@ -385,3 +377,132 @@ export type ServerTransportFrame =
   | ControlCompleteFrame
   | EventFrame
   | TransportErrorFrame;
+
+// ---------------------------------------------------------------------------
+// Context Profiles (EF-020 / EF-027)
+// ---------------------------------------------------------------------------
+
+export const MAX_PROFILE_NAME_CHARS = 120;
+export const MAX_PROFILE_CONTENT_BYTES = 64 * 1024; // 64 KiB
+export const MAX_PROFILES_PER_SESSION = 8;
+export const MAX_SESSION_PROFILE_BYTES = 256 * 1024; // 256 KiB
+export const MAX_TITLE_CHARS = 200;
+export const MAX_LABEL_CHARS = 60;
+
+export type ProfileContentFormat = "text" | "markdown";
+
+export interface ContextProfile {
+  profileId: string;
+  name: string;
+  content: string;
+  contentFormat: ProfileContentFormat;
+  revision: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface ContextProfileInfo {
+  profileId: string;
+  name: string;
+  contentFormat: ProfileContentFormat;
+  revision: number;
+  contentBytes: number;
+  updatedAtMs: number;
+}
+
+export interface SessionProfileSnapshot {
+  sessionId: string;
+  position: number;
+  profileId: string;
+  name: string;
+  content: string;
+  contentFormat: ProfileContentFormat;
+  profileRevision: number;
+  contentSha256: string;
+  capturedAtMs: number;
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding & Cloud Consent (EF-026)
+// ---------------------------------------------------------------------------
+
+export const CURRENT_CONSENT_VERSION = 1;
+export const CLOUD_CONSENT_VERSION = 1;
+
+export interface CloudConsentState {
+  version: number;
+  accepted: boolean;
+  acceptedAt: number | null;
+  revoked: boolean;
+  revokedAt: number | null;
+  stt: boolean;
+  translation: boolean;
+  assistant: boolean;
+  summary: boolean;
+}
+
+export type PackReadinessState =
+  | "unknown"
+  | "checking"
+  | "ready"
+  | "downloading"
+  | "paused"
+  | "retry"
+  | "corrupt"
+  | "incompatible"
+  | "offline";
+
+export interface PackStatusItem {
+  packId: string;
+  kind: "stt" | "translation";
+  displayName: string;
+  version: string;
+  sizeBytes: number;
+  isReady: boolean;
+  state: PackReadinessState;
+  downloadPercent: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  issues: string[];
+  tier: string;
+}
+
+export interface HardwareInfo {
+  cpuCores: number;
+  ramGb: number;
+  platform: string;
+  architecture: string;
+  hasGpu: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Summary & SQLite-backed History (EF-029)
+// ---------------------------------------------------------------------------
+
+export interface SummaryWarning {
+  reason: string;
+  omitted_message_count: number;
+  first_omitted_timestamp_ms?: number;
+  last_omitted_timestamp_ms?: number;
+  used_tokens?: number;
+  max_tokens?: number;
+  included_message_count?: number;
+}
+
+export interface StoredSummaryRecord {
+  summary_id?: string;
+  summary_markdown: string;
+  created_at_ms: number;
+  warning?: SummaryWarning | null;
+}
+
+export interface ConversationRecord {
+  conversation_id: string;
+  title: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+  source_labels?: { mic: string; system: string };
+  import_id?: string | null;
+  message_count?: number;
+  has_summary?: boolean;
+}

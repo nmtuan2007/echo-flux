@@ -3,7 +3,7 @@ name = "echoflux-desktop"
 version = "0.1.0"
 description = "EchoFlux Desktop Application"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.88"
 
 [build-dependencies]
 tauri-build = { version = "1.5", features = [] }

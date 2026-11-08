@@ -340,10 +340,8 @@ def _language_hints(resolved: ResolvedService) -> Tuple[str, ...]:
 def default_cloud_builder(registry: ProviderRegistry) -> CloudBuilder:
     """Builds cloud STT adapters from a resolved service.
 
-    Custom STT uses its ``from_resolved`` hook; OpenAI Realtime and Gemini Live get their
-    settings objects, as the Test Connection builders do. Deepgram, AssemblyAI, and Azure
-    Speech expose no ``from_resolved`` hook yet, so they fail Start with ``factory_unavailable``
-    instead of guessing at their settings.
+    Adapters exposing a ``from_resolved`` hook (Custom, Deepgram, AssemblyAI, Azure Speech)
+    build through it. OpenAI Realtime and Gemini Live get their resolved settings objects.
     """
 
     def build(

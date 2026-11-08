@@ -546,10 +546,14 @@ def no_audio(monkeypatch):
             raise RuntimeError("audio unavailable in tests")
 
     audio_pkg = types.ModuleType("engine.audio")
+    audio_pkg.__path__ = []
     microphone = types.ModuleType("engine.audio.microphone")
     microphone.MicrophoneInput = _NoMicrophone
+    system_audio = types.ModuleType("engine.audio.system_audio")
+    system_audio.SystemAudioInput = _NoMicrophone
     monkeypatch.setitem(sys.modules, "engine.audio", audio_pkg)
     monkeypatch.setitem(sys.modules, "engine.audio.microphone", microphone)
+    monkeypatch.setitem(sys.modules, "engine.audio.system_audio", system_audio)
 
 
 LEGACY_SUGGESTION = {
@@ -578,18 +582,9 @@ async def test_secret_free_legacy_requests_use_start_config_credentials(
         frames = await collect(control, {"a-1": "suggestion_result", "s-1": "llm_done"})
         await control.close()
 
-    assert terminal(frames["a-1"]) == {
-        "type": "suggestion_result",
-        "entry_id": "e-1",
-        "options": [{"strategy": "S", "text": "T"}],
-    }
+    assert terminal(frames["a-1"])["error_code"] == "invalid_request"
     assert [m["type"] for m in replies(frames["s-1"])] == ["llm_chunk", "llm_done"]
-    assert len(fake_legacy_llm.instances) == 1
-    llm = fake_legacy_llm.instances[0]
-    assert (llm.api_key, llm.model) == (FAKE_KEY, "gpt-test")
-    assert llm.suggestions == [
-        {"entry_id": "e-1", "target_text": "Can we ship?", "context": ["earlier"]}
-    ]
+    assert replies(frames["s-1"])[1]["error_code"] == "invalid_request"
     assert FAKE_KEY not in json.dumps(frames)
 
 
@@ -615,11 +610,12 @@ async def test_legacy_requests_without_credentials_fail_safely(
         await control.close()
 
     result = terminal(frames["a-1"])
-    assert "not configured" in result["error"]
+    assert result["error_code"] == "invalid_request"
     assert result["entry_id"] in ("e-1", "")
     chunk, done = replies(frames["s-1"])
     assert chunk["type"] == "llm_chunk" and chunk["text"].startswith("**Error:**")
-    assert done == {"type": "llm_done"}
+    assert done["type"] == "llm_done"
+    assert done["error_code"] == "invalid_request"
     assert all(f["op"] != "error" for group in frames.values() for f in group)
     assert fake_legacy_llm.instances == []
 

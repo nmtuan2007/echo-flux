@@ -180,24 +180,18 @@ DOCUMENTED_ENGINE_TO_UI = {
     "status",
     "error",
     "devices_list",
-    "models_list",
-    "download_progress",
-    "model_action_result",
-    "hub_search_results",
     "suggestion_result",
     "llm_chunk",
     "llm_done",
+    "test_connection_result",
 }
 DOCUMENTED_UI_TO_ENGINE = {
     "start",
     "stop",
     "list_devices",
-    "request_models_list",
-    "download_model",
-    "delete_model",
-    "search_hub",
     "request_suggestion",
     "request_summary",
+    "test_connection",
 }
 
 LEGACY_TRANSCRIPT_KEYS = {
@@ -230,6 +224,8 @@ ADDITIVE_TRANSCRIPT_KEYS = {
     "retracted",
     "duplicate_of",
     "continuity",
+    "conversation_id",
+    "message_id",
 }
 ADDITIVE_STATUS_KEYS = {
     "source",

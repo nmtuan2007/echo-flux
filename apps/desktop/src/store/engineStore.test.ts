@@ -129,7 +129,7 @@ describe("persistence whitelist", () => {
     const parsed = JSON.parse(raw);
 
     expect(parsed.version).toBe(PERSIST_VERSION);
-    expect(Object.keys(parsed.state).sort()).toEqual(["config", "history", "theme"]);
+    expect(Object.keys(parsed.state).sort()).toEqual(["config", "history", "services", "theme"]);
     expect(Object.keys(parsed.state.config).sort()).toEqual([...PERSISTED_CONFIG_KEYS].sort());
     expect(parsed.state.config.modelSize).toBe("tiny");
 
@@ -235,6 +235,103 @@ describe("persistence whitelist", () => {
     expect(written).not.toContain(SECRET_KEY);
     expect(written).not.toContain(SECRET_HF);
     expect(data.get(LEGACY_PERSIST_STORAGE_NAME)).toBe(legacy);
+  });
+
+  it("persists schema-v2 services configuration across store instances", () => {
+    const { store, data } = newStore();
+    store.getState().updateServiceConfig("stt", {
+      providerId: "deepgram",
+      endpoint: "wss://custom.deepgram.com",
+      modelOverride: "nova-2",
+      options: { punctuate: true, tier: 2 },
+      credentialRefs: { api_key: { configId: "deepgram", slot: "api_key", version: 1 } },
+    });
+    store.getState().updateServiceConfig("assistant", {
+      enabled: true,
+      providerId: "openai",
+      modelOverride: "gpt-4o",
+      options: { temperature: 0.7 },
+      credentialRefs: { api_key: { configId: "openai", slot: "api_key", version: 2 } },
+    });
+
+    const raw = data.get(PERSIST_STORAGE_NAME) as string;
+    expect(raw).toBeTypeOf("string");
+
+    const { store: hydrated } = newStore({ [PERSIST_STORAGE_NAME]: raw });
+    const s = hydrated.getState().services;
+    expect(s.stt.providerId).toBe("deepgram");
+    expect(s.stt.endpoint).toBe("wss://custom.deepgram.com");
+    expect(s.stt.modelOverride).toBe("nova-2");
+    expect(s.stt.options).toEqual({ punctuate: true, tier: 2 });
+    expect(s.stt.credentialRefs.api_key).toEqual({ configId: "deepgram", slot: "api_key", version: 1 });
+
+    expect(s.assistant.enabled).toBe(true);
+    expect(s.assistant.providerId).toBe("openai");
+    expect(s.assistant.modelOverride).toBe("gpt-4o");
+    expect(s.assistant.options).toEqual({ temperature: 0.7 });
+    expect(s.assistant.credentialRefs.api_key).toEqual({ configId: "openai", slot: "api_key", version: 2 });
+  });
+
+  it("enforces zero secrets in services persistence even when injected", () => {
+    const rawServices = {
+      stt: {
+        enabled: true,
+        providerId: "deepgram",
+        endpoint: "wss://api.deepgram.com",
+        modelOverride: "nova-3",
+        options: {
+          api_key: "sk-injected-secret",
+          token: "secret-token",
+          authorization: "Bearer secret-bearer",
+          punctuate: true,
+        },
+        credentialRefs: {
+          api_key: { configId: "deepgram", slot: "api_key", version: 1, secret: "leaked-secret" },
+        },
+      },
+      translation: {
+        enabled: true,
+        providerId: "local",
+        endpoint: "",
+        modelOverride: "",
+        options: { apiKey: "injected" },
+        credentialRefs: {},
+      },
+      assistant: {
+        enabled: false,
+        providerId: "openai",
+        endpoint: "",
+        modelOverride: "",
+        options: { secret_key: "leaked" },
+        credentialRefs: {},
+      },
+    };
+
+    const state = {
+      ...useEngineStore.getState(),
+      services: rawServices,
+    } as unknown as EngineState;
+
+    const persisted = selectPersistedState(state);
+    const serialized = JSON.stringify(persisted);
+
+    for (const forbidden of [
+      "sk-injected-secret",
+      "secret-token",
+      "secret-bearer",
+      "leaked-secret",
+      "api_key",
+      "secret_key",
+    ]) {
+      // In credentialRefs, slot is "api_key", so ensure raw secret strings are never present
+      if (forbidden === "api_key") {
+        expect(persisted.services.stt.options.api_key).toBeUndefined();
+      } else {
+        expect(serialized).not.toContain(forbidden);
+      }
+    }
+    expect(persisted.services.stt.options.punctuate).toBe(true);
+    expect((persisted.services.stt.credentialRefs.api_key as any).secret).toBeUndefined();
   });
 });
 
@@ -401,26 +498,6 @@ describe("engine events", () => {
 
     ws.receive({ type: "devices_list", microphones: [{ id: "1", name: "Mic" }], speakers: [] });
     expect(store.getState().availableMics).toEqual([{ id: "1", name: "Mic" }]);
-
-    store.getState().downloadModelById("tiny", "asr");
-    expect(ws.lastMessage()).toMatchObject({ type: "download_model", model_id: "tiny", model_type: "asr" });
-    ws.receive({ type: "download_progress", model: "tiny", percent: 40 });
-    expect(store.getState()).toMatchObject({ downloading: true, downloadModel: "tiny", downloadPercent: 40 });
-    ws.receive({ type: "download_progress", model: "tiny", percent: 100 });
-    expect(store.getState().downloading).toBe(false);
-    expect(ws.lastMessage()).toEqual({ type: "request_models_list" });
-
-    ws.receive({ type: "models_list", asr: [{ id: "tiny", name: "Tiny", size_mb: 75, is_downloaded: true }] });
-    expect(store.getState().modelsList.asr).toHaveLength(1);
-    expect(store.getState().modelsList.translation).toEqual([]);
-
-    store.getState().searchHub("whisper", "asr");
-    expect(store.getState().searchingHub).toBe(true);
-    ws.receive({ type: "hub_search_results", results: [{ id: "x", downloads: 1, tags: [], task: "asr" }] });
-    expect(store.getState().searchingHub).toBe(false);
-
-    ws.receive({ type: "model_action_result", action: "delete", model_id: "x", success: false, error: "locked" });
-    expect(store.getState().appError).toBe("Model Error: locked");
   });
 
   it("ignores malformed and unknown messages", () => {
@@ -451,7 +528,6 @@ describe("reconnect and reset", () => {
       isToggling: false,
       downloading: false,
       activeTranslationBackend: null,
-      modelsList: { asr: [], translation: [] },
     });
 
     vi.advanceTimersByTime(2999);
@@ -540,15 +616,15 @@ describe("reconnect and reset", () => {
 describe("useEngineStore compatibility", () => {
   const STATE_KEYS = [
     "connected", "socket", "running", "isToggling", "entries", "partials",
-    "activeTranslationBackend", "downloading", "downloadModel", "downloadPercent",
-    "hubSearchResults", "searchingHub", "modelsList", "history", "activeConversationId",
+    "downloading", "downloadModel", "downloadPercent",
+    "history", "activeConversationId",
     "activeView", "theme", "appError", "config", "availableMics", "availableSpeakers",
     "suggestionLoading", "summaryText", "summaryLoading", "summaryVisible",
   ];
   const ACTION_KEYS = [
     "connect", "disconnect", "startPipeline", "stopPipeline", "togglePipeline",
     "clearTranscript", "setActiveView", "setTheme", "updateConfig", "requestDeviceList",
-    "clearAppError", "requestModelsList", "downloadModelById", "deleteModelById", "searchHub",
+    "clearAppError",
     "requestSuggestion", "requestSummary", "openSummary", "closeSummary",
     "renameConversation", "deleteConversation", "saveCurrentSession", "loadConversation",
   ];
@@ -567,12 +643,8 @@ describe("useEngineStore compatibility", () => {
     s.startPipeline();
     s.stopPipeline();
     s.requestDeviceList();
-    s.requestModelsList();
-    s.downloadModelById("m", "asr");
-    s.deleteModelById("m", "asr");
-    s.searchHub("q", "asr");
     s.requestSummary();
-    expect(store.getState()).toMatchObject({ isToggling: false, downloading: false, searchingHub: false });
+    expect(store.getState()).toMatchObject({ isToggling: false, downloading: false });
   });
 
   it("defaults v2 services to match the engine and resets validation on fingerprinted edits", () => {

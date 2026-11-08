@@ -34,7 +34,7 @@ use zeroize::Zeroizing;
 
 /// 256 bits per token, hex encoded.
 const TOKEN_BYTES: usize = 32;
-const STOP_GRACE: Duration = Duration::from_secs(2);
+pub const STOP_GRACE: Duration = Duration::from_secs(2);
 const STOP_POLL: Duration = Duration::from_millis(25);
 
 /// Base name of the bundled engine binary. Tauri 1 `externalBin` entries are installed next
@@ -369,6 +369,7 @@ impl EngineManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn production() -> Self {
         Self::new(Box::new(OsSpawner), Box::new(default_launch_target), STOP_GRACE)
     }

@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-11-08T06:23:28Z",
+  "hardware_reference": {
+    "os_platform": "windows",
+    "os_version": "Windows-10-10.0.26200-SP0",
+    "architecture": "x86_64",
+    "cpu_processor": "Intel64 Family 6 Model 151 Stepping 5, GenuineIntel",
+    "cpu_logical_cores": 12,
+    "ram_gb": 31.83,
+    "gpu_accelerator": "CUDA: NVIDIA GeForce RTX 3060 (12.0 GB)",
+    "python_version": "3.10.0"
+  },
+  "benchmark_config": {
+    "iterations": 3,
+    "warmup": 1,
+    "audio_duration_sec": 1.0,
+    "sample_rate": 16000
+  },
+  "summary_metrics": {
+    "partial_stt_latency_ms": {
+      "mean": 1821.34,
+      "median": 1824.43,
+      "min": 1811.95,
+      "max": 1827.65,
+      "p95": 1827.65
+    },
+    "final_stt_latency_ms": {
+      "mean": 0.13,
+      "median": 0.08,
+      "min": 0.08,
+      "max": 0.22,
+      "p95": 0.22
+    },
+    "translation_latency_ms": {
+      "mean": 248.69,
+      "median": 289.87,
+      "min": 155.37,
+      "max": 300.84,
+      "p95": 300.84
+    },
+    "combined_latency_ms": {
+      "mean": 248.82,
+      "median": 289.95,
+      "min": 155.59,
+      "max": 300.92,
+      "p95": 300.92
+    },
+    "rss_mb": {
+      "mean": 1063.8,
+      "median": 1063.84,
+      "min": 1063.7,
+      "max": 1063.85,
+      "p95": 1063.85
+    },
+    "peak_rss_mb": 1205.82
+  },
+  "iteration_runs": [
+    {
+      "iteration": 1.0,
+      "partial_stt_latency_ms": 1827.65,
+      "final_stt_latency_ms": 0.08,
+      "translation_latency_ms": 289.87,
+      "combined_latency_ms": 289.95,
+      "rss_mb": 1063.7
+    },
+    {
+      "iteration": 2.0,
+      "partial_stt_latency_ms": 1811.95,
+      "final_stt_latency_ms": 0.22,
+      "translation_latency_ms": 155.37,
+      "combined_latency_ms": 155.59,
+      "rss_mb": 1063.84
+    },
+    {
+      "iteration": 3.0,
+      "partial_stt_latency_ms": 1824.43,
+      "final_stt_latency_ms": 0.08,
+      "translation_latency_ms": 300.84,
+      "combined_latency_ms": 300.92,
+      "rss_mb": 1063.85
+    }
+  ]
+}

@@ -97,7 +97,7 @@ fn set_stealth_mode(window: tauri::Window, enabled: bool) {
                 extern "system" {
                     fn SetWindowDisplayAffinity(hwnd: isize, dwAffinity: u32) -> i32;
                 }
-                SetWindowDisplayAffinity(hwnd.0 as isize, affinity);
+                SetWindowDisplayAffinity(hwnd.0, affinity);
             }
         }
     }
@@ -119,7 +119,7 @@ fn main() {
         std::sync::Arc::new(engine_process::EngineManager::new(
             Box::new(bridge.capturing_spawner(Box::new(engine_process::OsSpawner))),
             Box::new(engine_process::default_launch_target),
-            control_bridge::ENGINE_STOP_GRACE,
+            engine_process::STOP_GRACE,
         ));
 
     tauri::Builder::default()

@@ -55,10 +55,19 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
     <div
       className={`transcript-entry transcript-final ${sourceBorderClass(entry.source)}`}
       data-entry-id={entry.id}
+      data-message-id={entry.messageId ?? entry.id}
     >
-      {(entry.source || entry.continuity) && (
+      {(entry.source || entry.continuity || entry.sttFallbackFrom) && (
         <div className="transcript-entry-header">
           <SourceBadge source={entry.source} />
+          {entry.sttFallbackFrom && (
+            <span
+              className="transcript-fallback-badge"
+              title={`Switched to Local from ${sttProviderLabel(entry.sttFallbackFrom)}`}
+            >
+              {sttProviderLabel(entry.sttProvider ?? "local")} (Sticky Fallback)
+            </span>
+          )}
           {entry.continuity && (
             <span
               className="transcript-continuity"

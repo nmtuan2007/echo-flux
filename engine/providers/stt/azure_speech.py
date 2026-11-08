@@ -57,6 +57,7 @@ from typing import (
     Dict,
     Mapping,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
@@ -617,6 +618,25 @@ class AzureSpeechSTTProvider(StreamingSTTProvider):
     Configuration and SDK problems raise from ``start``. Recognizer start failures raise
     from ``send_audio``. Failures reported by the service surface from ``receive_events``.
     """
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: Any,
+        secrets: Mapping[str, str],
+        *,
+        stream_ids: Sequence[str] = ("default",),
+        sdk_loader: Optional[SdkLoader] = None,
+    ) -> "AzureSpeechSTTProvider":
+        options = dict(getattr(resolved, "options", {}) or {})
+        options["api_key"] = secrets.get("api_key", "")
+        provider_id = getattr(resolved, "provider_id", "azure-speech")
+        options["provider_id"] = provider_id
+        endpoint = getattr(resolved, "endpoint", "")
+        if endpoint:
+            options["endpoint"] = endpoint
+        config = AzureSpeechSTTConfig.from_options(options)
+        return cls(config, sdk_loader=sdk_loader)
 
     def __init__(
         self,

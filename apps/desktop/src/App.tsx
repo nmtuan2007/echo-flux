@@ -1,12 +1,14 @@
 import { useEffect } from "react";
 import { Header } from "./components/Header";
 import { HistoryPanel } from "./components/HistoryPanel";
-import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { OverlayPanel } from "./components/OverlayPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StatusBar } from "./components/StatusBar";
 import { SummaryModal } from "./components/SummaryModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
+import { ContextProfilesPanel } from "./components/ContextProfilesPanel";
+import { ConversationSetupPanel } from "./components/ConversationSetupPanel";
+import { OnboardingDialog } from "./components/OnboardingDialog";
 import { useEngineStore } from "./store/engineStore";
 import { publicConfigSnapshot } from "./store/settingsSlice";
 
@@ -28,25 +30,27 @@ function ErrorToast() {
   if (!appError) return null;
 
   return (
-    <div style={{
-      position: 'absolute',
-      bottom: '20px',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      backgroundColor: 'var(--danger)',
-      color: '#fff',
-      padding: '12px 20px',
-      borderRadius: '8px',
-      boxShadow: '0 4px 12px rgba(220, 38, 38, 0.4)',
-      zIndex: 9999,
-      display: 'flex',
-      alignItems: 'center',
-      gap: '12px',
-      fontSize: '14px',
-      fontWeight: 500,
-      maxWidth: '80%',
-      animation: 'slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
-    }}>
+    <div
+      style={{
+        position: "absolute",
+        bottom: "20px",
+        left: "50%",
+        transform: "translateX(-50%)",
+        backgroundColor: "var(--danger)",
+        color: "#fff",
+        padding: "12px 20px",
+        borderRadius: "8px",
+        boxShadow: "0 4px 12px rgba(220, 38, 38, 0.4)",
+        zIndex: 9999,
+        display: "flex",
+        alignItems: "center",
+        gap: "12px",
+        fontSize: "14px",
+        fontWeight: 500,
+        maxWidth: "80%",
+        animation: "slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+      }}
+    >
       <style>{`
         @keyframes slideUp {
           from { opacity: 0; transform: translate(-50%, 20px); }
@@ -54,9 +58,17 @@ function ErrorToast() {
         }
       `}</style>
       <span>⚠ {appError}</span>
-      <button 
-        onClick={clearAppError} 
-        style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: '18px', padding: 0, opacity: 0.8 }}
+      <button
+        onClick={clearAppError}
+        style={{
+          background: "transparent",
+          border: "none",
+          color: "#fff",
+          cursor: "pointer",
+          fontSize: "18px",
+          padding: 0,
+          opacity: 0.8,
+        }}
       >
         ×
       </button>
@@ -65,7 +77,16 @@ function ErrorToast() {
 }
 
 export default function App() {
-  const { activeView, bootstrapEngine, disconnect, theme } = useEngineStore();
+  const {
+    activeView,
+    bootstrapEngine,
+    disconnect,
+    theme,
+    onboardingCompleted,
+    isSetupOpen,
+    closeSetup,
+    startSessionWithSetup,
+  } = useEngineStore();
   const isOverlay = appWindow.label === "overlay";
 
   useEffect(() => {
@@ -76,13 +97,30 @@ export default function App() {
     let unlistenSync: (() => void) | undefined;
     let unlistenReq: (() => void) | undefined;
     let unlistenRelay: (() => void) | undefined;
+    let unlistenAssistRelay: (() => void) | undefined;
     let unsubStore: (() => void) | undefined;
+
+    const getSyncPayload = () => {
+      const state = useEngineStore.getState();
+      return {
+        entries: state.entries,
+        partials: state.partials,
+        running: state.running,
+        connected: state.connected,
+        suggestionLoading: state.suggestionLoading,
+        assistRequests: state.assistRequests,
+        engineConversationId: state.engineConversationId,
+        sttStreams: state.sttStreams,
+        services: state.services,
+        config: publicConfigSnapshot(state.config),
+      };
+    };
 
     if (isOverlay) {
       // OVERLAY WINDOW: Mirror state from Main Window
       listen("sync_state", (event: any) => {
         useEngineStore.setState(event.payload);
-      }).then(f => unlistenSync = f);
+      }).then((f) => (unlistenSync = f));
 
       emit("request_sync_state");
     } else {
@@ -90,31 +128,23 @@ export default function App() {
       void bootstrapEngine();
 
       listen("request_sync_state", () => {
-        const state = useEngineStore.getState();
-        emit("sync_state", {
-          entries: state.entries,
-          partials: state.partials,
-          running: state.running,
-          connected: state.connected,
-          suggestionLoading: state.suggestionLoading,
-          config: publicConfigSnapshot(state.config),
-        });
-      }).then(f => unlistenReq = f);
+        emit("sync_state", getSyncPayload());
+      }).then((f) => (unlistenReq = f));
 
       listen("relay_request_suggestion", (event: any) => {
         const { entryId, targetText, context } = event.payload;
         useEngineStore.getState().requestSuggestion(entryId, targetText, context);
-      }).then(f => unlistenRelay = f);
+      }).then((f) => (unlistenRelay = f));
 
-      unsubStore = useEngineStore.subscribe((state) => {
-        emit("sync_state", { // Broadcast state continuously
-          entries: state.entries,
-          partials: state.partials,
-          running: state.running,
-          connected: state.connected,
-          suggestionLoading: state.suggestionLoading,
-          config: publicConfigSnapshot(state.config), // Ensure config is synced to pick up settings like stealthMode
-        });
+      listen("relay_request_assist", (event: any) => {
+        const { entryId } = event.payload || {};
+        if (entryId) {
+          useEngineStore.getState().requestAssist(entryId);
+        }
+      }).then((f) => (unlistenAssistRelay = f));
+
+      unsubStore = useEngineStore.subscribe(() => {
+        emit("sync_state", getSyncPayload());
       });
 
       const setupShortcuts = async () => {
@@ -128,14 +158,13 @@ export default function App() {
           });
           await register("CommandOrControl+Shift+S", () => {
             const state = useEngineStore.getState();
-            // Find the last spoken entry from actual speakers, not from the user
-            const lastSpoken = [...state.entries].reverse().find((e) => e.source !== "mic");
-            if (lastSpoken && !state.suggestionLoading[lastSpoken.id]) {
-              state.requestSuggestion(
-                lastSpoken.id,
-                lastSpoken.text,
-                state.entries.map((e) => e.text),
-              );
+            // Find target finalized entry: prioritize remote source, fallback to any finalized entry
+            const finalEntries = state.entries.filter((e) => e.isFinal && e.text.trim());
+            const target =
+              [...finalEntries].reverse().find((e) => e.source !== "mic") ||
+              [...finalEntries].reverse()[0];
+            if (target) {
+              state.requestAssist(target.id);
             }
           });
         } catch (e) {
@@ -149,6 +178,7 @@ export default function App() {
       if (unlistenSync) unlistenSync();
       if (unlistenReq) unlistenReq();
       if (unlistenRelay) unlistenRelay();
+      if (unlistenAssistRelay) unlistenAssistRelay();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
         unregisterAll().catch(console.error);
@@ -166,11 +196,17 @@ export default function App() {
       <Header />
       <main className="app-content" style={{ position: "relative" }}>
         {activeView === "settings" && <SettingsPanel />}
-        {activeView === "model_manager" && <ModelManagerPanel />}
         {activeView === "history" && <HistoryPanel />}
+        {activeView === "profiles" && <ContextProfilesPanel />}
         {activeView === "transcript" && <TranscriptPanel />}
-        {/* Summary modal overlays any active view */}
+        {/* Modals and Overlays */}
         <SummaryModal />
+        <ConversationSetupPanel
+          isOpen={isSetupOpen}
+          onClose={closeSetup}
+          onStart={startSessionWithSetup}
+        />
+        {!onboardingCompleted && <OnboardingDialog />}
         <ErrorToast />
       </main>
       <StatusBar />

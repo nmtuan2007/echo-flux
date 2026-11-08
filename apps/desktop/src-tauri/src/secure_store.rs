@@ -112,7 +112,7 @@ fn is_valid_segment(segment: &str) -> bool {
         return false;
     }
     let longest_run = segment
-        .split(|c| c == '-' || c == '_')
+        .split(['-', '_'])
         .map(str::len)
         .max()
         .unwrap_or(0);
