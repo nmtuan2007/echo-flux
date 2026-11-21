@@ -10,6 +10,8 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
   const {
     packStatus,
     hardwareInfo,
+    services,
+    config,
     checkPackReadiness,
     installLocalPack,
     cancelLocalPack,
@@ -34,13 +36,25 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
     onStatusChange?.(isReady);
   }, [isReady, onStatusChange]);
 
+  const langOptions =
+    capability === "translation"
+      ? {
+          sourceLang:
+            (services?.translation?.options?.source_lang as string) || config.sourceLang || "en",
+          targetLang:
+            (services?.translation?.options?.target_lang as string) || config.targetLang || "vi",
+        }
+      : undefined;
+
   const handleDownload = async () => {
     setErrorMsg(null);
     setInstalling(true);
     const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
-    const ok = await installLocalPack(packId);
+    const ok = await installLocalPack(packId, langOptions);
     setInstalling(false);
-    if (!ok) {
+    if (ok) {
+      void checkPackReadiness(capability);
+    } else {
       setErrorMsg("Download failed or paused. You can resume at any time.");
     }
   };
@@ -55,9 +69,11 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
     setErrorMsg(null);
     setInstalling(true);
     const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
-    const ok = await retryLocalPack(packId);
+    const ok = await retryLocalPack(packId, langOptions);
     setInstalling(false);
-    if (!ok) {
+    if (ok) {
+      void checkPackReadiness(capability);
+    } else {
       setErrorMsg("Retry failed. Check network connection.");
     }
   };

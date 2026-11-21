@@ -114,6 +114,7 @@ export interface ConversationSlice {
   summaryError: string | null;
   activeSummaryRequestId: string | null;
   activeSummaryConversationId: string | null;
+  summaryStreamedViaEvent: boolean;
 
   requestSummary: () => void;
   cancelSummary: () => Promise<void>;
@@ -186,6 +187,7 @@ export const createConversationSlice =
     summaryError: null,
     activeSummaryRequestId: null,
     activeSummaryConversationId: null,
+    summaryStreamedViaEvent: false,
 
     // History state
     savedConversations: [],
@@ -219,6 +221,7 @@ export const createConversationSlice =
         summaryError: null,
         activeSummaryRequestId: requestId,
         activeSummaryConversationId: conversationId || null,
+        summaryStreamedViaEvent: false,
       });
 
       if (conversationId) {
@@ -232,12 +235,15 @@ export const createConversationSlice =
     },
 
     cancelSummary: async () => {
-      const { activeSummaryRequestId } = get();
-      if (activeSummaryRequestId && isTauriRuntime()) {
+      const { activeSummaryRequestId, activeSummaryConversationId } = get();
+      if ((activeSummaryRequestId || activeSummaryConversationId) && isTauriRuntime()) {
         try {
           await forwardCommand({
             type: "summary_cancel",
-            request_id: activeSummaryRequestId,
+            ...(activeSummaryRequestId ? { request_id: activeSummaryRequestId } : {}),
+            ...(activeSummaryConversationId
+              ? { conversation_id: activeSummaryConversationId }
+              : {}),
           });
         } catch {}
       }
@@ -252,6 +258,9 @@ export const createConversationSlice =
     },
 
     closeSummary: () => {
+      if (get().summaryLoading) {
+        void get().cancelSummary();
+      }
       set({ summaryVisible: false, summaryLoading: false });
     },
 
@@ -477,6 +486,7 @@ export const createConversationSlice =
           summaryVisible: false,
           summaryLoading: false,
           activeConversationId: id,
+          pendingTitle: target.name || "",
         });
         return;
       }
@@ -485,32 +495,73 @@ export const createConversationSlice =
       const detailId = detail?.conversation?.conversation_id || detail?.conversation_id;
       if (detail && detailId === id) {
         const rawMessages = detail.messages || [];
-        const loadedEntries: TranscriptEntry[] = rawMessages.map((m: any, idx: number) => ({
-          id: m.message_id || `msg-${idx}`,
-          text: m.stt_text || m.text || "",
-          translation: m.translation_text ?? m.translation ?? null,
-          isFinal: true,
-          timestamp:
-            typeof m.timestamp_ms === "number"
-              ? m.timestamp_ms / 1000
-              : typeof m.timestamp === "number"
-                ? m.timestamp
-                : 0,
-          source:
-            m.source === "mic" || m.source === "system" || m.source === "both"
-              ? m.source
-              : null,
-          revision: m.revision ?? 1,
-        }));
+        const assistByMsgId = new Map<string, any>();
+        for (const a of detail.assist_results || []) {
+          if (a?.target_message_id) {
+            assistByMsgId.set(a.target_message_id, a);
+          }
+        }
+        const loadedEntries: TranscriptEntry[] = rawMessages.map((m: any, idx: number) => {
+          const msgId = m.message_id || `msg-${idx}`;
+          const savedAssist = assistByMsgId.get(msgId);
+          return {
+            id: msgId,
+            messageId: m.message_id || undefined,
+            conversationId: id,
+            text: m.stt_text || m.text || "",
+            translation: m.translation_text ?? m.translation ?? null,
+            isFinal: true,
+            timestamp:
+              typeof m.timestamp_ms === "number"
+                ? m.timestamp_ms / 1000
+                : typeof m.timestamp === "number"
+                  ? m.timestamp
+                  : 0,
+            source:
+              m.source === "mic" || m.source === "system" || m.source === "both"
+                ? m.source
+                : null,
+            revision: m.revision ?? 1,
+            ...(savedAssist
+              ? {
+                  assist: {
+                    requestId: `stored-${savedAssist.assist_id || msgId}`,
+                    assistId: savedAssist.assist_id ?? null,
+                    conversationId: id,
+                    suggestedReplies: Array.isArray(savedAssist.suggested_replies)
+                      ? savedAssist.suggested_replies
+                      : [],
+                    clarifyingQuestions: Array.isArray(savedAssist.clarifying_questions)
+                      ? savedAssist.clarifying_questions
+                      : [],
+                    providerId: savedAssist.provider_id ?? null,
+                    error: null,
+                  },
+                }
+              : {}),
+          };
+        });
+        const convLabels = detail.conversation?.source_labels || detail.source_labels;
         set({
           entries: loadedEntries,
           activeView: "transcript",
           partials: {},
           suggestionLoading: {},
-          summaryText: detail.summary?.summary_markdown || detail.summary || "",
+          assistRequests: {},
+          summaryText: detail.summary?.summary_markdown || (typeof detail.summary === "string" ? detail.summary : ""),
           summaryVisible: false,
           summaryLoading: false,
           activeConversationId: id,
+          engineConversationId: id,
+          pendingTitle: detail.conversation?.title || detail.title || "",
+          ...(convLabels?.mic || convLabels?.system
+            ? {
+                sourceLabels: {
+                  mic: convLabels.mic || "Me",
+                  system: convLabels.system || "Others",
+                },
+              }
+            : {}),
         });
       }
     },
@@ -670,11 +721,7 @@ export const createConversationSlice =
       }),
 
     openSetup: () => {
-      const dateStr = new Date().toLocaleString();
-      set({
-        isSetupOpen: true,
-        pendingTitle: "Session " + dateStr,
-      });
+      set({ isSetupOpen: true });
     },
 
     closeSetup: () => set({ isSetupOpen: false }),

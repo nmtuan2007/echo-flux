@@ -1,14 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { EngineConfig, useEngineStore } from "../store/engineStore";
 import { isAssistantConfigured } from "../store/transcriptSlice";
-import {
-  downloadFile,
-  exportAsJSON,
-  exportAsMarkdown,
-  exportAsSRT,
-  exportAsText,
-  type ExportEntry,
-} from "../utils/export";
+import type { ExportEntry } from "../utils/export";
+import { ExportMenu } from "./ExportMenu";
 
 const TARGET_LANG_OPTIONS = [
   { code: "vi", label: "Vietnamese (vi)" },
@@ -49,19 +43,21 @@ export function LiveSessionBar() {
     clearTranscript,
     requestSummary,
     openSummary,
+    renameConversation,
+    setPendingTitle,
   } = useEngineStore();
   const isAssistantEnabled = useEngineStore(isAssistantConfigured);
 
   const [elapsedSec, setElapsedSec] = useState(0);
-  const [exportOpen, setExportOpen] = useState(false);
-  const [copiedAll, setCopiedAll] = useState(false);
-  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
 
   useEffect(() => {
     if (!running) {
       setElapsedSec(0);
       return;
     }
+    setRenaming(false);
     const start = Date.now();
     const timer = setInterval(() => {
       setElapsedSec(Math.floor((Date.now() - start) / 1000));
@@ -69,24 +65,12 @@ export function LiveSessionBar() {
     return () => clearInterval(timer);
   }, [running]);
 
-  useEffect(() => {
-    if (!exportOpen) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
-        setExportOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [exportOpen]);
-
   const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
   const targetLang =
     (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
   const hasCustomLang = !TARGET_LANG_OPTIONS.some((o) => o.code === targetLang);
-  const hasActiveConversation = Boolean(
-    activeConversationId || engineConversationId || entries.length > 0,
-  );
+  const convId = activeConversationId || engineConversationId;
+  const hasActiveConversation = Boolean(convId || entries.length > 0);
   const canSummarize = isAssistantEnabled && hasActiveConversation && connected;
   const hasSummary = Boolean(summaryText);
   const activeStreams = Object.keys(partials);
@@ -104,60 +88,73 @@ export function LiveSessionBar() {
             : e.source || undefined,
     }));
 
-  const handleExport = (fmt: "txt" | "srt" | "md" | "json") => {
-    setExportOpen(false);
-    const items = buildExportEntries();
-    const base =
-      (pendingTitle || "echoflux-session")
-        .toLowerCase()
-        .replace(/[^a-z0-9-_]+/gi, "-")
-        .replace(/^-|-$/g, "") || "echoflux-session";
-    if (fmt === "txt") {
-      downloadFile(exportAsText(items), `${base}.txt`);
-    } else if (fmt === "srt") {
-      downloadFile(exportAsSRT(items), `${base}.srt`);
-    } else if (fmt === "md") {
-      downloadFile(
-        exportAsMarkdown(items, pendingTitle || "EchoFlux Session", summaryText || null),
-        `${base}.md`,
-        "text/markdown;charset=utf-8",
-      );
-    } else {
-      downloadFile(exportAsJSON(items), `${base}.json`, "application/json;charset=utf-8");
+  const handleSaveRename = () => {
+    const trimmed = renameDraft.trim();
+    if (trimmed) {
+      setPendingTitle(trimmed);
+      if (convId) renameConversation(convId, trimmed);
     }
-  };
-
-  const handleCopyTranscript = async () => {
-    setExportOpen(false);
-    try {
-      await navigator.clipboard.writeText(exportAsText(buildExportEntries()));
-      setCopiedAll(true);
-      setTimeout(() => setCopiedAll(false), 1500);
-    } catch {
-      // Clipboard unavailable
-    }
+    setRenaming(false);
   };
 
   return (
     <div className="live-session-bar" role="region" aria-label="Session controls">
       <div className="live-session-left">
-        <button
-          type="button"
-          className="session-context-pill"
-          onClick={openSetup}
-          disabled={running || !connected || isToggling}
-          title={running ? "Session in progress" : "Configure session title, speaker labels, and profiles"}
-        >
-          <span className="session-context-title">
-            {pendingTitle.trim() || "Quick Session"}
-          </span>
-          {attachedProfileIds.length > 0 && (
-            <span className="session-profile-badge">
-              {attachedProfileIds.length} profile{attachedProfileIds.length > 1 ? "s" : ""}
-            </span>
-          )}
-          {!running && <span className="session-edit-hint">Edit</span>}
-        </button>
+        {renaming && !running ? (
+          <div className="history-edit-row">
+            <input
+              className="history-input"
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSaveRename();
+                if (e.key === "Escape") setRenaming(false);
+              }}
+              aria-label="Session title"
+              autoFocus
+            />
+            <button type="button" className="btn-icon-sm success" onClick={handleSaveRename} title="Save title">
+              ✓
+            </button>
+            <button type="button" className="btn-icon-sm" onClick={() => setRenaming(false)} title="Cancel">
+              ✕
+            </button>
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="session-context-pill"
+              onClick={openSetup}
+              disabled={running || !connected || isToggling}
+              title={running ? "Session in progress" : "Configure session title, speaker labels, and profiles"}
+            >
+              <span className="session-context-title">
+                {pendingTitle.trim() || "Quick Session"}
+              </span>
+              {attachedProfileIds.length > 0 && (
+                <span className="session-profile-badge">
+                  {attachedProfileIds.length} profile{attachedProfileIds.length > 1 ? "s" : ""}
+                </span>
+              )}
+              {!running && <span className="session-edit-hint">Edit</span>}
+            </button>
+            {!running && convId && (
+              <button
+                type="button"
+                className="btn-icon-sm"
+                onClick={() => {
+                  setRenameDraft(pendingTitle || "");
+                  setRenaming(true);
+                }}
+                title="Rename session"
+                aria-label="Rename session"
+              >
+                ✎
+              </button>
+            )}
+          </>
+        )}
 
         {running && (
           <div className="session-live-telemetry" aria-label="Live stream activity">
@@ -272,36 +269,11 @@ export function LiveSessionBar() {
         )}
 
         {entries.length > 0 && (
-          <div className="export-dropdown" ref={exportMenuRef}>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => setExportOpen((v) => !v)}
-              aria-expanded={exportOpen}
-              title="Export or copy transcript"
-            >
-              {copiedAll ? "✓ Copied" : "Export ▾"}
-            </button>
-            {exportOpen && (
-              <div className="export-dropdown-menu" role="menu">
-                <button type="button" role="menuitem" onClick={handleCopyTranscript}>
-                  Copy All Text
-                </button>
-                <button type="button" role="menuitem" onClick={() => handleExport("md")}>
-                  Export Markdown (.md)
-                </button>
-                <button type="button" role="menuitem" onClick={() => handleExport("txt")}>
-                  Export Plain Text (.txt)
-                </button>
-                <button type="button" role="menuitem" onClick={() => handleExport("srt")}>
-                  Export Subtitles (.srt)
-                </button>
-                <button type="button" role="menuitem" onClick={() => handleExport("json")}>
-                  Export JSON (.json)
-                </button>
-              </div>
-            )}
-          </div>
+          <ExportMenu
+            entries={buildExportEntries()}
+            title={pendingTitle || "EchoFlux Session"}
+            summaryMarkdown={summaryText || null}
+          />
         )}
 
         {entries.length > 0 && !running && (

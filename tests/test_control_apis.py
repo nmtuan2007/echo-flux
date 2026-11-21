@@ -679,6 +679,20 @@ async def test_conversation_get_with_and_without_messages(control_server, repo):
         assert get_yes["ok"] is True
         assert len(get_yes["data"]["messages"]) == 1
         assert get_yes["data"]["messages"][0]["text"] == "Hello world"
+        assert get_yes["data"]["messages"][0]["speaker_label"] == "Me"
+        assert get_yes["data"]["summary"] is None
+
+        # Add summary and check stats in list + detail
+        from engine.providers.types import SummaryResult
+
+        repo.save_summary("c-msgs", SummaryResult(summary_markdown="## Recap\n- Done"))
+        clist = await client.call("conversation_list")
+        row = next(c for c in clist["data"]["conversations"] if c["conversation_id"] == "c-msgs")
+        assert row["message_count"] == 1
+        assert row["has_summary"] is True
+
+        get_sum = await client.call("conversation_get", {"conversation_id": "c-msgs"})
+        assert get_sum["data"]["summary"]["summary_markdown"] == "## Recap\n- Done"
     finally:
         await client.close()
 
@@ -995,3 +1009,50 @@ def test_control_commands_do_not_trip_ws_contract_regexes():
         "llm_done",
         "test_connection_result",
     }
+
+
+@pytest.mark.asyncio
+async def test_audio_probe_samples_stream_and_refuses_when_running(control_server, monkeypatch):
+    import sys
+    import types
+
+    import numpy as np
+
+    server, dispatcher = control_server
+
+    class FakeMicInput:
+        def __init__(self, config, device_id=None):
+            self._reads = 0
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def read_chunk(self):
+            self._reads += 1
+            if self._reads == 1:
+                samples = (np.ones(160, dtype=np.int16) * 3276)
+                return samples.tobytes()
+            return b""
+
+    fake_mic_mod = types.ModuleType("engine.audio.microphone")
+    fake_mic_mod.MicrophoneInput = FakeMicInput
+    monkeypatch.setitem(sys.modules, "engine.audio.microphone", fake_mic_mod)
+
+    client = await connect_client(server)
+    try:
+        res = await client.call("audio_probe", {"audio_source": "microphone", "duration_ms": 120})
+        assert res["ok"] is True
+        mic = res["data"]["streams"]["mic"]
+        assert mic["ok"] is True
+        assert mic["level"] > 0.0
+
+        dispatcher._engine = types.SimpleNamespace(_running=True)
+        busy = await client.call("audio_probe", {"audio_source": "microphone"})
+        assert busy["ok"] is False
+        assert busy["error"]["code"] == "engine_busy"
+    finally:
+        dispatcher._engine = None
+        await client.close()

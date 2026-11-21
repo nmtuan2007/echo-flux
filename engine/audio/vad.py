@@ -1,8 +1,5 @@
 import logging
-import os
 import urllib.request
-from collections import deque
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -31,7 +28,7 @@ class VAD:
 
         # Buffer for accumulating samples to match model window size
         self._buffer = np.array([], dtype=np.float32)
-        
+
         # ONNX Runtime session
         self._session: Optional[ort.InferenceSession] = None
         self._h = np.zeros((2, 1, 64), dtype=np.float32)
@@ -39,7 +36,7 @@ class VAD:
 
         # State tracking
         self._is_speech = False
-        
+
         self._models_dir = Config().models_dir
         self._model_path = self._models_dir / "silero_vad.onnx"
 
@@ -52,11 +49,16 @@ class VAD:
             if not self._model_path.exists():
                 logger.info("Downloading Silero VAD model to %s...", self._model_path)
                 self._models_dir.mkdir(parents=True, exist_ok=True)
-                # Set user agent to avoid 403 forbidden on some systems
                 opener = urllib.request.build_opener()
-                opener.addheaders = [('User-agent', 'Mozilla/5.0')]
-                urllib.request.install_opener(opener)
-                urllib.request.urlretrieve(MODEL_URL, self._model_path)
+                opener.addheaders = [("User-agent", "Mozilla/5.0")]
+                tmp_path = self._model_path.with_suffix(".onnx.part")
+                with opener.open(MODEL_URL, timeout=30) as resp, open(tmp_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(65536)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                tmp_path.replace(self._model_path)
                 logger.info("Download complete.")
 
             opts = ort.SessionOptions()
@@ -65,8 +67,8 @@ class VAD:
             opts.log_severity_level = 3  # Error only
 
             self._session = ort.InferenceSession(
-                str(self._model_path), 
-                sess_options=opts, 
+                str(self._model_path),
+                sess_options=opts,
                 providers=["CPUExecutionProvider"]
             )
             logger.info("Silero VAD initialized (threshold=%.2f)", self._threshold)
@@ -106,16 +108,16 @@ class VAD:
             self._buffer = self._buffer[WINDOW_SIZE_SAMPLES:]
 
             prob = self._inference(window)
-            
+
             if prob > self._threshold:
                 has_speech_in_chunk = True
-        
+
         self._is_speech = has_speech_in_chunk
         return self._is_speech
 
     def _inference(self, window: np.ndarray) -> float:
         # Prepare inputs: input [1, N], sr [1], h, c
-        x = window[np.newaxis, :] 
+        x = window[np.newaxis, :]
         sr = np.array([self._sample_rate], dtype=np.int64)
 
         ort_inputs = {

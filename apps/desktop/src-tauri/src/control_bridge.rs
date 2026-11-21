@@ -864,13 +864,16 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
 
         // Phase B: Local Model Packs (EF-008)
         "pack_status" => (None, 10, false),
-        "pack_install" => (None, 180, false),
+        "pack_install" => (None, 600, false),
         "pack_cancel" => (None, 10, false),
-        "pack_retry" => (None, 180, false),
+        "pack_retry" => (None, 600, false),
         "pack_check_readiness" => (None, 15, false),
 
         // Phase B: Provider Manifests (EF-003 / EF-022)
         "get_provider_manifests" => (None, 10, false),
+
+        // Audio Input Probe
+        "audio_probe" => (None, 10, false),
 
         // Phase B: Summary Streaming & Cancellation (EF-022)
         "summary_cancel" => (None, 10, false),
@@ -2394,11 +2397,12 @@ mod tests {
             ("conversation_export", None, 30, false),
             ("conversation_import", None, 30, false),
             ("pack_status", None, 10, false),
-            ("pack_install", None, 180, false),
+            ("pack_install", None, 600, false),
             ("pack_cancel", None, 10, false),
-            ("pack_retry", None, 180, false),
+            ("pack_retry", None, 600, false),
             ("pack_check_readiness", None, 15, false),
             ("get_provider_manifests", None, 10, false),
+            ("audio_probe", None, 10, false),
             ("summary_cancel", None, 10, false),
         ];
         for (kind, terminal, seconds, accepts_hf_token) in table {

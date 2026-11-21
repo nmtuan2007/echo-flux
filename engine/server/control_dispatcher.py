@@ -170,6 +170,7 @@ class ControlCommandDispatcher:
 
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._pack_cancels: Dict[str, threading.Event] = {}
+        self._pack_progress: Dict[str, Dict[str, Any]] = {}
 
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {
             # Context Profiles
@@ -196,6 +197,8 @@ class ControlCommandDispatcher:
             "pack_check_readiness": self._handle_pack_check_readiness,
             # Provider Manifests
             "get_provider_manifests": self._handle_get_provider_manifests,
+            # Audio Input Probe
+            "audio_probe": self._handle_audio_probe,
             # Manual Assist
             "request_assist": self._handle_request_assist,
             "request_suggestion": self._handle_request_assist,
@@ -566,14 +569,20 @@ class ControlCommandDispatcher:
         }
 
     async def _handle_conversation_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        conversations = await asyncio.to_thread(self.conversation_repo.list_conversations)
+        repo = self.conversation_repo
+        if hasattr(repo, "list_conversations_with_stats"):
+            items = await asyncio.to_thread(repo.list_conversations_with_stats)
+        else:
+            convs = await asyncio.to_thread(repo.list_conversations)
+            items = [(c, 0, False) for c in convs]
+
         offset = payload.get("offset")
         limit = payload.get("limit")
 
         if isinstance(offset, int) and offset > 0:
-            conversations = conversations[offset:]
+            items = items[offset:]
         if isinstance(limit, int) and limit > 0:
-            conversations = conversations[:limit]
+            items = items[:limit]
 
         return {
             "conversations": [
@@ -584,8 +593,10 @@ class ControlCommandDispatcher:
                     "updated_at_ms": c.updated_at_ms,
                     "source_labels": dict(c.source_labels),
                     "import_id": c.import_id,
+                    "message_count": msg_count,
+                    "has_summary": has_summary,
                 }
-                for c in conversations
+                for c, msg_count, has_summary in items
             ]
         }
 
@@ -610,16 +621,24 @@ class ControlCommandDispatcher:
         attached = await asyncio.to_thread(
             self.profile_service.attached_profile_ids, conversation_id
         )
+        latest_summary = (
+            await asyncio.to_thread(self.conversation_repo.latest_summary, conversation_id)
+            if hasattr(self.conversation_repo, "latest_summary")
+            else None
+        )
 
         messages_list = []
+        assist_results_list = []
         if include_messages:
             msgs = await asyncio.to_thread(self.conversation_repo.list_messages, conversation_id)
+            labels = dict(conversation.source_labels)
             messages_list = [
                 {
                     "message_id": m.message_id,
                     "sequence": m.sequence,
                     "session_id": m.session_id,
                     "source": m.source,
+                    "speaker_label": labels.get(m.source),
                     "text": m.text,
                     "translation": m.translation,
                     "is_final": m.is_final,
@@ -628,6 +647,44 @@ class ControlCommandDispatcher:
                 }
                 for m in msgs
             ]
+            if hasattr(self.conversation_repo, "list_assist_results"):
+                assists = await asyncio.to_thread(
+                    self.conversation_repo.list_assist_results, conversation_id
+                )
+                assist_results_list = [
+                    {
+                        "assist_id": a.assist_id,
+                        "target_message_id": a.target_message_id,
+                        "suggested_replies": [
+                            {
+                                "strategy": r.strategy,
+                                "text": r.text,
+                                **({"reasoning": r.reasoning} if r.reasoning else {}),
+                            }
+                            for r in a.suggested_replies
+                        ],
+                        "clarifying_questions": [
+                            {
+                                "question": q.question,
+                                **({"purpose": q.purpose} if q.purpose else {}),
+                            }
+                            for q in a.clarifying_questions
+                        ],
+                        "provider_id": a.provider.provider_id if a.provider else None,
+                        "created_at_ms": a.created_at_ms,
+                    }
+                    for a in assists
+                ]
+
+        summary_dict = (
+            {
+                "summary_id": latest_summary.summary_id,
+                "summary_markdown": latest_summary.summary_markdown,
+                "created_at_ms": latest_summary.created_at_ms,
+            }
+            if latest_summary is not None
+            else None
+        )
 
         conv_dict = {
             "conversation_id": conversation.conversation_id,
@@ -650,6 +707,8 @@ class ControlCommandDispatcher:
             ],
             "attached_profile_ids": attached,
             "messages": messages_list,
+            "assist_results": assist_results_list,
+            "summary": summary_dict,
             **conv_dict,
         }
 
@@ -896,17 +955,49 @@ class ControlCommandDispatcher:
         }
 
         if pack_id and status_list:
-            return {"pack": status_list[0], "hardware": hw_info, **status_list[0]}
-        return {"packs": status_list, "hardware": hw_info}
+            progress = self._pack_progress.get(pack_id)
+            return {
+                "pack": status_list[0],
+                "hardware": hw_info,
+                **({"download_progress": progress} if progress is not None else {}),
+                **status_list[0],
+            }
+        active_downloads = {
+            k: v for k, v in self._pack_progress.items() if v.get("active")
+        }
+        return {
+            "packs": status_list,
+            "hardware": hw_info,
+            **({"active_downloads": active_downloads} if active_downloads else {}),
+        }
 
     async def _handle_pack_install(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         pack_id = payload.get("pack_id")
         if not isinstance(pack_id, str) or not pack_id:
             raise DispatcherError("invalid_payload", "pack_id is required")
         version = payload.get("version")
+        raw_src = payload.get("source_lang")
+        src_lang = raw_src if isinstance(raw_src, str) and raw_src.strip() and raw_src.lower() != "auto" else "en"
+        raw_tgt = payload.get("target_lang")
+        tgt_lang = raw_tgt if isinstance(raw_tgt, str) and raw_tgt.strip() and raw_tgt.lower() != "auto" else "vi"
 
         lowered = pack_id.lower()
         models_dir = Config().models_dir
+        cancel_event = threading.Event()
+        self._pack_cancels[pack_id] = cancel_event
+        self._pack_progress[pack_id] = {"active": True, "percent": 0, "model": pack_id}
+
+        from engine.core.progress import set_progress_callback
+
+        def _on_progress(model_name: str, percent: int) -> None:
+            if cancel_event.is_set():
+                raise InstallCancelledError("cancelled")
+            self._pack_progress[pack_id] = {
+                "active": True,
+                "percent": max(0, min(100, int(percent))),
+                "model": model_name or pack_id,
+            }
+
         if "whisper" in lowered or lowered in ("base", "tiny", "small", "medium", "large"):
             size = "base"
             if "tiny" in lowered:
@@ -920,37 +1011,55 @@ class ControlCommandDispatcher:
 
             from faster_whisper.utils import download_model
 
-            out_path = await asyncio.to_thread(download_model, size, output_dir=str(models_dir))
-            return {
-                "installed": True,
-                "pack_id": pack_id,
-                "version": "1.0.0",
-                "path": str(out_path),
-                "active": True,
-            }
+            set_progress_callback(_on_progress)
+            try:
+                out_path = await asyncio.to_thread(download_model, size, output_dir=str(models_dir))
+                if cancel_event.is_set():
+                    raise InstallCancelledError("cancelled")
+                return {
+                    "installed": True,
+                    "pack_id": pack_id,
+                    "version": "1.0.0",
+                    "path": str(out_path),
+                    "active": True,
+                }
+            except InstallCancelledError:
+                raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
+            finally:
+                set_progress_callback(None)
+                self._pack_cancels.pop(pack_id, None)
+                self._pack_progress.pop(pack_id, None)
 
         if "marian" in lowered or "opus" in lowered:
             from engine.translation.marian_backend import MarianBackend
 
             backend = MarianBackend()
-            await asyncio.to_thread(
-                backend.load_model,
-                {"translation.source_lang": "en", "translation.target_lang": "vi"},
-            )
-            out_path = str(backend._ct2_model_path or models_dir)
-            with contextlib.suppress(Exception):
-                backend.unload_model()
-            return {
-                "installed": True,
-                "pack_id": pack_id,
-                "version": "1.0.0",
-                "path": out_path,
-                "active": True,
-            }
+            set_progress_callback(_on_progress)
+            try:
+                await asyncio.to_thread(
+                    backend.load_model,
+                    {"translation.source_lang": src_lang, "translation.target_lang": tgt_lang},
+                )
+                if cancel_event.is_set():
+                    raise InstallCancelledError("cancelled")
+                out_path = str(backend._ct2_model_path or models_dir)
+                return {
+                    "installed": True,
+                    "pack_id": pack_id,
+                    "version": "1.0.0",
+                    "path": out_path,
+                    "active": True,
+                }
+            except InstallCancelledError:
+                raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
+            finally:
+                set_progress_callback(None)
+                with contextlib.suppress(Exception):
+                    backend.unload_model()
+                self._pack_cancels.pop(pack_id, None)
+                self._pack_progress.pop(pack_id, None)
 
         installer = self._get_installer()
-        cancel_event = threading.Event()
-        self._pack_cancels[pack_id] = cancel_event
 
         try:
             installed = await asyncio.to_thread(
@@ -972,6 +1081,7 @@ class ControlCommandDispatcher:
             raise DispatcherError(err.code, err.detail or err.code) from None
         finally:
             self._pack_cancels.pop(pack_id, None)
+            self._pack_progress.pop(pack_id, None)
 
     async def _handle_pack_cancel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         pack_id = payload.get("pack_id")
@@ -1063,6 +1173,73 @@ class ControlCommandDispatcher:
 
         manifests_list = [_serialize_manifest(m) for m in manifests]
         return {"manifests": manifests_list}
+
+    # --- 4b. Audio Input Probe ----------------------------------------------------------------
+
+    async def _handle_audio_probe(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self._engine is not None and getattr(self._engine, "_running", False):
+            raise DispatcherError("engine_busy", "Stop the active session before testing audio")
+
+        audio_source = payload.get("audio_source", "microphone")
+        if audio_source not in ("microphone", "system", "both"):
+            raise DispatcherError("invalid_payload", "audio_source must be microphone, system, or both")
+
+        mic_id = payload.get("mic_device_id")
+        speaker_id = payload.get("speaker_device_id")
+        duration_ms = payload.get("duration_ms", 300)
+        if not isinstance(duration_ms, int) or duration_ms < 100 or duration_ms > 1500:
+            duration_ms = 300
+
+        def _probe_one(kind: str, device_id: Optional[str]) -> Dict[str, Any]:
+            import math
+
+            import numpy as np
+
+            cfg = {"sample_rate": 16000, "channels": 1, "chunk_ms": 20}
+            inp = None
+            try:
+                if kind == "mic":
+                    from engine.audio.microphone import MicrophoneInput
+
+                    dev = int(device_id) if device_id else None
+                    inp = MicrophoneInput(cfg, device_id=dev)
+                else:
+                    from engine.audio.system_audio import SystemAudioInput
+
+                    inp = SystemAudioInput(cfg, device_id=device_id or None)
+
+                inp.start()
+                deadline = time.monotonic() + (duration_ms / 1000.0)
+                squares = 0.0
+                samples = 0
+                while time.monotonic() < deadline:
+                    chunk = inp.read_chunk()
+                    if chunk:
+                        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float64) / 32768.0
+                        if arr.size > 0:
+                            squares += float(np.sum(arr * arr))
+                            samples += int(arr.size)
+                rms = math.sqrt(squares / samples) if samples > 0 else 0.0
+                # Scale RMS so conversational speech (~0.05-0.2) reads cleanly on 0..1 meter.
+                level = round(min(1.0, rms * 5.0), 3)
+                return {"ok": True, "level": level, "rms": round(rms, 5), "samples": samples}
+            except Exception as exc:
+                return {"ok": False, "level": 0.0, "error": type(exc).__name__}
+            finally:
+                if inp is not None:
+                    with contextlib.suppress(Exception):
+                        inp.stop()
+
+        results: Dict[str, Any] = {}
+        if audio_source in ("microphone", "both"):
+            results["mic"] = await asyncio.to_thread(
+                _probe_one, "mic", str(mic_id) if mic_id else None
+            )
+        if audio_source in ("system", "both"):
+            results["system"] = await asyncio.to_thread(
+                _probe_one, "system", str(speaker_id) if speaker_id else None
+            )
+        return {"streams": results}
 
     # --- 5. Manual Assist ---------------------------------------------------------------------
 
@@ -1235,11 +1412,17 @@ class ControlCommandDispatcher:
 
     async def _handle_summary_cancel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         target_id = payload.get("request_id")
-        if not target_id or not isinstance(target_id, str):
-            return {"cancelled": False}
+        conversation_id = payload.get("conversation_id")
 
-        task = self._active_tasks.get(target_id)
-        if task and not task.done():
-            task.cancel()
-            return {"cancelled": True, "request_id": target_id}
+        if target_id and isinstance(target_id, str):
+            task = self._active_tasks.get(target_id)
+            if task and not task.done():
+                task.cancel()
+                return {"cancelled": True, "request_id": target_id}
+
+        if self._engine is not None and hasattr(self._engine, "cancel_summary"):
+            cid = conversation_id if isinstance(conversation_id, str) and conversation_id else None
+            if self._engine.cancel_summary(cid):
+                return {"cancelled": True, "request_id": target_id}
+
         return {"cancelled": False, "request_id": target_id}

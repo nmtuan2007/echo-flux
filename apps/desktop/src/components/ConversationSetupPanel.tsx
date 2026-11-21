@@ -31,14 +31,14 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
     setPendingTitle,
   } = useEngineStore();
 
-  const [title, setTitle] = useState(pendingTitle || `Session ${new Date().toLocaleString()}`);
+  const [title, setTitle] = useState(pendingTitle);
   const [micLabel, setMicLabel] = useState(sourceLabels.mic || "Me");
   const [systemLabel, setSystemLabel] = useState(sourceLabels.system || "Others");
 
   useEffect(() => {
     if (isOpen) {
       void loadProfiles();
-      setTitle(pendingTitle || `Session ${new Date().toLocaleString()}`);
+      setTitle(pendingTitle);
       setMicLabel(sourceLabels.mic || "Me");
       setSystemLabel(sourceLabels.system || "Others");
     }
@@ -75,19 +75,29 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
     }
   };
 
-  const handleStart = (e: React.FormEvent) => {
-    e.preventDefault();
+  const applySetupDraft = (): ConversationSetupData => {
     const finalLabels = {
       mic: micLabel.trim().slice(0, MAX_LABEL_CHARS) || "Me",
       system: systemLabel.trim().slice(0, MAX_LABEL_CHARS) || "Others",
     };
+    const finalTitle = title.trim().slice(0, MAX_TITLE_CHARS);
     setSourceLabels(finalLabels);
-    setPendingTitle(title.trim().slice(0, MAX_TITLE_CHARS));
-    onStart({
-      title: title.trim().slice(0, MAX_TITLE_CHARS),
+    setPendingTitle(finalTitle);
+    return {
+      title: finalTitle,
       sourceLabels: finalLabels,
       attachedProfileIds,
-    });
+    };
+  };
+
+  const handleSaveOnly = () => {
+    applySetupDraft();
+    onClose();
+  };
+
+  const handleStart = (e: React.FormEvent) => {
+    e.preventDefault();
+    onStart(applySetupDraft());
   };
 
   return (
@@ -115,8 +125,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
               value={title}
               maxLength={MAX_TITLE_CHARS}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Q4 Strategy Review"
-              required
+              placeholder="e.g. Q4 Strategy Review (auto-titled if blank)"
             />
           </div>
 
@@ -208,8 +217,11 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
             <button type="button" className="btn btn-secondary" onClick={onClose}>
               Cancel
             </button>
+            <button type="button" className="btn btn-secondary" onClick={handleSaveOnly}>
+              Save Setup
+            </button>
             <button type="submit" className="btn btn-primary btn-large">
-              Start Session 🚀
+              Save &amp; Start 🚀
             </button>
           </div>
         </form>

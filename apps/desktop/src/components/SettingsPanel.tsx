@@ -46,13 +46,18 @@ export function SettingsPanel() {
     availableMics,
     availableSpeakers,
     requestDeviceList,
+    probeAudioInput,
+    audioProbeLoading,
+    audioProbeResult,
     refreshServiceCredentials,
+    loadProviderManifests,
   } = useEngineStore();
 
   // Auto-fetch device and model lists when connected.
   useEffect(() => {
     if (connected) {
       requestDeviceList();
+      void loadProviderManifests();
     }
   }, [connected]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -136,20 +141,54 @@ export function SettingsPanel() {
 
         <div className="settings-field settings-field-row">
           <label>Device List</label>
-          <button
-            className="btn-text"
-            onClick={requestDeviceList}
-            disabled={running || !connected}
-            title={!connected ? "Connect the engine first" : "Re-enumerate audio devices"}
-          >
-            ↻ Refresh
-          </button>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <button
+              className="btn-text"
+              onClick={() => void probeAudioInput()}
+              disabled={running || !connected || audioProbeLoading}
+              title={!connected ? "Connect the engine first" : "Sample 350ms of input to verify signal"}
+            >
+              {audioProbeLoading ? "Testing..." : "🎙 Check Audio"}
+            </button>
+            <button
+              className="btn-text"
+              onClick={requestDeviceList}
+              disabled={running || !connected}
+              title={!connected ? "Connect the engine first" : "Re-enumerate audio devices"}
+            >
+              ↻ Refresh
+            </button>
+          </div>
         </div>
+
+        {audioProbeResult && (
+          <div className="audio-probe-panel" role="status" aria-label="Audio signal check">
+            {Object.entries(audioProbeResult).map(([stream, info]) => {
+              const pct = Math.round((info.level || 0) * 100);
+              return (
+                <div key={stream} className="audio-probe-row">
+                  <span className="audio-probe-label">
+                    {stream === "mic" ? "Mic" : "System"}
+                  </span>
+                  <div className="audio-probe-meter">
+                    <div className="audio-probe-fill" style={{ width: `${pct}%` }} />
+                  </div>
+                  <span className={`audio-probe-status ${info.ok ? "" : "error"}`}>
+                    {!info.ok
+                      ? `Error (${info.error || "failed"})`
+                      : pct > 0
+                        ? `Signal OK (${pct}%)`
+                        : "Silence (0%)"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {config.audioSource === "both" && (
           <p className="settings-note">
-            Both mic and speaker audio are mixed at 50% gain each before being sent to Whisper.
-            Make sure both devices are selected correctly to avoid clipping.
+            Microphone and speaker loopback run as two independent streams so your speech and remote participants stay cleanly separated.
           </p>
         )}
 

@@ -62,7 +62,6 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const deleteServiceSecret = useEngineStore((s) => s.deleteServiceSecret);
   const testServiceConnection = useEngineStore((s) => s.testServiceConnection);
   const consent = useEngineStore((s) => s.consent);
-  const hasConsentedToCloud = useEngineStore((s) => s.hasConsentedToCloud);
   const acceptCloudConsent = useEngineStore((s) => s.acceptCloudConsent);
 
   const id = `service-${service}`;
@@ -81,7 +80,7 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const blocked = Object.keys(issues).length > 0;
   const isCloudProvider = Boolean(provider && provider.protocolFamily !== "local");
   const serviceConsented = Boolean(
-    consent?.[service === "assistant" ? "assistant" : service] || hasConsentedToCloud,
+    consent?.[service === "assistant" ? "assistant" : service],
   );
   const needsCloudConsent = active && isCloudProvider && !serviceConsented;
 

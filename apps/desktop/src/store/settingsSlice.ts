@@ -535,8 +535,44 @@ export const PROVIDER_CATALOG: readonly ProviderManifest[] = [
   }),
 ];
 
+let runtimeCatalog: readonly ProviderManifest[] = PROVIDER_CATALOG;
+
+function normalizeManifest(raw: any): ProviderManifest | null {
+  if (!raw || typeof raw.provider_id !== "string") return null;
+  const fields: ManifestField[] = Array.isArray(raw.fields)
+    ? raw.fields.map((f: any) => ({
+        key: String(f.key),
+        label: String(f.label || f.key),
+        fieldType: (f.field_type || "string") as FieldType,
+        default: f.default ?? null,
+        required: Boolean(f.required),
+        advanced: Boolean(f.advanced),
+        secret: Boolean(f.secret),
+        choices: Array.isArray(f.choices) ? f.choices.map(String) : [],
+        minimum: typeof f.minimum === "number" ? f.minimum : null,
+        maximum: typeof f.maximum === "number" ? f.maximum : null,
+        description: String(f.description || ""),
+        appliesTo: Array.isArray(f.applies_to) ? f.applies_to : [],
+      }))
+    : [];
+  return {
+    providerId: raw.provider_id,
+    displayName: String(raw.display_name || raw.provider_id),
+    capabilities: Array.isArray(raw.capabilities) ? raw.capabilities : [],
+    protocolFamily: raw.protocol_family,
+    recommendedEndpoint: String(raw.recommended_endpoint || ""),
+    recommendedModel: String(raw.recommended_model || ""),
+    endpointEditable: raw.endpoint_editable !== false,
+    requiresEndpoint: Boolean(raw.requires_endpoint),
+    modelSelectable: raw.model_selectable !== false,
+    fields,
+    ...(raw.protocol_profiles ? { protocolProfiles: raw.protocol_profiles } : {}),
+    ...(raw.profile_field ? { profileField: raw.profile_field } : {}),
+  };
+}
+
 export function providersFor(capability: ProviderCapability): ProviderManifest[] {
-  return PROVIDER_CATALOG.filter((m) => m.capabilities.includes(capability));
+  return runtimeCatalog.filter((m) => m.capabilities.includes(capability));
 }
 
 export function findProvider(
@@ -962,10 +998,18 @@ export interface SettingsSlice {
   setHasConsentedToCloud: (consented: boolean) => void;
   acceptCloudConsent: (consents?: Partial<CloudConsentState>) => void;
   revokeCloudConsent: () => void;
+  manifestsLoaded: boolean;
+  loadProviderManifests: () => Promise<void>;
   checkPackReadiness: (capability?: "stt" | "translation") => Promise<void>;
-  installLocalPack: (packId: string) => Promise<boolean>;
+  installLocalPack: (
+    packId: string,
+    options?: { sourceLang?: string; targetLang?: string },
+  ) => Promise<boolean>;
   cancelLocalPack: (packId: string) => Promise<boolean>;
-  retryLocalPack: (packId: string) => Promise<boolean>;
+  retryLocalPack: (
+    packId: string,
+    options?: { sourceLang?: string; targetLang?: string },
+  ) => Promise<boolean>;
 }
 
 export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get) => {
@@ -1079,6 +1123,7 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
     packStatus: {},
     hardwareInfo: null,
     isPackChecking: false,
+    manifestsLoaded: false,
 
     setActiveView: (view) => {
       const { activeView, transport, config } = get();
@@ -1394,6 +1439,25 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       }));
     },
 
+    loadProviderManifests: async () => {
+      try {
+        const res = await forwardCommand({ type: "get_provider_manifests" });
+        const msg = res.messages.find((m) => Array.isArray((m as any).manifests));
+        const rawList = (msg as any)?.manifests;
+        if (Array.isArray(rawList) && rawList.length > 0) {
+          const parsed = rawList
+            .map(normalizeManifest)
+            .filter((m): m is ProviderManifest => m !== null);
+          if (parsed.length > 0) {
+            runtimeCatalog = parsed;
+            set({ manifestsLoaded: true });
+          }
+        }
+      } catch {
+        // Keep built-in PROVIDER_CATALOG fallback
+      }
+    },
+
     checkPackReadiness: async (capability?: "stt" | "translation") => {
       set({ isPackChecking: true });
       try {
@@ -1452,31 +1516,56 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       }
     },
 
-    installLocalPack: async (packId: string) => {
+    installLocalPack: async (
+      packId: string,
+      options?: { sourceLang?: string; targetLang?: string },
+    ) => {
+      set({ downloading: true, downloadModel: packId, downloadPercent: 0 });
+      const pollTimer = setInterval(async () => {
+        try {
+          const res = await forwardCommand({ type: "pack_status", pack_id: packId });
+          const first = res.messages[0] as any;
+          const prog = first?.download_progress;
+          if (prog && typeof prog.percent === "number") {
+            set({
+              downloadPercent: prog.percent,
+              ...(typeof prog.model === "string" && prog.model ? { downloadModel: prog.model } : {}),
+            });
+          }
+        } catch {}
+      }, 600);
       try {
-        await forwardCommand({ type: "pack_install", pack_id: packId });
+        await forwardCommand({
+          type: "pack_install",
+          pack_id: packId,
+          ...(options?.sourceLang ? { source_lang: options.sourceLang } : {}),
+          ...(options?.targetLang ? { target_lang: options.targetLang } : {}),
+        });
+        set({ downloadPercent: 100 });
         return true;
       } catch {
         return false;
+      } finally {
+        clearInterval(pollTimer);
+        set({ downloading: false, downloadModel: "", downloadPercent: 0 });
       }
     },
 
     cancelLocalPack: async (packId: string) => {
       try {
         await forwardCommand({ type: "pack_cancel", pack_id: packId });
+        set({ downloading: false, downloadModel: "", downloadPercent: 0 });
         return true;
       } catch {
         return false;
       }
     },
 
-    retryLocalPack: async (packId: string) => {
-      try {
-        await forwardCommand({ type: "pack_retry", pack_id: packId });
-        return true;
-      } catch {
-        return false;
-      }
+    retryLocalPack: async (
+      packId: string,
+      options?: { sourceLang?: string; targetLang?: string },
+    ) => {
+      return get().installLocalPack(packId, options);
     },
   };
 };

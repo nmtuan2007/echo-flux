@@ -22,7 +22,7 @@ import {
 } from "../lib/engineBridge";
 import { LEGACY_CREDENTIALS, LEGACY_SECRET_FIELDS } from "../lib/secureStore";
 import type { EngineSliceCreator, EngineState } from "./engineStore";
-import { isSecretKeyName, publicConfigSnapshot } from "./settingsSlice";
+import { findProvider, isSecretKeyName, publicConfigSnapshot } from "./settingsSlice";
 import type {
   AudioDeviceInfo,
   EngineConfig,
@@ -183,6 +183,7 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   pack_retry: null,
   pack_check_readiness: null,
   get_provider_manifests: null,
+  audio_probe: null,
   test_connection: "test_connection_result",
 };
 
@@ -216,6 +217,7 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   pack_retry: "Retry pack",
   pack_check_readiness: "Check pack readiness",
   get_provider_manifests: "Get provider manifests",
+  audio_probe: "Audio probe",
   test_connection: "Test connection",
 };
 
@@ -258,9 +260,11 @@ export interface SessionSlice {
   downloadModel: string;
   downloadPercent: number;
 
-  // Audio device lists
+  // Audio device lists & inline signal probe
   availableMics: AudioDeviceInfo[];
   availableSpeakers: AudioDeviceInfo[];
+  audioProbeLoading: boolean;
+  audioProbeResult: Record<string, { ok: boolean; level: number; error?: string }> | null;
 
   // Global Error Toast
   appError: string | null;
@@ -274,6 +278,7 @@ export interface SessionSlice {
   stopPipeline: () => void;
   togglePipeline: () => void;
   requestDeviceList: () => void;
+  probeAudioInput: () => Promise<void>;
   clearAppError: () => void;
 }
 
@@ -369,7 +374,13 @@ export const createSessionSlice =
       }
       // Replies for an engine run that has since been replaced describe nothing current.
       if (gen !== generation) return;
-      for (const message of result.messages) deps.routeMessage(message);
+      const skipStreamedChunks = type === "request_summary" && get().summaryStreamedViaEvent;
+      for (const message of result.messages) {
+        if (skipStreamedChunks && message.type === "llm_chunk" && message.is_error !== true) {
+          continue;
+        }
+        deps.routeMessage(message);
+      }
 
       const terminal = TERMINAL_REPLY[type];
       const completed =
@@ -502,6 +513,9 @@ export const createSessionSlice =
           return;
         }
         if (frame.op === "event") {
+          if (frame.event.type === "llm_chunk" && frame.event.is_error !== true) {
+            set({ summaryStreamedViaEvent: true });
+          }
           deps.routeMessage(frame.event);
         } else if (frame.op === "error") {
           set({ appError: describeTransportError(frame.code) });
@@ -546,8 +560,21 @@ export const createSessionSlice =
     };
 
     const startSecure = async () => {
-      const { connected, isToggling } = get();
+      const { connected, isToggling, services: currentServices, consent } = get();
       if (!connected || isToggling) return;
+
+      for (const cap of ["stt", "translation"] as const) {
+        const svc = currentServices?.[cap];
+        const active = cap === "stt" || Boolean(svc?.enabled);
+        const manifest = svc ? findProvider(cap, svc.providerId) : undefined;
+        if (active && manifest && manifest.protocolFamily !== "local" && !consent?.[cap]) {
+          set({
+            appError: `Cloud consent is required for ${cap === "stt" ? "Speech-to-Text" : "Translation"} (${manifest.displayName}). Grant permission in Settings before starting.`,
+          });
+          return;
+        }
+      }
+
       const gen = generation;
       set({ isToggling: true, activeView: "transcript" });
 
@@ -562,6 +589,7 @@ export const createSessionSlice =
         engineConversationId,
         pendingTitle,
         sourceLabels,
+        attachedProfileIds,
       } = get();
       const credentials: Record<string, StartCredentialRef> = {};
       if (secretStatus.llmApiKey) {
@@ -598,6 +626,9 @@ export const createSessionSlice =
           system: sourceLabels.system || "Others",
         };
       }
+      if (attachedProfileIds.length > 0) {
+        publicConfig.attached_profile_ids = attachedProfileIds;
+      }
       await runControl(gen, () => forwardStart(publicConfig, credentials));
     };
 
@@ -613,6 +644,8 @@ export const createSessionSlice =
       downloadPercent: 0,
       availableMics: [],
       availableSpeakers: [],
+      audioProbeLoading: false,
+      audioProbeResult: null,
       appError: null,
 
       bootstrapEngine: async (options = {}) => {
@@ -692,6 +725,26 @@ export const createSessionSlice =
 
       requestDeviceList: () => {
         connectedSocket()?.send(deps.commands.listDevices());
+      },
+
+      probeAudioInput: async () => {
+        const { connected, running, audioProbeLoading, config } = get();
+        if (!connected || running || audioProbeLoading) return;
+        set({ audioProbeLoading: true });
+        try {
+          const res = await forwardCommand({
+            type: "audio_probe",
+            audio_source: config.audioSource,
+            mic_device_id: config.micDeviceId || null,
+            speaker_device_id: config.speakerDeviceId || null,
+            duration_ms: 350,
+          });
+          const dataMsg = res.messages.find((m) => (m as any).streams !== undefined) as any;
+          const streams = dataMsg?.streams || null;
+          set({ audioProbeResult: streams, audioProbeLoading: false });
+        } catch {
+          set({ audioProbeLoading: false });
+        }
       },
 
       clearAppError: () => {

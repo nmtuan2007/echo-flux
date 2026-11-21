@@ -1,15 +1,29 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
-import { streamRank } from "../store/transcriptSlice";
+import { assistKeyOf, isAssistantConfigured, streamRank } from "../store/transcriptSlice";
 
 type FontSize = "sm" | "md" | "lg";
 
 export const OverlayPanel: React.FC = () => {
-  const { config, services, entries, partials, running, sourceLabels } = useEngineStore();
+  const {
+    config,
+    services,
+    entries,
+    partials,
+    running,
+    connected,
+    sourceLabels,
+    engineConversationId,
+    suggestionLoading,
+    requestAssist,
+  } = useEngineStore();
+  const assistantEnabled = useEngineStore(isAssistantConfigured);
   const [isLocked, setIsLocked] = useState(false);
   const [fontSize, setFontSize] = useState<FontSize>("md");
   const [highOpacity, setHighOpacity] = useState(false);
+  const [dismissedAssistKey, setDismissedAssistKey] = useState<string | null>(null);
+  const [copiedReplyIdx, setCopiedReplyIdx] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -91,6 +105,54 @@ export const OverlayPanel: React.FC = () => {
     return source || "";
   };
 
+  const assistTarget = useMemo(() => {
+    const finals = entries.filter((e) => e.isFinal && e.text.trim());
+    if (finals.length === 0) return null;
+    return [...finals].reverse().find((e) => e.source !== "mic") || finals[finals.length - 1];
+  }, [entries]);
+
+  const activeAssistEntry = useMemo(() => {
+    if (!assistantEnabled) return null;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const key = assistKeyOf(e);
+      if (suggestionLoading[key] || e.assist) return e;
+    }
+    return null;
+  }, [assistantEnabled, entries, suggestionLoading]);
+
+  const activeAssistKey = activeAssistEntry ? assistKeyOf(activeAssistEntry) : null;
+  const activeAssistLoading = activeAssistKey ? suggestionLoading[activeAssistKey] === true : false;
+  const showAssistDrawer = Boolean(
+    assistantEnabled &&
+      activeAssistEntry &&
+      activeAssistKey &&
+      activeAssistKey !== dismissedAssistKey &&
+      (activeAssistLoading || activeAssistEntry.assist),
+  );
+
+  const canRequestOverlayAssist = Boolean(
+    assistantEnabled &&
+      assistTarget &&
+      connected &&
+      (assistTarget.conversationId ?? engineConversationId) &&
+      !suggestionLoading[assistKeyOf(assistTarget)],
+  );
+
+  const handleTriggerAssist = () => {
+    if (!assistTarget) return;
+    setDismissedAssistKey(null);
+    requestAssist(assistTarget.id);
+  };
+
+  const handleCopyOverlayReply = async (text: string, idx: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedReplyIdx(idx);
+      setTimeout(() => setCopiedReplyIdx(null), 1200);
+    } catch {}
+  };
+
   return (
     <div
       className={`overlay-wrapper overlay-font-${fontSize} ${isLocked ? "locked" : ""} ${highOpacity ? "overlay-opaque" : ""}`}
@@ -121,6 +183,17 @@ export const OverlayPanel: React.FC = () => {
             >
               {highOpacity ? "90%" : "60%"}
             </button>
+            {assistantEnabled && (
+              <button
+                type="button"
+                className="overlay-btn overlay-btn-assist"
+                onClick={handleTriggerAssist}
+                disabled={!canRequestOverlayAssist}
+                title="Suggest reply for latest speaker (Ctrl+Shift+S)"
+              >
+                ✨ Assist
+              </button>
+            )}
             <button
               type="button"
               className="overlay-btn overlay-btn-primary"
@@ -191,6 +264,44 @@ export const OverlayPanel: React.FC = () => {
           );
         })}
       </div>
+
+      {showAssistDrawer && activeAssistEntry && activeAssistKey && (
+        <div className="overlay-assist-drawer" role="region" aria-label="Quick Assist">
+          <div className="overlay-assist-header">
+            <span className="overlay-assist-title">✨ Quick Assist</span>
+            <button
+              type="button"
+              className="overlay-assist-close"
+              onClick={() => setDismissedAssistKey(activeAssistKey)}
+              title="Dismiss Assist"
+            >
+              ×
+            </button>
+          </div>
+          {activeAssistLoading ? (
+            <div className="overlay-assist-status">Thinking...</div>
+          ) : activeAssistEntry.assist?.error ? (
+            <div className="overlay-assist-error">{activeAssistEntry.assist.error.message}</div>
+          ) : (
+            <div className="overlay-assist-items">
+              {activeAssistEntry.assist?.suggestedReplies.slice(0, 3).map((reply, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="overlay-assist-chip"
+                  onClick={() => void handleCopyOverlayReply(reply.text, idx)}
+                  title="Click to copy reply"
+                >
+                  <span className="overlay-assist-strategy">
+                    {copiedReplyIdx === idx ? "✓ Copied" : reply.strategy || "Reply"}
+                  </span>
+                  <span className="overlay-assist-text">{reply.text}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

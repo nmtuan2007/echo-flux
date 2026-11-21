@@ -1,13 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useEngineStore, Conversation } from "../store/engineStore";
-import {
-  downloadFile,
-  exportAsJSON,
-  exportAsMarkdown,
-  exportAsSRT,
-  exportAsText,
-  type ExportEntry,
-} from "../utils/export";
+import type { ExportEntry } from "../utils/export";
+import { ExportMenu } from "./ExportMenu";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 interface DisplayItem {
@@ -387,27 +381,12 @@ function ConversationDetailView({
         text: m.stt_text || m.text || "",
         translation: m.translation_text ?? m.translation ?? null,
         timestamp: tsMs > 1e12 ? tsMs / 1000 : tsMs,
-        speaker: m.speaker_label || (m.source === "mic" ? "Me" : "Others"),
+        speaker:
+          m.speaker_label ||
+          conv.source_labels?.[m.source] ||
+          (m.source === "mic" ? "Me" : "Others"),
       };
     });
-
-  const baseName = (conv.title || "echoflux-conversation")
-    .toLowerCase()
-    .replace(/[^a-z0-9-_]+/gi, "-")
-    .replace(/^-|-$/g, "") || "echoflux-conversation";
-
-  const handleExportFormat = (fmt: "txt" | "srt" | "md" | "json") => {
-    const items = toExportEntries();
-    if (fmt === "txt") {
-      downloadFile(exportAsText(items), `${baseName}.txt`);
-    } else if (fmt === "srt") {
-      downloadFile(exportAsSRT(items), `${baseName}.srt`);
-    } else if (fmt === "md") {
-      downloadFile(exportAsMarkdown(items, conv.title, summaryMarkdown), `${baseName}.md`, "text/markdown;charset=utf-8");
-    } else {
-      downloadFile(exportAsJSON(items), `${baseName}.json`, "application/json;charset=utf-8");
-    }
-  };
 
   return (
     <div className="history-detail-view">
@@ -422,20 +401,11 @@ function ConversationDetailView({
           </span>
         </div>
         <div className="history-detail-actions">
-          <div className="export-btn-group" role="group" aria-label="Export format">
-            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("txt")} title="Export as TXT">
-              TXT
-            </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("srt")} title="Export as SRT subtitles">
-              SRT
-            </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("md")} title="Export as Markdown">
-              MD
-            </button>
-            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("json")} title="Export as JSON">
-              JSON
-            </button>
-          </div>
+          <ExportMenu
+            entries={toExportEntries()}
+            title={conv.title || "EchoFlux Conversation"}
+            summaryMarkdown={summaryMarkdown || null}
+          />
           <button
             className="btn btn-primary"
             onClick={onLoadToActive}
@@ -472,7 +442,10 @@ function ConversationDetailView({
         ) : (
           <div className="history-detail-messages-list">
             {messages.map((m: any, idx: number) => {
-              const speaker = m.speaker_label || (m.source === "mic" ? "Me" : "Others");
+              const speaker =
+                m.speaker_label ||
+                conv.source_labels?.[m.source] ||
+                (m.source === "mic" ? "Me" : "Others");
               const text = m.stt_text || m.text || "";
               const translation = m.translation_text || m.translation || null;
               return (

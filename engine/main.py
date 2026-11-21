@@ -6,14 +6,12 @@ import os
 import sys
 import threading
 import time
-from collections import deque
 from pathlib import Path
-from queue import Empty, Full, Queue
+from queue import Empty, Queue
 from typing import Any, Dict, Optional, Set
 
 from dotenv import load_dotenv
 
-from engine.asr.base import TranscriptResult
 from engine.conversation.context_profiles import ContextProfileService
 from engine.conversation.models import (
     ConversationRecord,
@@ -278,6 +276,7 @@ def _translation_update_message(event) -> dict:
         "translation": event.translation,
         "timestamp": time.time(),
         "is_final": True,
+        "translation_backend": event.provider_id,
         "revision": event.source_revision,
         "item_id": event.item_key,
     }
@@ -339,19 +338,13 @@ class EchoFluxEngine:
         self._vads = {}
         self._audio_queues = {}
 
-        self._asr_backend = None
-        self._translation_backend = None
-        # Realtime STT session: config resolved per Start, orchestrator owned per session.
         self._session_config = None
         self._stt_session: Optional[STTSessionOrchestrator] = None
         self._last_entry_stamp = 0.0
-        # Composition seams. The desktop path has no transport for cloud STT secrets yet, so
-        # nothing sets the resolver in production and cloud STT Start fails closed.
+        # Composition seams (default to built-in local/cloud builders and ephemeral start secrets).
         self._stt_local_builder = self._build_local_stt
         self._stt_cloud_builder = None
         self._stt_secrets_resolver = None
-        # Translation session for v2 services.translation start configs, with the same
-        # fail-closed seams: nothing delivers cloud Translation secrets to the engine yet.
         self._translation_config = None
         self._translation_session: Optional[TranslationSessionOrchestrator] = None
         self._translation_local_builder = None
@@ -362,12 +355,10 @@ class EchoFluxEngine:
 
         self._running = False
 
-        self._translation_queue = Queue(maxsize=100)
         self._result_queue = Queue()
 
         self._capture_threads = []
         self._process_threads = []
-        self._translation_thread: Optional[threading.Thread] = None
         self._result_task: Optional[asyncio.Task] = None
 
         self._client = None
@@ -383,6 +374,7 @@ class EchoFluxEngine:
         self._summary_service = None
         self._owned_assistant_provider = None
         self._assistant_tasks: Set[asyncio.Task] = set()
+        self._summary_tasks: Dict[str, asyncio.Task] = {}
 
         from engine.server.control_dispatcher import ControlCommandDispatcher
 
@@ -570,10 +562,7 @@ class EchoFluxEngine:
                 "sample_rate": sample_rate,
             })
 
-        # 3. STT session config. Resolved once, before any provider or audio device starts;
-        # the Local provider loads its model when the session starts. A legacy flat start
-        # config (asr.*) maps onto the Local service through the adapter kept until EF-030.
-        self._asr_backend = None
+        # 3. STT session config. Resolved once, before any provider or audio device starts.
         self._session_config = resolve_session_config(
             settings,
             tuple(self._inputs),
@@ -620,13 +609,27 @@ class EchoFluxEngine:
                     model=self._translation_config.primary.model or None,
                 )
 
+            profile_svc = ContextProfileService(repo)
+            raw_profiles = settings.get("attached_profile_ids")
+            selected_profile_ids: Optional[list] = None
+            if isinstance(raw_profiles, list) and raw_profiles:
+                existing = {p.profile_id for p in profile_svc.list_profiles()}
+                valid_ids = [
+                    str(pid) for pid in raw_profiles if isinstance(pid, str) and pid in existing
+                ]
+                if valid_ids:
+                    selected_profile_ids = valid_ids
+                    if not profile_svc.attached_profile_ids(self._active_conversation_id):
+                        with contextlib.suppress(Exception):
+                            profile_svc.attach_profiles(self._active_conversation_id, valid_ids)
+
             session_record = SessionRecord(
                 session_id=session_id,
                 conversation_id=self._active_conversation_id,
                 started_at_ms=time.time() * 1000.0,
                 providers=providers,
             )
-            ContextProfileService(repo).start_session(session_record)
+            profile_svc.start_session(session_record, profile_ids=selected_profile_ids)
             self._active_session_id = session_id
 
         if (
@@ -647,8 +650,6 @@ class EchoFluxEngine:
             with q.mutex:
                 q.queue.clear()
 
-        with self._translation_queue.mutex:
-            self._translation_queue.queue.clear()
         with self._result_queue.mutex:
             self._result_queue.queue.clear()
 
@@ -688,11 +689,6 @@ class EchoFluxEngine:
             pt.start()
             self._process_threads.append(pt)
 
-        if self._translation_backend:
-            self._translation_thread = threading.Thread(target=self._translation_loop, name="TranslationThread")
-            self._translation_thread.daemon = True
-            self._translation_thread.start()
-
         self._result_task = asyncio.create_task(self._broadcast_loop())
 
     async def _stop_pipeline(self):
@@ -711,9 +707,6 @@ class EchoFluxEngine:
 
         for pt in self._process_threads:
             pt.join(timeout=2.0)
-
-        if self._translation_thread:
-            self._translation_thread.join(timeout=2.0)
 
         if self._stt_session is not None:
             # Stops every provider once and queues trailing finals before the broadcast flush.
@@ -735,21 +728,6 @@ class EchoFluxEngine:
         self._ephemeral_secrets.clear()
         self._service_secrets.clear()
 
-        if self._asr_backend:
-            for stream_id in self._inputs:
-                result = self._asr_backend.finalize_current(stream_id)
-                if result:
-                    self._enqueue_asr_result(result)
-                else:
-                    self._enqueue_asr_result(TranscriptResult(
-                        text="",
-                        is_final=True,
-                        language="auto",
-                        stream_id=stream_id
-                    ))
-            self._asr_backend.unload_model()
-            self._asr_backend = None
-
         # Give the broadcast loop a tiny moment to flush the final results
         await asyncio.sleep(0.1)
 
@@ -758,14 +736,8 @@ class EchoFluxEngine:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._result_task
 
-        if self._translation_backend:
-            self._translation_backend.unload_model()
-            self._translation_backend = None
-
-        # NOTE: _llm_assistant is intentionally NOT cleared here.
-        # It holds no audio resources and must remain available so the
-        # "Summarize Meeting" button works after the pipeline has stopped.
-        # It will be re-created on the next pipeline start if config changes.
+        # NOTE: _owned_assistant_provider is intentionally NOT cleared here so
+        # Summarize/Assist continue working after the pipeline stops.
 
         self._inputs.clear()
         self._vads.clear()
@@ -795,176 +767,6 @@ class EchoFluxEngine:
             logger.error("Capture thread [%s] error: %s", stream_id, e, exc_info=True)
         finally:
             logger.info("Capture thread [%s] ended.", stream_id)
-
-    def _process_loop(self, stream_id: str, audio_queue: Queue, vad):
-        logger.info("Processing thread [%s] started.", stream_id)
-        was_speech = False
-        silence_start_time = None
-        has_pending_audio = False
-        pre_speech_buffer = deque(maxlen=3)  # Keep up to ~400-600ms of audio history
-
-        try:
-            while self._running:
-                chunks = []
-                try:
-                    first = audio_queue.get(timeout=0.1)
-                    chunks.append(first)
-                    while not audio_queue.empty() and len(chunks) < 10:
-                        try:
-                            chunks.append(audio_queue.get_nowait())
-                        except Empty:
-                            break
-                except Empty:
-                    if has_pending_audio and silence_start_time is not None:
-                        elapsed = time.time() - silence_start_time
-                        if elapsed >= SILENCE_FINALIZE_DELAY:
-                            self._do_finalize(stream_id)
-                            has_pending_audio = False
-                            silence_start_time = None
-                            was_speech = False
-                    continue
-
-                combined_audio = b"".join(chunks)
-                is_speech = vad.process(combined_audio)
-
-                if is_speech:
-                    if not was_speech:
-                        logger.info("Process [%s]: SPEECH STARTED", stream_id)
-                        if pre_speech_buffer:
-                            historical_audio = b"".join(pre_speech_buffer)
-                            combined_audio = historical_audio + combined_audio
-                            pre_speech_buffer.clear()
-                    silence_start_time = None
-                    has_pending_audio = True
-                    was_speech = True
-
-                    result = self._asr_backend.transcribe_stream(combined_audio, stream_id)
-                    if result:
-                        logger.debug("Process [%s]: Received ASR Result -> '%s' (is_final=%s)", stream_id, result.text, result.is_final)
-                        self._enqueue_asr_result(result)
-                else:
-                    pre_speech_buffer.append(combined_audio)
-                    if was_speech and silence_start_time is None:
-                        logger.info("Process [%s]: SPEECH ENDED. Entering silence countdown.", stream_id)
-                        silence_start_time = time.time()
-
-                    if silence_start_time is not None:
-                        elapsed = time.time() - silence_start_time
-                        if elapsed >= SILENCE_FINALIZE_DELAY and has_pending_audio:
-                            logger.info("Process [%s]: SILENCE TIMEOUT REACHED (%.2fs). Finalizing...", stream_id, elapsed)
-                            self._do_finalize(stream_id)
-                            has_pending_audio = False
-                            silence_start_time = None
-                            was_speech = False
-                            vad.reset()
-
-        except Exception as e:
-            logger.error("Processing thread [%s] error: %s", stream_id, e, exc_info=True)
-        finally:
-            logger.info("Processing thread [%s] ended.", stream_id)
-
-    def _translation_loop(self):
-        logger.info("Translation thread started.")
-        src_lang = self._current_config.get("translation.source_lang", "auto")
-        tgt_lang = self._current_config.get("translation.target_lang", "vi")
-
-        while self._running:
-            try:
-                task = self._translation_queue.get(timeout=0.5)
-            except Empty:
-                continue
-
-            text = task.get("text", "")
-            entry_id = task.get("entry_id")
-
-            if not text:
-                continue
-
-            try:
-                trans_res = self._translation_backend.translate(text, src_lang, tgt_lang)
-                if trans_res.translated_text:
-                    active_backend = getattr(self._translation_backend, "active_backend", None)
-
-                    msg = {
-                        "type": "translation_update",
-                        "entry_id": entry_id,
-                        "source_text": text,
-                        "translation": trans_res.translated_text,
-                        "timestamp": time.time(),
-                        "is_final": True
-                    }
-                    if active_backend:
-                        msg["translation_backend"] = active_backend
-
-                    self._result_queue.put(msg)
-                    logger.debug("Translated [%s]: '%s' -> '%s'", entry_id, text, trans_res.translated_text)
-            except Exception as e:
-                logger.error("Translation loop error: %s", e)
-
-        logger.info("Translation thread ended.")
-
-    def _do_finalize(self, stream_id: str = "default"):
-        result = self._asr_backend.finalize_current(stream_id)
-        if result:
-            self._enqueue_asr_result(result)
-        else:
-            self._enqueue_asr_result(TranscriptResult(
-                text="",
-                is_final=True,
-                language="auto",
-                stream_id=stream_id
-            ))
-
-    def _enqueue_asr_result(self, asr_result):
-        """
-        Handle ASR result.
-        Every FINAL ASR segment is sent to translation queue immediately,
-        with a stable entry_id so the translation result can be matched precisely.
-        """
-
-        active_backend = None
-        if self._translation_backend and hasattr(self._translation_backend, "active_backend"):
-            active_backend = self._translation_backend.active_backend
-
-        # True Dual Stream automatically tags every result with its originating stream_id
-        audio_source = asr_result.stream_id if asr_result.stream_id in ["mic", "system"] else None
-
-        # Generate a stable entry_id for this segment so translation can reference it
-        entry_id = f"e-{time.time()}" if asr_result.is_final else None
-
-        # Send ASR (English) to UI
-        msg = {
-            "type": "partial" if not asr_result.is_final else "final",
-            "text": asr_result.text,
-            "translation": None,
-            "is_final": asr_result.is_final,
-            "timestamp": time.time(),
-        }
-
-        if audio_source:
-            msg["source"] = audio_source
-
-        if entry_id:
-            msg["entry_id"] = entry_id
-
-        if active_backend:
-            msg["translation_backend"] = active_backend
-
-        self._result_queue.put(msg)
-
-        # Translation Logic: Queue immediately if FINAL, carry the same entry_id
-        if (
-            self._translation_backend
-            and self._translation_backend.is_loaded
-            and asr_result.is_final
-            and asr_result.text.strip()
-        ):
-            with contextlib.suppress(Full):
-                self._translation_queue.put({
-                    "text": asr_result.text,
-                    "entry_id": entry_id,
-                    "is_final": True
-                }, timeout=0.5)
 
     # --- Realtime STT session -------------------------------------------------------------
     #
@@ -1092,9 +894,6 @@ class EchoFluxEngine:
             translation, self._translation_session = self._translation_session, None
             await translation.stop()
         self._translation_config = None
-        if self._translation_backend:
-            backend, self._translation_backend = self._translation_backend, None
-            await asyncio.to_thread(backend.unload_model)
         self._session_config = None
         if self._active_session_id and self._conversation_repo:
             try:
@@ -1175,8 +974,6 @@ class EchoFluxEngine:
                 )
             return
 
-        translation = self._translation_backend
-        active_backend = getattr(translation, "active_backend", None) if translation else None
         entry_id = None
         if event.is_final:
             # Unique per final, in the legacy e-<timestamp> form.
@@ -1203,7 +1000,7 @@ class EchoFluxEngine:
         msg = _stt_transcript_message(
             event,
             entry_id,
-            active_backend,
+            None,
             conversation_id=self._active_conversation_id,
             message_id=entry_id if event.is_final else None,
         )
@@ -1216,13 +1013,6 @@ class EchoFluxEngine:
                 self._partial_messages[event.stream_id] = msg
             # Records the change and schedules work; translations arrive later on this loop.
             session.on_transcript(event, entry_id)
-
-        if event.is_final and event.text.strip() and translation and translation.is_loaded:
-            task = {"text": event.text, "entry_id": entry_id, "is_final": True}
-            try:
-                self._translation_queue.put_nowait(task)
-            except Full:
-                logger.warning("Translation queue full; one segment not translated")
 
     def _on_translation_event(self, event):
         """Translation session events arrive on the event loop; only queue handoffs here."""
@@ -1416,6 +1206,21 @@ class EchoFluxEngine:
         await self._send_reply(websocket, chunk)
         await self._send_reply(websocket, done)
 
+    def cancel_summary(self, conversation_id: Optional[str] = None) -> bool:
+        """Cancel an in-flight summary task by conversation_id, or any active summary."""
+        if conversation_id and conversation_id in self._summary_tasks:
+            task = self._summary_tasks.get(conversation_id)
+            if task is not None and not task.done():
+                task.cancel()
+                return True
+            return False
+        cancelled = False
+        for task in list(self._summary_tasks.values()):
+            if not task.done():
+                task.cancel()
+                cancelled = True
+        return cancelled
+
     async def _on_conversation_summary(self, message: dict, websocket):
         # Wire contract replies: {"type": "llm_chunk"}, {"type": "llm_done"}
         echo_id = safe_command_id(message, "conversation_id")
@@ -1433,7 +1238,16 @@ class EchoFluxEngine:
                 websocket, ERROR_ASSISTANT_UNAVAILABLE, command.conversation_id
             )
             return
-        self._track_assistant_task(self._run_summary(service, command, websocket))
+        task = asyncio.create_task(self._run_summary(service, command, websocket))
+        self._assistant_tasks.add(task)
+        self._summary_tasks[command.conversation_id] = task
+
+        def _cleanup_summary(done_task: asyncio.Task) -> None:
+            self._assistant_tasks.discard(done_task)
+            if self._summary_tasks.get(command.conversation_id) is done_task:
+                self._summary_tasks.pop(command.conversation_id, None)
+
+        task.add_done_callback(_cleanup_summary)
 
     async def _run_summary(self, service, command, websocket):
         conversation_id = command.conversation_id
@@ -1441,7 +1255,10 @@ class EchoFluxEngine:
 
         async def _on_chunk(text: str) -> None:
             streamed.append(len(text))
-            await self._send_reply(websocket, summary_chunk_message(text, conversation_id))
+            chunk_msg = summary_chunk_message(text, conversation_id)
+            await self._send_reply(websocket, chunk_msg)
+            if self._ws_server and self._ws_server.is_authenticated:
+                await self._ws_server.broadcast(chunk_msg)
 
         try:
             outcome = await service.request_summary(conversation_id, on_chunk=_on_chunk)

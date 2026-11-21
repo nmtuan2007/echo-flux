@@ -192,6 +192,7 @@ export const FORWARDED_COMMAND_TYPES = [
   "pack_retry",
   "pack_check_readiness",
   "get_provider_manifests",
+  "audio_probe",
   "test_connection",
 ] as const;
 

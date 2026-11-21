@@ -955,8 +955,10 @@ async def test_engine_run_translates_session_finals_through_the_v2_translation_s
     session = engine._translation_session
     assert session is not None and session.state == "running"
     assert (stt.start_calls, local.start_calls) == (1, 1)
-    # The v2 path never starts the legacy translation thread.
-    assert engine._translation_backend is None and engine._translation_thread is None
+    # The v2 path has removed the legacy translation thread.
+    assert not hasattr(engine, "_translation_backend") and not hasattr(
+        engine, "_translation_thread"
+    )
 
     await wait_for_engine(lambda: any(m["type"] == "translation_update" for m in sent))
     final_message = next(m for m in sent if m["type"] == "final" and m["text"])
@@ -991,7 +993,8 @@ async def test_engine_disabled_v2_translation_starts_no_session(fake_audio, monk
     )
 
     assert engine._running and engine._stt_session is not None
-    assert engine._translation_session is None and engine._translation_thread is None
+    assert engine._translation_session is None
+    assert not hasattr(engine, "_translation_thread")
     assert built == []
     await engine._on_client_stop()
     assert _alive_pipeline_threads() == []

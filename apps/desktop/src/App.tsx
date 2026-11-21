@@ -155,8 +155,22 @@ export default function App() {
         }
       }).then((f) => (unlistenAssistRelay = f));
 
-      unsubStore = useEngineStore.subscribe(() => {
-        scheduleSync();
+      unsubStore = useEngineStore.subscribe((state, prev) => {
+        if (
+          state.entries !== prev.entries ||
+          state.partials !== prev.partials ||
+          state.running !== prev.running ||
+          state.connected !== prev.connected ||
+          state.suggestionLoading !== prev.suggestionLoading ||
+          state.assistRequests !== prev.assistRequests ||
+          state.engineConversationId !== prev.engineConversationId ||
+          state.sourceLabels !== prev.sourceLabels ||
+          state.sttStreams !== prev.sttStreams ||
+          state.services !== prev.services ||
+          state.config !== prev.config
+        ) {
+          scheduleSync();
+        }
       });
 
       const setupShortcuts = async () => {

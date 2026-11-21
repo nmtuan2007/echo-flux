@@ -704,3 +704,29 @@ async def test_assistant_failures_never_stop_the_pipeline(authenticated_env, rep
     assert summary[2]["error_code"] == "internal_error"
     assert TRANSCRIPT_SENTINEL not in json.dumps(frames)
     assert repo.list_summaries("c1") == []
+
+
+async def test_summary_cancel_aborts_in_flight_engine_summary(authenticated_env, repo):
+    provider = FakeAssistant(gate=asyncio.Event())
+    async with running_engine() as engine:
+        configure(engine, repo, provider)
+        control = await authenticate(engine, "control", CONTROL_TOKEN)
+        cancel_conn = await authenticate(engine, "control", CONTROL_TOKEN)
+
+        await send_request(control, "s-1", SUMMARY)
+        await asyncio.wait_for(provider.summary_started.wait(), 3.0)
+
+        await send_request(
+            cancel_conn,
+            "sc-1",
+            {"type": "summary_cancel", "request_id": "js-sum-1", "conversation_id": "c1"},
+        )
+        cancel_frames = await collect(cancel_conn, {"sc-1": "complete"})
+        assert cancel_frames["sc-1"][0]["data"]["cancelled"] is True
+
+        frames = await collect(control, {"s-1": "llm_done"})
+        assert terminal(frames["s-1"])["error_code"] == "cancelled"
+        await cancel_conn.close()
+        await control.close()
+
+    assert repo.list_summaries("c1") == []

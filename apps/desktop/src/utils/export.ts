@@ -20,11 +20,14 @@ export function exportAsText(entries: ExportEntry[]): string {
 }
 
 export function exportAsSRT(entries: ExportEntry[]): string {
+  if (entries.length === 0) return "";
+  const baseTimestamp = entries[0].timestamp;
   return entries
     .map((entry, index) => {
-      const start = formatSRTTime(entry.timestamp);
+      const startSec = Math.max(0, entry.timestamp - baseTimestamp);
+      const start = formatSRTOffset(startSec);
       const duration = estimateDuration(entry.text);
-      const end = formatSRTTime(entry.timestamp + duration);
+      const end = formatSRTOffset(startSec + duration);
 
       const speaker = entry.speaker ? `${entry.speaker}: ` : "";
       let text = `${speaker}${entry.text}`;
@@ -95,12 +98,12 @@ function formatTimestamp(timestamp: number): string {
   });
 }
 
-function formatSRTTime(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
-  const h = String(date.getUTCHours()).padStart(2, "0");
-  const m = String(date.getUTCMinutes()).padStart(2, "0");
-  const s = String(date.getUTCSeconds()).padStart(2, "0");
-  const ms = String(date.getUTCMilliseconds()).padStart(3, "0");
+function formatSRTOffset(offsetSeconds: number): string {
+  const totalMs = Math.max(0, Math.round(offsetSeconds * 1000));
+  const h = String(Math.floor(totalMs / 3_600_000)).padStart(2, "0");
+  const m = String(Math.floor((totalMs % 3_600_000) / 60_000)).padStart(2, "0");
+  const s = String(Math.floor((totalMs % 60_000) / 1000)).padStart(2, "0");
+  const ms = String(totalMs % 1000).padStart(3, "0");
   return `${h}:${m}:${s},${ms}`;
 }
 

@@ -777,9 +777,9 @@ export const createTranscriptSlice =
         if (!isAssistantConfigured(state)) return;
         const key = assistKeyOf(entry);
         if (state.suggestionLoading[key]) return;
-        if (assistUnavailableReason(state, entry) !== null) return;
 
-        if (!state.socket || !state.connected) {
+        // Overlay window mirrors state without a direct socket; relay to main window first.
+        if (!state.socket && state.connected) {
           if (typeof window !== "undefined" && (window as unknown as { __TAURI__?: unknown }).__TAURI__) {
             void import("@tauri-apps/api/event").then(({ emit }) => {
               void emit("relay_request_assist", { entryId });
@@ -787,6 +787,8 @@ export const createTranscriptSlice =
           }
           return;
         }
+
+        if (assistUnavailableReason(state, entry) !== null) return;
 
         const conversationId = (entry.conversationId ?? state.engineConversationId) as string;
         assistCounter += 1;

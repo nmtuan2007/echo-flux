@@ -528,6 +528,21 @@ class ConversationRepository:
             ).fetchall()
         return [_conversation_from_row(row) for row in rows]
 
+    def list_conversations_with_stats(self) -> List[Tuple[ConversationRecord, int, bool]]:
+        """List conversations along with message counts and summary presence in one query."""
+        with self.read() as conn:
+            rows = conn.execute(
+                "SELECT c.*,"
+                " (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.conversation_id) AS message_count,"
+                " EXISTS(SELECT 1 FROM summaries s WHERE s.conversation_id = c.conversation_id) AS has_summary"
+                " FROM conversations c"
+                " ORDER BY c.created_at_ms DESC, c.conversation_id"
+            ).fetchall()
+        return [
+            (_conversation_from_row(row), int(row["message_count"]), bool(row["has_summary"]))
+            for row in rows
+        ]
+
     def _touch(self, conn: sqlite3.Connection, conversation_id: str, now_ms: float) -> None:
         conn.execute(
             "UPDATE conversations SET updated_at_ms = MAX(updated_at_ms, ?)"

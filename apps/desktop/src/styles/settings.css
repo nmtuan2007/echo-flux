@@ -486,3 +486,51 @@
   font-size: 12px;
   color: var(--text-primary);
 }
+
+.audio-probe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.audio-probe-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.audio-probe-label {
+  min-width: 68px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.audio-probe-meter {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background-color: var(--bg-primary);
+  overflow: hidden;
+}
+
+.audio-probe-fill {
+  height: 100%;
+  background-color: var(--success);
+  transition: width 0.2s ease;
+}
+
+.audio-probe-status {
+  min-width: 110px;
+  text-align: right;
+  color: var(--text-secondary);
+}
+
+.audio-probe-status.error {
+  color: var(--danger);
+}

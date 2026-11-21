@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
 import type { CloudConsentState } from "../store/types";
 
@@ -11,11 +11,27 @@ export function CloudConsent({ mode = "onboarding", onConsentChange }: CloudCons
   const { consent, hasConsentedToCloud, acceptCloudConsent, revokeCloudConsent } = useEngineStore();
 
   const [toggles, setToggles] = useState({
-    stt: consent.stt ?? hasConsentedToCloud,
-    translation: consent.translation ?? hasConsentedToCloud,
-    assistant: consent.assistant ?? hasConsentedToCloud,
-    summary: consent.summary ?? hasConsentedToCloud,
+    stt: Boolean(consent.stt),
+    translation: Boolean(consent.translation),
+    assistant: Boolean(consent.assistant),
+    summary: Boolean(consent.summary),
   });
+
+  useEffect(() => {
+    setToggles({
+      stt: Boolean(consent.stt),
+      translation: Boolean(consent.translation),
+      assistant: Boolean(consent.assistant),
+      summary: Boolean(consent.summary),
+    });
+  }, [consent.stt, consent.translation, consent.assistant, consent.summary]);
+
+  const hasChanges =
+    toggles.stt !== Boolean(consent.stt) ||
+    toggles.translation !== Boolean(consent.translation) ||
+    toggles.assistant !== Boolean(consent.assistant) ||
+    toggles.summary !== Boolean(consent.summary);
+  const anySelected = toggles.stt || toggles.translation || toggles.assistant || toggles.summary;
 
   const handleToggle = (key: keyof typeof toggles) => {
     setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -120,12 +136,26 @@ export function CloudConsent({ mode = "onboarding", onConsentChange }: CloudCons
         {mode === "settings" && hasConsentedToCloud ? (
           <div className="cloud-status-row">
             <span className="cloud-status-tag">Cloud Consent Active (v{consent.version || 1})</span>
-            <button className="btn btn-danger btn-sm" onClick={handleRevoke}>
-              Revoke Cloud Consent
-            </button>
+            <div style={{ display: "flex", gap: "8px" }}>
+              {hasChanges && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={anySelected ? handleAcceptAll : handleRevoke}
+                >
+                  Save Permissions
+                </button>
+              )}
+              <button className="btn btn-danger btn-sm" onClick={handleRevoke}>
+                Revoke Cloud Consent
+              </button>
+            </div>
           </div>
         ) : (
-          <button className="btn btn-primary" onClick={handleAcceptAll}>
+          <button
+            className="btn btn-primary"
+            onClick={handleAcceptAll}
+            disabled={!anySelected}
+          >
             {mode === "onboarding" ? "Grant Selected Cloud Permissions" : "Enable Cloud Services"}
           </button>
         )}

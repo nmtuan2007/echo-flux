@@ -181,3 +181,93 @@
 .overlay-font-lg .overlay-captions {
   font-size: 17px;
 }
+
+.overlay-btn-assist {
+  background: rgba(139, 92, 246, 0.72);
+  border-color: rgba(167, 139, 250, 0.5);
+}
+
+.overlay-btn-assist:hover:not(:disabled) {
+  background: rgba(124, 58, 237, 0.9);
+}
+
+.overlay-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.overlay-assist-drawer {
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(15, 17, 23, 0.92);
+  padding: 6px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.overlay-assist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  color: #c4b5fd;
+}
+
+.overlay-assist-close {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.overlay-assist-status {
+  font-size: 11px;
+  color: #cbd5e1;
+}
+
+.overlay-assist-error {
+  font-size: 11px;
+  color: #fca5a5;
+}
+
+.overlay-assist-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.overlay-assist-chip {
+  text-align: left;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  padding: 4px 8px;
+  color: #f8fafc;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.overlay-assist-chip:hover {
+  background: rgba(139, 92, 246, 0.25);
+  border-color: rgba(167, 139, 250, 0.5);
+}
+
+.overlay-assist-strategy {
+  font-size: 10px;
+  font-weight: 700;
+  color: #c4b5fd;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.overlay-assist-text {
+  line-height: 1.3;
+}
