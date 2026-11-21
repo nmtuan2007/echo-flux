@@ -1,0 +1,488 @@
+/* ── Settings & History Common ── */
+
+.settings-panel,
+.history-panel {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.settings-panel::-webkit-scrollbar,
+.history-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.settings-panel::-webkit-scrollbar-track,
+.history-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-panel::-webkit-scrollbar-thumb,
+.history-panel::-webkit-scrollbar-thumb {
+  background-color: var(--bg-tertiary);
+  border-radius: 3px;
+}
+
+.settings-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.settings-warning {
+  font-size: 13px;
+  color: var(--warning);
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background-color: rgba(245, 166, 35, 0.1);
+  border-radius: var(--radius-sm);
+}
+
+.settings-section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background-color: var(--bg-secondary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.settings-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 14px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.settings-field:last-child {
+  margin-bottom: 0;
+}
+
+.settings-field-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-field label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.settings-field select,
+.settings-field input[type="text"],
+.settings-field input[type="number"] {
+  height: 34px;
+  padding: 0 10px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.settings-field select:focus,
+.settings-field input[type="text"]:focus,
+.settings-field input[type="number"]:focus {
+  border-color: var(--accent);
+}
+
+.settings-field select:disabled,
+.settings-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-field input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ── Settings Field Group (input + button side by side) ── */
+
+.settings-field-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-group select,
+.settings-field-group input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Settings Note ── */
+
+.settings-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+/* ── Settings Status (runtime info) ── */
+
+.settings-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  margin-top: 8px;
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+}
+
+.status-online {
+  color: var(--success);
+  font-weight: 600;
+}
+
+.status-marian {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+
+/* ── Settings — AI section accent ── */
+
+.settings-section-ai {
+  border-color: rgba(99, 102, 241, 0.35);
+  background: linear-gradient(135deg, var(--bg-secondary) 0%, rgba(99, 102, 241, 0.04) 100%);
+}
+
+.settings-api-key-input {
+  font-family: var(--font-mono) !important;
+  letter-spacing: 0.05em;
+}
+
+.settings-field input[type="password"] {
+  height: 34px;
+  padding: 0 10px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.settings-field input[type="password"]:focus {
+  border-color: var(--accent);
+}
+
+.settings-field input[type="password"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-field code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+/* ── Settings — provider service cards ── */
+
+.settings-group {
+  margin-bottom: 24px;
+}
+
+.settings-group-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.settings-group-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.service-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.service-card {
+  min-width: 0;
+  padding: 16px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.service-card.is-locked {
+  opacity: 0.85;
+}
+
+.service-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.service-card-header .settings-section-title {
+  margin-bottom: 0;
+}
+
+.service-card-description {
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+.service-badge {
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.service-badge-success {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.service-badge-error {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.service-badge-stale {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.service-badge-loading,
+.service-badge-retry {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.service-model,
+.service-language-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.service-model code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+.field-required {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.field-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.field-error {
+  font-size: 12px;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
+.settings-field.has-error input[type="text"],
+.settings-field.has-error input[type="password"],
+.settings-field.has-error select {
+  border-color: var(--danger);
+}
+
+.settings-field input[type="text"]::placeholder,
+.settings-field input[type="password"]::placeholder {
+  color: var(--text-muted);
+}
+
+.service-card input:focus-visible,
+.service-card select:focus-visible,
+.service-card button:focus-visible,
+.service-advanced summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.secret-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.secret-field-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.secret-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.secret-status-configured {
+  color: var(--success);
+}
+
+.secret-status-missing {
+  color: var(--text-muted);
+}
+
+.secret-field .settings-field-group {
+  flex-wrap: wrap;
+}
+
+.secret-field .settings-field-group input[type="password"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.secret-field-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-text-danger {
+  color: var(--danger);
+}
+
+.btn-text-danger:hover:not(:disabled) {
+  background-color: rgba(224, 85, 85, 0.1);
+}
+
+.service-advanced {
+  margin: 4px 0 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.service-advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 4px 0;
+}
+
+.service-advanced-body {
+  margin-top: 8px;
+}
+
+.service-test {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.service-test-status {
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.service-test-success {
+  color: var(--success);
+}
+
+.service-test-error {
+  color: var(--danger);
+}
+
+.service-test-stale {
+  color: var(--warning);
+}
+
+.service-test-loading,
+.service-test-retry {
+  color: var(--accent);
+}
+
+@media (max-width: 560px) {
+  .settings-panel {
+    padding: 16px 12px;
+  }
+
+  .service-cards {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-field-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
+
+/* ── Settings Packs, Consent & Banners ── */
+.settings-packs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.service-consent-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(245, 166, 35, 0.12);
+  border: 1px solid rgba(245, 166, 35, 0.35);
+  font-size: 12px;
+  color: var(--text-primary);
+}

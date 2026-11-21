@@ -728,7 +728,12 @@ export const createTranscriptSlice =
     // Session metadata belongs to one Start-to-Stop run.
     api.subscribe((state, prev) => {
       if (state.running && !prev.running) {
-        set({ assistRequests: {}, sttStreams: {}, finalizedItems: {}, engineConversationId: null });
+        set({
+          assistRequests: {},
+          sttStreams: {},
+          finalizedItems: {},
+          engineConversationId: state.activeConversationId ?? null,
+        });
       }
     });
 

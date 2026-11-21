@@ -61,6 +61,9 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const saveServiceSecret = useEngineStore((s) => s.saveServiceSecret);
   const deleteServiceSecret = useEngineStore((s) => s.deleteServiceSecret);
   const testServiceConnection = useEngineStore((s) => s.testServiceConnection);
+  const consent = useEngineStore((s) => s.consent);
+  const hasConsentedToCloud = useEngineStore((s) => s.hasConsentedToCloud);
+  const acceptCloudConsent = useEngineStore((s) => s.acceptCloudConsent);
 
   const id = `service-${service}`;
   const copy = SERVICE_COPY[service];
@@ -69,13 +72,18 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const issues = serviceIssues(service, config, drafts);
   const phase = deriveTestPhase(config, testUi);
   const locked = running;
-  const active = service !== "assistant" || config.enabled;
+  const active = service === "stt" || config.enabled;
   const fields = provider ? fieldsFor(provider, service) : [];
   const mainFields = fields.filter((f) => !f.advanced);
   const advancedFields = fields.filter((f) => f.advanced);
   const needsModel = provider ? modelRequired(provider) : false;
   const hasHint = fields.some((f) => LANGUAGE_HINT_KEYS.includes(f.key));
   const blocked = Object.keys(issues).length > 0;
+  const isCloudProvider = Boolean(provider && provider.protocolFamily !== "local");
+  const serviceConsented = Boolean(
+    consent?.[service === "assistant" ? "assistant" : service] || hasConsentedToCloud,
+  );
+  const needsCloudConsent = active && isCloudProvider && !serviceConsented;
 
   const renderField = (field: ManifestField) => {
     if (field.secret) {
@@ -152,9 +160,11 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
       </div>
       <p className="settings-note service-card-description">{copy.description}</p>
 
-      {service === "assistant" && (
+      {(service === "assistant" || service === "translation") && (
         <div className="settings-field settings-field-row">
-          <label htmlFor={`${id}-enabled`}>Enable Assistant</label>
+          <label htmlFor={`${id}-enabled`}>
+            {service === "assistant" ? "Enable Assistant" : "Enable Translation"}
+          </label>
           <input
             id={`${id}-enabled`}
             type="checkbox"
@@ -275,6 +285,23 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
                 </p>
               )}
 
+              {needsCloudConsent && (
+                <div className="service-consent-banner" role="note">
+                  <span>
+                    Cloud permission is not granted for {copy.title}. Audio or text will be sent to{" "}
+                    {provider.displayName} when active.
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={locked}
+                    onClick={() => acceptCloudConsent({ [service]: true })}
+                  >
+                    Grant Cloud Consent
+                  </button>
+                </div>
+              )}
+
               {mainFields.map(renderField)}
 
               {(advancedFields.length > 0 || (provider.modelSelectable && !needsModel)) && (
@@ -332,6 +359,9 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
 
       {service === "assistant" && !config.enabled && (
         <p className="settings-note">Assistant is off. Enable it to choose a provider.</p>
+      )}
+      {service === "translation" && !config.enabled && (
+        <p className="settings-note">Translation is off. Enable it to translate live captions.</p>
       )}
     </section>
   );

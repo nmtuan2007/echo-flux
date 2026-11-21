@@ -28,56 +28,48 @@ export function OnboardingDialog() {
       <div className="onboarding-modal">
         {/* Progress Stepper */}
         <div className="onboarding-stepper">
-          <div className={`step-item ${step >= 1 ? "active" : ""}`}>
-            <span className="step-number">1</span>
-            <span className="step-label">Welcome</span>
-          </div>
-          <div className="step-divider" />
-          <div className={`step-item ${step >= 2 ? "active" : ""}`}>
-            <span className="step-number">2</span>
-            <span className="step-label">Local AI</span>
-          </div>
-          <div className="step-divider" />
-          <div className={`step-item ${step >= 3 ? "active" : ""}`}>
-            <span className="step-number">3</span>
-            <span className="step-label">Cloud Consent</span>
-          </div>
-          <div className="step-divider" />
-          <div className={`step-item ${step >= 4 ? "active" : ""}`}>
-            <span className="step-number">4</span>
-            <span className="step-label">Ready</span>
-          </div>
+          <div className={`onboarding-step-indicator ${step >= 1 ? "active" : ""}`}>1</div>
+          <span className="onboarding-step-label">Welcome</span>
+          <div className="onboarding-step-divider" />
+          <div className={`onboarding-step-indicator ${step >= 2 ? "active" : ""}`}>2</div>
+          <span className="onboarding-step-label">Local AI</span>
+          <div className="onboarding-step-divider" />
+          <div className={`onboarding-step-indicator ${step >= 3 ? "active" : ""}`}>3</div>
+          <span className="onboarding-step-label">Cloud Consent</span>
+          <div className="onboarding-step-divider" />
+          <div className={`onboarding-step-indicator ${step >= 4 ? "active" : ""}`}>4</div>
+          <span className="onboarding-step-label">Ready</span>
         </div>
 
         {/* Step 1: Welcome & Architecture */}
         {step === 1 && (
-          <div className="onboarding-step-content">
-            <h2 id="onboarding-step-title" className="onboarding-heading">
+          <div className="onboarding-body">
+            <h2 id="onboarding-step-title" className="onboarding-step-title">
               Welcome to EchoFlux
             </h2>
-            <p className="onboarding-lead">
+            <p className="onboarding-step-desc">
               Private, local-first real-time speech translation, transcript revisions, and conversation assistance.
             </p>
 
-            <div className="onboarding-features-grid">
+            <div className="onboarding-welcome-hero">
               <div className="onboarding-feature-item">
-                <span className="feature-icon">🔒</span>
-                <div>
-                  <strong>Zero-Cloud Guarantee</strong>
+                <span className="onboarding-feature-icon">🔒</span>
+                <div className="onboarding-feature-text">
+                  <h4>Zero-Cloud Guarantee</h4>
                   <p>All transcription, translation, and profiles can run entirely on your local machine with zero data transmission.</p>
                 </div>
               </div>
               <div className="onboarding-feature-item">
-                <span className="feature-icon">⚡</span>
-                <div>
-                  <strong>Hardware-Optimized Models</strong>
+                <span className="onboarding-feature-icon">⚡</span>
+                <div className="onboarding-feature-text">
+                  <h4>Hardware-Optimized Models</h4>
                   <p>Powered by Faster-Whisper and Marian neural translation tailored to your CPU/GPU hardware capabilities.</p>
                 </div>
               </div>
               <div className="onboarding-feature-item">
-                <span className="feature-icon">🛡️</span>
-                <div>
-                  <strong>OS Credential Vault</strong>
+                <span className="onboarding-feature-icon">🛡️</span>
+                <div className="onboarding-feature-text">
+                  <h4>OS Credential Vault</h4>
                   <p>Third-party API keys are never stored in plain text and are protected inside your operating system keyring.</p>
                 </div>
               </div>
@@ -94,11 +86,11 @@ export function OnboardingDialog() {
 
         {/* Step 2: Local AI Readiness */}
         {step === 2 && (
-          <div className="onboarding-step-content">
-            <h2 id="onboarding-step-title" className="onboarding-heading">
+          <div className="onboarding-body">
+            <h2 id="onboarding-step-title" className="onboarding-step-title">
               Local AI Model Readiness
             </h2>
-            <p className="onboarding-lead">
+            <p className="onboarding-step-desc">
               Check and download curated open-source model packs for offline speech recognition and translation.
             </p>
 
@@ -120,11 +112,11 @@ export function OnboardingDialog() {
 
         {/* Step 3: Cloud Consent */}
         {step === 3 && (
-          <div className="onboarding-step-content">
-            <h2 id="onboarding-step-title" className="onboarding-heading">
+          <div className="onboarding-body">
+            <h2 id="onboarding-step-title" className="onboarding-step-title">
               Optional Cloud Services & Privacy
             </h2>
-            <p className="onboarding-lead">
+            <p className="onboarding-step-desc">
               EchoFlux can connect to external providers (OpenAI, Gemini, Deepgram, AssemblyAI) if you desire cloud accuracy.
             </p>
 
@@ -143,12 +135,12 @@ export function OnboardingDialog() {
 
         {/* Step 4: Ready */}
         {step === 4 && (
-          <div className="onboarding-step-content onboarding-step-ready">
+          <div className="onboarding-body onboarding-step-ready">
             <span className="ready-icon">🎉</span>
-            <h2 id="onboarding-step-title" className="onboarding-heading">
+            <h2 id="onboarding-step-title" className="onboarding-step-title">
               You're Ready to Flow!
             </h2>
-            <p className="onboarding-lead">
+            <p className="onboarding-step-desc">
               EchoFlux is configured and ready. You can modify model selections, hardware tiers, and context profiles anytime in Settings.
             </p>
 

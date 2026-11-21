@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-08T06:23:28Z",
+  "timestamp": "2026-11-08T15:00:49Z",
   "hardware_reference": {
     "os_platform": "windows",
     "os_version": "Windows-10-10.0.26200-SP0",
@@ -18,66 +18,66 @@
   },
   "summary_metrics": {
     "partial_stt_latency_ms": {
-      "mean": 1821.34,
-      "median": 1824.43,
-      "min": 1811.95,
-      "max": 1827.65,
-      "p95": 1827.65
+      "mean": 1811.7,
+      "median": 1813.61,
+      "min": 1805.33,
+      "max": 1816.17,
+      "p95": 1816.17
     },
     "final_stt_latency_ms": {
-      "mean": 0.13,
-      "median": 0.08,
-      "min": 0.08,
-      "max": 0.22,
-      "p95": 0.22
+      "mean": 0.26,
+      "median": 0.17,
+      "min": 0.14,
+      "max": 0.48,
+      "p95": 0.48
     },
     "translation_latency_ms": {
-      "mean": 248.69,
-      "median": 289.87,
-      "min": 155.37,
-      "max": 300.84,
-      "p95": 300.84
+      "mean": 251.69,
+      "median": 292.09,
+      "min": 147.47,
+      "max": 315.51,
+      "p95": 315.51
     },
     "combined_latency_ms": {
-      "mean": 248.82,
-      "median": 289.95,
-      "min": 155.59,
-      "max": 300.92,
-      "p95": 300.92
+      "mean": 251.95,
+      "median": 292.26,
+      "min": 147.95,
+      "max": 315.65,
+      "p95": 315.65
     },
     "rss_mb": {
-      "mean": 1063.8,
-      "median": 1063.84,
-      "min": 1063.7,
-      "max": 1063.85,
-      "p95": 1063.85
+      "mean": 1060.93,
+      "median": 1060.98,
+      "min": 1060.82,
+      "max": 1060.99,
+      "p95": 1060.99
     },
-    "peak_rss_mb": 1205.82
+    "peak_rss_mb": 1205.8
   },
   "iteration_runs": [
     {
       "iteration": 1.0,
-      "partial_stt_latency_ms": 1827.65,
-      "final_stt_latency_ms": 0.08,
-      "translation_latency_ms": 289.87,
-      "combined_latency_ms": 289.95,
-      "rss_mb": 1063.7
+      "partial_stt_latency_ms": 1816.17,
+      "final_stt_latency_ms": 0.14,
+      "translation_latency_ms": 315.51,
+      "combined_latency_ms": 315.65,
+      "rss_mb": 1060.82
     },
     {
       "iteration": 2.0,
-      "partial_stt_latency_ms": 1811.95,
-      "final_stt_latency_ms": 0.22,
-      "translation_latency_ms": 155.37,
-      "combined_latency_ms": 155.59,
-      "rss_mb": 1063.84
+      "partial_stt_latency_ms": 1813.61,
+      "final_stt_latency_ms": 0.17,
+      "translation_latency_ms": 292.09,
+      "combined_latency_ms": 292.26,
+      "rss_mb": 1060.98
     },
     {
       "iteration": 3.0,
-      "partial_stt_latency_ms": 1824.43,
-      "final_stt_latency_ms": 0.08,
-      "translation_latency_ms": 300.84,
-      "combined_latency_ms": 300.92,
-      "rss_mb": 1063.85
+      "partial_stt_latency_ms": 1805.33,
+      "final_stt_latency_ms": 0.48,
+      "translation_latency_ms": 147.47,
+      "combined_latency_ms": 147.95,
+      "rss_mb": 1060.99
     }
   ]
 }

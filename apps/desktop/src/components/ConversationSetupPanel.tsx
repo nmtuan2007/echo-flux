@@ -44,6 +44,15 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
     }
   }, [isOpen, loadProfiles, pendingTitle, sourceLabels]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   // Calculate attached profiles aggregate byte size
@@ -114,7 +123,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
           {/* Speaker Stream Labels */}
           <div className="setup-form-group">
             <label className="setup-label">Speaker Stream Identification</label>
-            <div className="setup-labels-row">
+            <div className="setup-stream-labels-grid setup-labels-row">
               <div className="setup-label-col">
                 <span className="setup-sublabel">Microphone Audio</span>
                 <input
@@ -158,7 +167,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
                 No context profiles available. You can create profiles in the Profiles panel.
               </p>
             ) : (
-              <div className="setup-profiles-list">
+              <div className="setup-profiles-checklist setup-profiles-list">
                 {profiles.map((p) => {
                   const isChecked = attachedProfileIds.includes(p.profileId);
                   const wouldExceedCount = !isChecked && countAttached >= MAX_PROFILES_PER_SESSION;
@@ -169,7 +178,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
                   return (
                     <label
                       key={p.profileId}
-                      className={`setup-profile-item ${isChecked ? "selected" : ""} ${
+                      className={`setup-profile-check-item setup-profile-item ${isChecked ? "selected" : ""} ${
                         disabled ? "disabled" : ""
                       }`}
                     >

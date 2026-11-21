@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useEngineStore, Conversation } from "../store/engineStore";
+import {
+  downloadFile,
+  exportAsJSON,
+  exportAsMarkdown,
+  exportAsSRT,
+  exportAsText,
+  type ExportEntry,
+} from "../utils/export";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 interface DisplayItem {
   id: string;
@@ -368,6 +377,37 @@ function ConversationDetailView({
   const messages = detail.messages || [];
   const summary = detail.summary;
   const profiles = detail.profiles || [];
+  const summaryMarkdown =
+    typeof summary === "string" ? summary : summary?.summary_markdown || "";
+
+  const toExportEntries = (): ExportEntry[] =>
+    messages.map((m: any) => {
+      const tsMs = typeof m.timestamp_ms === "number" ? m.timestamp_ms : Date.now();
+      return {
+        text: m.stt_text || m.text || "",
+        translation: m.translation_text ?? m.translation ?? null,
+        timestamp: tsMs > 1e12 ? tsMs / 1000 : tsMs,
+        speaker: m.speaker_label || (m.source === "mic" ? "Me" : "Others"),
+      };
+    });
+
+  const baseName = (conv.title || "echoflux-conversation")
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/gi, "-")
+    .replace(/^-|-$/g, "") || "echoflux-conversation";
+
+  const handleExportFormat = (fmt: "txt" | "srt" | "md" | "json") => {
+    const items = toExportEntries();
+    if (fmt === "txt") {
+      downloadFile(exportAsText(items), `${baseName}.txt`);
+    } else if (fmt === "srt") {
+      downloadFile(exportAsSRT(items), `${baseName}.srt`);
+    } else if (fmt === "md") {
+      downloadFile(exportAsMarkdown(items, conv.title, summaryMarkdown), `${baseName}.md`, "text/markdown;charset=utf-8");
+    } else {
+      downloadFile(exportAsJSON(items), `${baseName}.json`, "application/json;charset=utf-8");
+    }
+  };
 
   return (
     <div className="history-detail-view">
@@ -381,14 +421,30 @@ function ConversationDetailView({
             {new Date(conv.created_at_ms || conv.date || Date.now()).toLocaleString()}
           </span>
         </div>
-        <button
-          className="btn btn-primary"
-          onClick={onLoadToActive}
-          disabled={disabled}
-          title={disabled ? "Stop recording to load" : "Load into active transcript"}
-        >
-          Load Into Session
-        </button>
+        <div className="history-detail-actions">
+          <div className="export-btn-group" role="group" aria-label="Export format">
+            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("txt")} title="Export as TXT">
+              TXT
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("srt")} title="Export as SRT subtitles">
+              SRT
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("md")} title="Export as Markdown">
+              MD
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={() => handleExportFormat("json")} title="Export as JSON">
+              JSON
+            </button>
+          </div>
+          <button
+            className="btn btn-primary"
+            onClick={onLoadToActive}
+            disabled={disabled}
+            title={disabled ? "Stop recording to load" : "Load into active transcript"}
+          >
+            Load Into Session
+          </button>
+        </div>
       </div>
 
       {profiles.length > 0 && (
@@ -398,11 +454,11 @@ function ConversationDetailView({
         </div>
       )}
 
-      {summary && (
+      {summaryMarkdown && (
         <div className="history-detail-summary-card">
           <h3 className="history-detail-section-title">Meeting Summary</h3>
           <div className="history-detail-summary-text">
-            {summary.summary_markdown || summary}
+            <MarkdownRenderer text={summaryMarkdown} />
           </div>
         </div>
       )}

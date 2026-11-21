@@ -600,6 +600,41 @@ describe("reconnect and reset", () => {
     expect(store.getState()).toMatchObject({ history: [], activeConversationId: null });
   });
 
+  it("preserves activeConversationId when session starts with existing conversation", () => {
+    const { store, ws } = connectedStore();
+    store.setState({ activeConversationId: "conv-123" });
+    ws.receive({ type: "status", status: "started" });
+    expect(store.getState().running).toBe(true);
+    expect(store.getState().activeConversationId).toBe("conv-123");
+  });
+
+  it("loads conversation from selectedConversationDetail when not found in in-memory history", () => {
+    const { store } = newStore();
+    store.setState({
+      selectedConversationDetail: {
+        conversation: { conversation_id: "conv-sqlite-1" },
+        messages: [
+          { message_id: "msg-1", stt_text: "Hello from SQLite", timestamp_ms: 1000, source: "mic" },
+        ],
+        summary: { summary_markdown: "Meeting summary from SQLite" },
+      },
+    });
+
+    store.getState().loadConversation("conv-sqlite-1");
+    const state = store.getState();
+    expect(state.activeConversationId).toBe("conv-sqlite-1");
+    expect(state.activeView).toBe("transcript");
+    expect(state.entries).toHaveLength(1);
+    expect(state.entries[0]).toMatchObject({
+      id: "msg-1",
+      text: "Hello from SQLite",
+      timestamp: 1,
+      source: "mic",
+      isFinal: true,
+    });
+    expect(state.summaryText).toBe("Meeting summary from SQLite");
+  });
+
   it("keeps separate store instances isolated", () => {
     const a = connectedStore();
     const b = newStore();

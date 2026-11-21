@@ -378,8 +378,10 @@ class EchoFluxEngine:
         self._active_conversation_id: Optional[str] = None
         self._active_session_id: Optional[str] = None
         self._ephemeral_secrets: Dict[str, str] = {}
+        self._service_secrets: Dict[str, Dict[str, str]] = {}
         self._assistant_service = None
         self._summary_service = None
+        self._owned_assistant_provider = None
         self._assistant_tasks: Set[asyncio.Task] = set()
 
         from engine.server.control_dispatcher import ControlCommandDispatcher
@@ -437,22 +439,64 @@ class EchoFluxEngine:
         if self._main_task is not None and not self._main_task.done():
             self._main_task.cancel()
 
+    def _extract_start_secrets(
+        self, config: dict, secrets: Optional[dict]
+    ) -> tuple[dict, Dict[str, str], Dict[str, Dict[str, str]]]:
+        """Pull injected credential values out of start config before it reaches _current_config."""
+        from engine.core.config import is_secret_key_name
+
+        cleaned_config = dict(config) if isinstance(config, dict) else {}
+        flat_secrets: Dict[str, str] = {}
+        service_secrets: Dict[str, Dict[str, str]] = {"stt": {}, "translation": {}, "assistant": {}}
+
+        if isinstance(secrets, dict):
+            for key, value in secrets.items():
+                if not isinstance(key, str) or not isinstance(value, str) or not value:
+                    continue
+                if "." in key:
+                    cap, slot = key.split(".", 1)
+                    if cap in service_secrets and slot:
+                        service_secrets[cap][slot] = value
+                else:
+                    flat_secrets[key] = value
+
+        for key in list(cleaned_config.keys()):
+            if not isinstance(key, str) or "." not in key:
+                continue
+            prefix, leaf = key.split(".", 1)
+            if prefix in service_secrets and is_secret_key_name(leaf.split(".")[-1]):
+                val = cleaned_config.pop(key)
+                if isinstance(val, str) and val:
+                    service_secrets[prefix][leaf] = val
+            elif key == "llm.api_key":
+                val = cleaned_config.pop(key)
+                if isinstance(val, str) and val:
+                    flat_secrets["api_key"] = val
+                    service_secrets["assistant"].setdefault("api_key", val)
+
+        return cleaned_config, flat_secrets, service_secrets
+
     async def _on_client_start(self, config: dict, secrets: Optional[dict] = None):
         # Log the shape only: the start config carries provider settings and API keys.
         key_count = len(config) if isinstance(config, dict) else 0
         logger.info("Starting pipeline (%d client config keys)", key_count)
         self._client = self._ws_server.current_requester()
-        self._ephemeral_secrets = dict(secrets) if isinstance(secrets, dict) else {}
+        cleaned_config, flat_secrets, service_secrets = self._extract_start_secrets(config, secrets)
 
         if self._running:
             await self._stop_pipeline()
 
+        self._ephemeral_secrets = flat_secrets
+        self._service_secrets = service_secrets
+
         try:
-            await asyncio.to_thread(self._initialize_pipeline, config)
+            await asyncio.to_thread(self._initialize_pipeline, cleaned_config)
             # Translation first: a refused Translation Start never starts an STT provider.
             await self._start_translation_session()
             # Providers and the mandatory Local fallback are ready before any device opens.
             await self._start_stt_session()
+            # Assistant is optional and must never prevent STT/Translation from starting.
+            await self._start_assistant_service(cleaned_config)
             self._start_threads()
         except Exception as e:
             logger.error("Failed to start pipeline: %s", e, exc_info=True)
@@ -468,6 +512,7 @@ class EchoFluxEngine:
     async def _shutdown(self):
         await self._cancel_assistant_work()
         await self._stop_pipeline()
+        await self._close_owned_assistant_provider()
         await self._ws_server.stop()
 
     def _initialize_pipeline(self, settings: dict):
@@ -548,14 +593,18 @@ class EchoFluxEngine:
             else:
                 conv_id = conv_id or new_record_id()
                 now_ms = time.time() * 1000.0
-                repo.create_conversation(
-                    ConversationRecord(
-                        conversation_id=conv_id,
-                        title=settings.get("conversation_title") or f"Conversation {conv_id[:8]}",
-                        created_at_ms=now_ms,
-                        updated_at_ms=now_ms,
-                    )
-                )
+                raw_labels = settings.get("source_labels")
+                conv_kwargs: Dict[str, Any] = {
+                    "conversation_id": conv_id,
+                    "title": settings.get("conversation_title") or f"Conversation {conv_id[:8]}",
+                    "created_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+                if isinstance(raw_labels, dict):
+                    conv_kwargs["source_labels"] = {
+                        k: str(v) for k, v in raw_labels.items() if k in ("mic", "system") and str(v).strip()
+                    }
+                repo.create_conversation(ConversationRecord(**conv_kwargs))
                 self._active_conversation_id = conv_id
 
             session_id = new_record_id()
@@ -684,6 +733,7 @@ class EchoFluxEngine:
                 logger.warning("Failed to end session in repo: %s", e)
             self._active_session_id = None
         self._ephemeral_secrets.clear()
+        self._service_secrets.clear()
 
         if self._asr_backend:
             for stream_id in self._inputs:
@@ -923,11 +973,83 @@ class EchoFluxEngine:
     # Process-{stream} runs VAD and hands audio to the session -> _stop_pipeline stops the
     # session once. Any Start failure goes through _abort_pipeline_start.
 
+    async def _close_owned_assistant_provider(self) -> None:
+        provider, self._owned_assistant_provider = self._owned_assistant_provider, None
+        if provider is not None:
+            with contextlib.suppress(Exception):
+                await provider.stop()
+
+    async def _start_assistant_service(self, settings: dict) -> None:
+        """Compose repository-backed Assist and Summary from v2 ``services.assistant``."""
+        if getattr(self, "_assistant_provider", None) is not None:
+            return
+        services = settings.get("services")
+        section = settings.get("services.assistant")
+        if section is None and isinstance(services, dict):
+            section = services.get("assistant")
+        if not isinstance(section, dict):
+            return
+
+        await self._close_owned_assistant_provider()
+        if not section.get("enabled", False):
+            self.configure_assistant_services(None, None)
+            return
+
+        assistant_secrets = dict(self._service_secrets.pop("assistant", {}))
+        try:
+            from engine.assistant.summary_service import (
+                EngineAssistantPromptPolicy,
+                SummaryPromptPolicy,
+            )
+            from engine.core.config import ServiceConfig
+            from engine.providers.manifests import ProtocolFamily
+            from engine.providers.registry import build_default_registry
+            from engine.session.translation_orchestrator import _generation_options, _text_strategy
+
+            service_cfg = ServiceConfig.from_dict("assistant", section)
+            registry = build_default_registry()
+            resolved = registry.resolve_service(service_cfg)
+            for slot in resolved.credential_refs:
+                if slot not in assistant_secrets and slot in self._ephemeral_secrets:
+                    assistant_secrets[slot] = self._ephemeral_secrets[slot]
+
+            factory = await asyncio.to_thread(
+                registry.load_factory, resolved.capability, resolved.provider_id
+            )
+            strategy = _text_strategy(resolved, assistant_secrets)
+            summary_policy = SummaryPromptPolicy()
+            prompt_policy = EngineAssistantPromptPolicy(summary_policy=summary_policy)
+            provider = factory(
+                strategy,
+                resolved.model,
+                prompt_policy=prompt_policy,
+                provider_id=resolved.provider_id,
+                generation=_generation_options(resolved),
+            )
+            if resolved.protocol_family not in (
+                ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+                ProtocolFamily.GEMINI_TEXT,
+            ):
+                logger.warning("Unsupported assistant protocol family: %s", resolved.protocol_family)
+                return
+            await provider.start()
+            self._owned_assistant_provider = provider
+            self.configure_assistant_services(
+                self._conversation_repo, provider, model=resolved.model
+            )
+        except Exception as exc:
+            # Assistant setup failure never halts STT/Translation capture.
+            logger.warning("Assistant service could not be started (%s)", type(exc).__name__)
+            self.configure_assistant_services(None, None)
+        finally:
+            assistant_secrets.clear()
+
     async def _start_stt_session(self):
         secrets_resolver = self._stt_secrets_resolver
         if secrets_resolver is None:
             def secrets_resolver(resolved):
-                return self._ephemeral_secrets
+                cap_secrets = self._service_secrets.get(resolved.capability.value, {})
+                return cap_secrets if cap_secrets else self._ephemeral_secrets
         session = STTSessionOrchestrator(
             self._session_config,
             self._on_stt_event,
@@ -946,7 +1068,8 @@ class EchoFluxEngine:
         secrets_resolver = self._translation_secrets_resolver
         if secrets_resolver is None:
             def secrets_resolver(resolved):
-                return self._ephemeral_secrets
+                cap_secrets = self._service_secrets.get(resolved.capability.value, {})
+                return cap_secrets if cap_secrets else self._ephemeral_secrets
         session = TranslationSessionOrchestrator(
             config,
             self._on_translation_event,
@@ -980,6 +1103,7 @@ class EchoFluxEngine:
                 logger.warning("Failed to end session in repo during abort: %s", e)
             self._active_session_id = None
         self._ephemeral_secrets.clear()
+        self._service_secrets.clear()
         self._inputs.clear()
         self._vads.clear()
         self._audio_queues.clear()

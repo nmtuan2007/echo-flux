@@ -145,7 +145,7 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
 
     case "status":
       if (message.status === "started") {
-        set(sessionStartedState());
+        set((state) => sessionStartedState(state.activeConversationId || state.engineConversationId));
       } else if (message.status === "stopped") {
         get().saveCurrentSession();
         set(sessionStoppedState());
@@ -173,7 +173,33 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
       break;
 
     case "llm_done": {
-      set({ summaryLoading: false });
+      const warningRaw = message.warning as Record<string, unknown> | null | undefined;
+      const warning =
+        warningRaw && typeof warningRaw === "object"
+          ? {
+              reason: String(warningRaw.reason || "context_limit"),
+              omitted_message_count: Number(warningRaw.omitted_message_count || 0),
+              included_message_count:
+                typeof message.included_message_count === "number"
+                  ? message.included_message_count
+                  : undefined,
+              first_omitted_timestamp_ms:
+                typeof warningRaw.first_omitted_timestamp_ms === "number"
+                  ? warningRaw.first_omitted_timestamp_ms
+                  : undefined,
+              last_omitted_timestamp_ms:
+                typeof warningRaw.last_omitted_timestamp_ms === "number"
+                  ? warningRaw.last_omitted_timestamp_ms
+                  : undefined,
+            }
+          : null;
+      const summaryError =
+        typeof message.error === "string" && message.error ? message.error : undefined;
+      set((state) => ({
+        summaryLoading: false,
+        summaryWarning: warning ?? state.summaryWarning,
+        ...(summaryError ? { summaryError } : {}),
+      }));
       get().saveCurrentSession();
       break;
     }

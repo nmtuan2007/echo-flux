@@ -6,6 +6,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { StatusBar } from "./components/StatusBar";
 import { SummaryModal } from "./components/SummaryModal";
 import { TranscriptPanel } from "./components/TranscriptPanel";
+import { LiveSessionBar } from "./components/LiveSessionBar";
 import { ContextProfilesPanel } from "./components/ContextProfilesPanel";
 import { ConversationSetupPanel } from "./components/ConversationSetupPanel";
 import { OnboardingDialog } from "./components/OnboardingDialog";
@@ -103,17 +104,28 @@ export default function App() {
     const getSyncPayload = () => {
       const state = useEngineStore.getState();
       return {
-        entries: state.entries,
+        // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
+        entries: state.entries.slice(-20),
         partials: state.partials,
         running: state.running,
         connected: state.connected,
         suggestionLoading: state.suggestionLoading,
         assistRequests: state.assistRequests,
         engineConversationId: state.engineConversationId,
+        sourceLabels: state.sourceLabels,
         sttStreams: state.sttStreams,
         services: state.services,
         config: publicConfigSnapshot(state.config),
       };
+    };
+
+    let syncTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleSync = () => {
+      if (syncTimer) return;
+      syncTimer = setTimeout(() => {
+        syncTimer = null;
+        void emit("sync_state", getSyncPayload());
+      }, 60);
     };
 
     if (isOverlay) {
@@ -144,7 +156,7 @@ export default function App() {
       }).then((f) => (unlistenAssistRelay = f));
 
       unsubStore = useEngineStore.subscribe(() => {
-        emit("sync_state", getSyncPayload());
+        scheduleSync();
       });
 
       const setupShortcuts = async () => {
@@ -175,6 +187,7 @@ export default function App() {
     }
 
     return () => {
+      if (syncTimer) clearTimeout(syncTimer);
       if (unlistenSync) unlistenSync();
       if (unlistenReq) unlistenReq();
       if (unlistenRelay) unlistenRelay();
@@ -198,7 +211,12 @@ export default function App() {
         {activeView === "settings" && <SettingsPanel />}
         {activeView === "history" && <HistoryPanel />}
         {activeView === "profiles" && <ContextProfilesPanel />}
-        {activeView === "transcript" && <TranscriptPanel />}
+        {activeView === "transcript" && (
+          <div className="transcript-workspace">
+            <LiveSessionBar />
+            <TranscriptPanel />
+          </div>
+        )}
         {/* Modals and Overlays */}
         <SummaryModal />
         <ConversationSetupPanel

@@ -1,12 +1,16 @@
 import { invoke } from "@tauri-apps/api/tauri";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
-import "../styles/global.css";
-import { TranscriptPanel } from "./TranscriptPanel";
+import { streamRank } from "../store/transcriptSlice";
+
+type FontSize = "sm" | "md" | "lg";
 
 export const OverlayPanel: React.FC = () => {
-  const { config } = useEngineStore();
+  const { config, services, entries, partials, running, sourceLabels } = useEngineStore();
   const [isLocked, setIsLocked] = useState(false);
+  const [fontSize, setFontSize] = useState<FontSize>("md");
+  const [highOpacity, setHighOpacity] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = "transparent";
@@ -26,7 +30,6 @@ export const OverlayPanel: React.FC = () => {
     const setupUnlock = async () => {
       try {
         const { register, unregister, isRegistered } = await import("@tauri-apps/api/globalShortcut");
-        // Unregister first to avoid "already registered" error on hot-reload / re-mount
         if (await isRegistered(SHORTCUT)) {
           await unregister(SHORTCUT);
         }
@@ -51,6 +54,12 @@ export const OverlayPanel: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [entries, partials]);
+
   const toggleLock = async () => {
     try {
       const newLocked = !isLocked;
@@ -65,113 +74,122 @@ export const OverlayPanel: React.FC = () => {
     await invoke("revert_to_main_window").catch(console.error);
   };
 
+  const cycleFontSize = () => {
+    setFontSize((prev) => (prev === "sm" ? "md" : prev === "md" ? "lg" : "sm"));
+  };
+
+  const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
+  const recentEntries = entries.slice(-8);
+  const partialStreams = useMemo(
+    () => Object.keys(partials).sort((a, b) => streamRank(a) - streamRank(b)),
+    [partials],
+  );
+
+  const labelFor = (source: string | null | undefined) => {
+    if (source === "mic") return sourceLabels.mic || "Me";
+    if (source === "system") return sourceLabels.system || "Others";
+    return source || "";
+  };
+
   return (
     <div
-      className={`overlay-wrapper ${isLocked ? "locked" : ""}`}
-      style={{
-        width: "100%",
-        height: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: isLocked ? "transparent" : "rgba(0,0,0,0.5)",
-        transition: "background-color 0.2s",
-        position: "relative",
-        paddingTop: isLocked ? "0px" : "48px",
-      }}
+      className={`overlay-wrapper overlay-font-${fontSize} ${isLocked ? "locked" : ""} ${highOpacity ? "overlay-opaque" : ""}`}
     >
       {!isLocked && (
-        <div
-          data-tauri-drag-region
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            height: "48px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "0 12px",
-            zIndex: 1000,
-            background: "linear-gradient(to bottom, rgba(0,0,0,0.8), rgba(0,0,0,0))",
-            cursor: "grab",
-          }}
-        >
-          <div
-            data-tauri-drag-region
-            style={{
-              color: "rgba(255,255,255,0.5)",
-              fontSize: "13px",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-              pointerEvents: "none",
-            }}
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
+        <div className="overlay-controls" data-tauri-drag-region>
+          <div className="overlay-drag-handle" data-tauri-drag-region>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M5 9h14M5 15h14" />
             </svg>
-            Drag to move
+            <span>Drag</span>
           </div>
 
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div className="overlay-btn-group">
             <button
-              onClick={handleBackToMain}
-              style={{
-                background: "rgba(59, 130, 246, 0.8)",
-                color: "#fff",
-                border: "none",
-                padding: "4px 12px",
-                borderRadius: "4px",
-                cursor: "pointer",
-                fontSize: "12px",
-                fontWeight: "bold",
-              }}
+              type="button"
+              className="overlay-btn"
+              onClick={cycleFontSize}
+              title="Cycle subtitle text size"
             >
-              ← Back to Main
+              {fontSize.toUpperCase()}
             </button>
             <button
+              type="button"
+              className="overlay-btn"
+              onClick={() => setHighOpacity((v) => !v)}
+              title="Toggle background opacity"
+            >
+              {highOpacity ? "90%" : "60%"}
+            </button>
+            <button
+              type="button"
+              className="overlay-btn overlay-btn-primary"
+              onClick={handleBackToMain}
+            >
+              ← Main
+            </button>
+            <button
+              type="button"
+              className="overlay-btn"
               onClick={toggleLock}
               title="Lock to click through to apps behind it. Unlock anytime with Ctrl+Shift+U"
-              style={{
-                background: "rgba(255,255,255,0.2)",
-                color: "#fff",
-                border: "none",
-                padding: "4px 8px",
-                borderRadius: "4px",
-                cursor: "pointer",
-                fontSize: "12px",
-              }}
             >
-              Lock (Click-Through)
+              Lock
             </button>
           </div>
         </div>
       )}
 
       {isLocked && (
-        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 1000 }}>
-          <span
-            style={{
-              fontSize: "10px",
-              color: "rgba(255,255,255,0.5)",
-              textShadow: "1px 1px 2px #000",
-            }}
-          >
-            Press Ctrl+Shift+U to Unlock
-          </span>
+        <div className="overlay-unlock-hint">
+          <span>Ctrl+Shift+U to Unlock</span>
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <TranscriptPanel />
+      <div className="overlay-captions" ref={scrollRef}>
+        {recentEntries.length === 0 && partialStreams.length === 0 && (
+          <div className="overlay-empty">
+            {running ? "Listening for speech..." : "Waiting to start session..."}
+          </div>
+        )}
+
+        {recentEntries.map((entry) => (
+          <div
+            key={entry.id}
+            className={`overlay-caption-line ${entry.source ? `overlay-source-${entry.source}` : ""}`}
+          >
+            {entry.source && (
+              <span className="overlay-speaker-tag">{labelFor(entry.source)}</span>
+            )}
+            <span className="overlay-caption-text">{entry.text}</span>
+            {translationEnabled && entry.translation && (
+              <div className="overlay-caption-translation">{entry.translation}</div>
+            )}
+          </div>
+        ))}
+
+        {partialStreams.map((stream) => {
+          const partial = partials[stream];
+          return (
+            <div
+              key={`overlay-partial-${stream}`}
+              className={`overlay-caption-line overlay-caption-partial ${
+                partial.source ? `overlay-source-${partial.source}` : ""
+              }`}
+            >
+              {partial.source && (
+                <span className="overlay-speaker-tag">{labelFor(partial.source)}</span>
+              )}
+              <span className="overlay-caption-text">
+                {partial.text}
+                <span className="typing-cursor" />
+              </span>
+              {translationEnabled && partial.translation && (
+                <div className="overlay-caption-translation">{partial.translation}</div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

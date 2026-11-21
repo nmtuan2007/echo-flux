@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
 import { deriveSttNotice, streamRank, sttProviderLabel } from "../store/transcriptSlice";
 import type {
@@ -15,17 +15,23 @@ const SOURCE_LABELS: Record<NonNullable<TranscriptSource>, { icon: string; label
   both:   { icon: "🔄", label: "Both",   cls: "source-badge-both" },
 };
 
-function sourceLabel(source: string): string {
+function resolveSourceLabel(
+  source: string,
+  customLabels?: { mic: string; system: string },
+): string {
+  if (source === "mic" && customLabels?.mic) return customLabels.mic;
+  if (source === "system" && customLabels?.system) return customLabels.system;
   return SOURCE_LABELS[source as NonNullable<TranscriptSource>]?.label ?? source;
 }
 
 function SourceBadge({ source }: { source: TranscriptSource | undefined }) {
+  const sourceLabels = useEngineStore((s) => s.sourceLabels);
   if (!source) return null;
   const meta = SOURCE_LABELS[source];
   if (!meta) return null;
   return (
     <span className={`source-badge ${meta.cls}`}>
-      {meta.icon} {meta.label}
+      {meta.icon} {resolveSourceLabel(source, sourceLabels)}
     </span>
   );
 }
@@ -49,7 +55,25 @@ function intervalText(interval: ContinuityInterval): string {
 // Memoized on the entry object: the store replaces only entries that changed, so a partial on
 // either stream re-renders no final entry.
 const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry }) {
-  const translationEnabled = useEngineStore((s) => s.config.translationEnabled);
+  const translationEnabled = useEngineStore(
+    (s) => s.services?.translation?.enabled ?? s.config.translationEnabled,
+  );
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyEntry = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const payload =
+      translationEnabled && entry.translation
+        ? `${entry.text}\n${entry.translation}`
+        : entry.text;
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard unavailable
+    }
+  };
 
   return (
     <div
@@ -57,7 +81,7 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
       data-entry-id={entry.id}
       data-message-id={entry.messageId ?? entry.id}
     >
-      {(entry.source || entry.continuity || entry.sttFallbackFrom) && (
+      <div className="transcript-entry-top">
         <div className="transcript-entry-header">
           <SourceBadge source={entry.source} />
           {entry.sttFallbackFrom && (
@@ -77,7 +101,16 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
             </span>
           )}
         </div>
-      )}
+        <button
+          type="button"
+          className="transcript-copy-btn"
+          onClick={handleCopyEntry}
+          title="Copy segment"
+          aria-label="Copy segment"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
       <div className="transcript-text">{entry.text}</div>
       {translationEnabled && entry.translation && (
         <div
@@ -102,7 +135,9 @@ const PartialEntry = memo(function PartialEntry({
   stream: string;
   partial: PartialTranscript;
 }) {
-  const translationEnabled = useEngineStore((s) => s.config.translationEnabled);
+  const translationEnabled = useEngineStore(
+    (s) => s.services?.translation?.enabled ?? s.config.translationEnabled,
+  );
 
   return (
     <div
@@ -132,6 +167,7 @@ function SttNoticeBar() {
   const entries = useEngineStore((s) => s.entries);
   const sttStreams = useEngineStore((s) => s.sttStreams);
   const running = useEngineStore((s) => s.running);
+  const sourceLabels = useEngineStore((s) => s.sourceLabels);
   const notice = useMemo(
     () => deriveSttNotice(entries, sttStreams, running),
     [entries, sttStreams, running],
@@ -143,7 +179,7 @@ function SttNoticeBar() {
     <div className="stt-notice" role="status">
       {notice.fallbacks.map((f) => (
         <span key={f.source} className="stt-notice-item stt-notice-fallback">
-          {sourceLabel(f.source)}: switched to Local from {sttProviderLabel(f.from)}
+          {resolveSourceLabel(f.source, sourceLabels)}: switched to Local from {sttProviderLabel(f.from)}
         </span>
       ))}
       {notice.latestContinuity && (
@@ -163,13 +199,28 @@ export function TranscriptPanel() {
   const downloading = useEngineStore((s) => s.downloading);
   const downloadModel = useEngineStore((s) => s.downloadModel);
   const downloadPercent = useEngineStore((s) => s.downloadPercent);
+  const sourceLabels = useEngineStore((s) => s.sourceLabels);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
+  const [showJumpBtn, setShowJumpBtn] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "mic" | "system">("all");
 
   const checkNearBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    isNearBottom.current = near;
+    setShowJumpBtn(!near && el.scrollHeight > el.clientHeight + 120);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isNearBottom.current = true;
+    setShowJumpBtn(false);
   }, []);
 
   useEffect(() => {
@@ -182,48 +233,117 @@ export function TranscriptPanel() {
     () => Object.keys(partials).sort((a, b) => streamRank(a) - streamRank(b)),
     [partials],
   );
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredEntries = useMemo(() => {
+    if (!normalizedQuery && sourceFilter === "all") return entries;
+    return entries.filter((entry) => {
+      if (sourceFilter !== "all" && entry.source !== sourceFilter) return false;
+      if (!normalizedQuery) return true;
+      return (
+        entry.text.toLowerCase().includes(normalizedQuery) ||
+        Boolean(entry.translation && entry.translation.toLowerCase().includes(normalizedQuery))
+      );
+    });
+  }, [entries, normalizedQuery, sourceFilter]);
+
   const hasContent = entries.length > 0 || partialStreams.length > 0;
 
   return (
-    <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
-      {downloading && (
-        <div className="download-progress-overlay">
-          <div className="download-progress-card">
-            <h4>Downloading AI model for the first time...</h4>
-            <p>{downloadModel}</p>
-            <div className="progress-bar-bg">
-              <div className="progress-bar-fill" style={{ width: `${downloadPercent}%` }}></div>
-            </div>
-            <div className="progress-text-container">
-              <span className="progress-text">{downloadPercent}%</span>
-            </div>
+    <div className="transcript-panel-shell">
+      {entries.length > 0 && (
+        <div className="transcript-filter-bar" role="search" aria-label="Filter transcript">
+          <input
+            type="search"
+            className="transcript-search-input"
+            placeholder="Search transcript..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            aria-label="Search transcript"
+          />
+          <div className="transcript-source-filters" role="group" aria-label="Filter by speaker">
+            <button
+              type="button"
+              className={`filter-pill ${sourceFilter === "all" ? "active" : ""}`}
+              onClick={() => setSourceFilter("all")}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${sourceFilter === "mic" ? "active" : ""}`}
+              onClick={() => setSourceFilter("mic")}
+            >
+              {sourceLabels.mic || "Me"}
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${sourceFilter === "system" ? "active" : ""}`}
+              onClick={() => setSourceFilter("system")}
+            >
+              {sourceLabels.system || "Others"}
+            </button>
           </div>
         </div>
       )}
 
-      <SttNoticeBar />
+      <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
+        {downloading && (
+          <div className="download-progress-overlay">
+            <div className="download-progress-card">
+              <h4>Downloading AI model for the first time...</h4>
+              <p>{downloadModel}</p>
+              <div className="progress-bar-bg">
+                <div className="progress-bar-fill" style={{ width: `${downloadPercent}%` }}></div>
+              </div>
+              <div className="progress-text-container">
+                <span className="progress-text">{downloadPercent}%</span>
+              </div>
+            </div>
+          </div>
+        )}
 
-      {!hasContent && !downloading && (
-        <div className="transcript-empty">
-          <p>No transcript yet.</p>
-          <p>Press <strong>Start</strong> to begin transcription.</p>
-        </div>
-      )}
+        <SttNoticeBar />
 
-      {entries.map((entry) => (
-        <FinalEntry key={entry.id} entry={entry} />
-      ))}
+        {!hasContent && !downloading && (
+          <div className="transcript-empty">
+            <p>No transcript yet.</p>
+            <p>Press <strong>Start</strong> to begin transcription.</p>
+          </div>
+        )}
 
-      {partialStreams.map((stream) => (
-        <PartialEntry key={`partial-${stream}`} stream={stream} partial={partials[stream]} />
-      ))}
+        {entries.length > 0 && filteredEntries.length === 0 && (
+          <div className="transcript-empty">
+            <p>No segments match your current filter.</p>
+          </div>
+        )}
 
-      {running && partialStreams.length === 0 && entries.length > 0 && (
-        <div className="transcript-listening">
-          <span className="listening-dot" />
-          <span className="listening-dot" />
-          <span className="listening-dot" />
-        </div>
+        {filteredEntries.map((entry) => (
+          <FinalEntry key={entry.id} entry={entry} />
+        ))}
+
+        {partialStreams.map((stream) => (
+          <PartialEntry key={`partial-${stream}`} stream={stream} partial={partials[stream]} />
+        ))}
+
+        {running && partialStreams.length === 0 && entries.length > 0 && (
+          <div className="transcript-listening">
+            <span className="listening-dot" />
+            <span className="listening-dot" />
+            <span className="listening-dot" />
+          </div>
+        )}
+      </div>
+
+      {showJumpBtn && (
+        <button
+          type="button"
+          className="transcript-jump-btn"
+          onClick={jumpToLatest}
+          title="Scroll to latest captions"
+        >
+          ↓ Jump to latest
+        </button>
       )}
     </div>
   );

@@ -1,5 +1,6 @@
 import type { EngineSliceCreator, EngineState } from "./engineStore";
 import type { EngineCommands } from "./sessionSlice";
+import { publicConfigSnapshot } from "./settingsSlice";
 import { describeCommandError, forwardCommand, isTauriRuntime } from "../lib/engineBridge";
 import type {
   ContextProfile,
@@ -93,6 +94,10 @@ export function applyLlmChunk(state: EngineState, message: EngineMessage): Parti
     return {};
   }
   const text = (message.text as string) || "";
+  if (message.is_error === true) {
+    const cleaned = text.replace(/^\s*\*\*Error:\*\*\s*/i, "").trim();
+    return { summaryError: cleaned || "Summary generation failed." };
+  }
   return { summaryText: state.summaryText + text };
 }
 
@@ -200,10 +205,10 @@ export const createConversationSlice =
 
     requestSummary: () => {
       const state = get();
-      const conversationId = state.activeConversationId || state.engineConversationId;
+      const conversationId = state.engineConversationId || state.activeConversationId;
       const { socket, connected, entries, config } = state;
 
-      if (!socket || !connected || entries.length === 0) return;
+      if (!socket || !connected || (entries.length === 0 && !conversationId)) return;
 
       const requestId = `sum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set({
@@ -216,7 +221,14 @@ export const createConversationSlice =
         activeSummaryConversationId: conversationId || null,
       });
 
-      socket.send(commands.requestSummary(entries, config));
+      if (conversationId) {
+        const { type } = JSON.parse(
+          commands.requestSummary([], publicConfigSnapshot(config)),
+        ) as { type: string };
+        socket.send(JSON.stringify({ type, conversation_id: conversationId }));
+      } else {
+        socket.send(commands.requestSummary(entries, config));
+      }
     },
 
     cancelSummary: async () => {
@@ -407,8 +419,14 @@ export const createConversationSlice =
     },
 
     saveCurrentSession: () => {
-      const { entries, summaryText, activeConversationId } = get();
+      const { entries, summaryText, activeConversationId, engineConversationId } = get();
       if (entries.length === 0) return;
+
+      // Desktop SQLite persists conversations directly on the engine; skip duplicating into
+      // localStorage legacy history when a SQLite conversation id is active.
+      if (isTauriRuntime() && (activeConversationId || engineConversationId)) {
+        return;
+      }
 
       if (activeConversationId) {
         set((state) => ({
@@ -445,7 +463,7 @@ export const createConversationSlice =
     },
 
     loadConversation: (id) => {
-      const { history, running } = get();
+      const { history, running, selectedConversationDetail } = get();
       if (running) return;
 
       const target = history.find((c) => c.id === id);
@@ -456,6 +474,40 @@ export const createConversationSlice =
           partials: {},
           suggestionLoading: {},
           summaryText: target.summary || "",
+          summaryVisible: false,
+          summaryLoading: false,
+          activeConversationId: id,
+        });
+        return;
+      }
+
+      const detail = selectedConversationDetail;
+      const detailId = detail?.conversation?.conversation_id || detail?.conversation_id;
+      if (detail && detailId === id) {
+        const rawMessages = detail.messages || [];
+        const loadedEntries: TranscriptEntry[] = rawMessages.map((m: any, idx: number) => ({
+          id: m.message_id || `msg-${idx}`,
+          text: m.stt_text || m.text || "",
+          translation: m.translation_text ?? m.translation ?? null,
+          isFinal: true,
+          timestamp:
+            typeof m.timestamp_ms === "number"
+              ? m.timestamp_ms / 1000
+              : typeof m.timestamp === "number"
+                ? m.timestamp
+                : 0,
+          source:
+            m.source === "mic" || m.source === "system" || m.source === "both"
+              ? m.source
+              : null,
+          revision: m.revision ?? 1,
+        }));
+        set({
+          entries: loadedEntries,
+          activeView: "transcript",
+          partials: {},
+          suggestionLoading: {},
+          summaryText: detail.summary?.summary_markdown || detail.summary || "",
           summaryVisible: false,
           summaryLoading: false,
           activeConversationId: id,
@@ -656,9 +708,16 @@ export const createConversationSlice =
             engineConversationId: convId,
             isSetupOpen: false,
           });
+        } else {
+          set({ isSetupOpen: false });
         }
-      } catch {
-        set({ isSetupOpen: false });
+      } catch (err: any) {
+        set({
+          isSetupOpen: false,
+          ...(isTauriRuntime()
+            ? { appError: `Session setup failed: ${describeCommandError(err?.code || "bridge_failed")}` }
+            : {}),
+        });
       }
       get().startPipeline();
     },

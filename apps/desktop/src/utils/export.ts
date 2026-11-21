@@ -2,13 +2,15 @@ export interface ExportEntry {
   text: string;
   translation: string | null;
   timestamp: number;
+  speaker?: string;
 }
 
 export function exportAsText(entries: ExportEntry[]): string {
   return entries
     .map((entry) => {
       const time = formatTimestamp(entry.timestamp);
-      let line = `[${time}] ${entry.text}`;
+      const speaker = entry.speaker ? `[${entry.speaker}] ` : "";
+      let line = `[${time}] ${speaker}${entry.text}`;
       if (entry.translation) {
         line += `\n         ${entry.translation}`;
       }
@@ -24,7 +26,8 @@ export function exportAsSRT(entries: ExportEntry[]): string {
       const duration = estimateDuration(entry.text);
       const end = formatSRTTime(entry.timestamp + duration);
 
-      let text = entry.text;
+      const speaker = entry.speaker ? `${entry.speaker}: ` : "";
+      let text = `${speaker}${entry.text}`;
       if (entry.translation) {
         text += `\n${entry.translation}`;
       }
@@ -34,11 +37,35 @@ export function exportAsSRT(entries: ExportEntry[]): string {
     .join("\n\n");
 }
 
+export function exportAsMarkdown(
+  entries: ExportEntry[],
+  title?: string,
+  summaryMarkdown?: string | null,
+): string {
+  const sections: string[] = [];
+  sections.push(`# ${title?.trim() || "EchoFlux Meeting Transcript"}`);
+  if (summaryMarkdown?.trim()) {
+    sections.push(`## Summary\n\n${summaryMarkdown.trim()}`);
+  }
+  const transcriptLines = entries.map((entry) => {
+    const time = formatTimestamp(entry.timestamp);
+    const speaker = entry.speaker ? `**${entry.speaker}** ` : "";
+    let block = `- **[${time}]** ${speaker}${entry.text}`;
+    if (entry.translation) {
+      block += `\n  > ${entry.translation}`;
+    }
+    return block;
+  });
+  sections.push(`## Transcript\n\n${transcriptLines.join("\n")}`);
+  return sections.join("\n\n");
+}
+
 export function exportAsJSON(entries: ExportEntry[]): string {
   return JSON.stringify(
     entries.map((entry) => ({
       timestamp: entry.timestamp,
       time: formatTimestamp(entry.timestamp),
+      ...(entry.speaker ? { speaker: entry.speaker } : {}),
       text: entry.text,
       translation: entry.translation,
     })),
@@ -47,8 +74,8 @@ export function exportAsJSON(entries: ExportEntry[]): string {
   );
 }
 
-export function downloadFile(content: string, filename: string) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+export function downloadFile(content: string, filename: string, mimeType = "text/plain;charset=utf-8") {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

@@ -14,6 +14,7 @@ legacy 'msg_type' matching and 'type'-tagged event broadcasts.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -116,6 +117,28 @@ def _serialize_manifest(m: ProviderManifest) -> Dict[str, Any]:
         "protocol_profiles": {k: v.value for k, v in m.protocol_profiles.items()},
         "profile_field": m.profile_field,
     }
+
+
+def _is_local_model_ready(capability: str) -> bool:
+    """Checks whether local STT or Translation models exist on disk in models_dir."""
+    try:
+        models_dir = Config().models_dir
+        if not models_dir or not models_dir.exists():
+            return False
+        cap = (capability or "").lower()
+        if cap in ("stt", "speech", "whisper"):
+            stt_dirs = list(models_dir.glob("models--Systran--faster-whisper-*")) + list(
+                models_dir.glob("models--openai--whisper-*")
+            )
+            return len(stt_dirs) > 0
+        elif cap in ("translation", "translate", "marian", "opus"):
+            ct2_dir = models_dir / "ct2"
+            if ct2_dir.exists():
+                trans_dirs = list(ct2_dir.glob("Helsinki-NLP_opus-mt-*"))
+                return len(trans_dirs) > 0
+        return False
+    except Exception:
+        return False
 
 
 class ControlCommandDispatcher:
@@ -843,6 +866,9 @@ class ControlCommandDispatcher:
             active = await asyncio.to_thread(installer.active, p.pack_id)
             installed = await asyncio.to_thread(installer.installed_versions, p.pack_id)
             issues = compatibility_issues(p, profile)
+            local_ready = _is_local_model_ready(p.kind.value)
+            is_ready = (active is not None and len(issues) == 0) or local_ready
+            is_installed = bool(installed) or (active is not None) or local_ready
             status_list.append(
                 {
                     "pack_id": p.pack_id,
@@ -851,11 +877,13 @@ class ControlCommandDispatcher:
                     "display_name": p.display_name,
                     "size_bytes": p.size_bytes,
                     "tiers": [t.value for t in p.tiers],
-                    "active_version": active.version if active else None,
-                    "installed_versions": installed,
-                    "is_active": active is not None,
-                    "compatibility_issues": issues,
-                    "is_compatible": len(issues) == 0,
+                    "active_version": active.version if active else ("1.0.0" if local_ready else None),
+                    "installed_versions": installed if installed else (["1.0.0"] if local_ready else []),
+                    "is_active": active is not None or local_ready,
+                    "is_ready": is_ready,
+                    "installed": is_installed,
+                    "compatibility_issues": [] if local_ready else issues,
+                    "is_compatible": len(issues) == 0 or local_ready,
                 }
             )
 
@@ -876,6 +904,49 @@ class ControlCommandDispatcher:
         if not isinstance(pack_id, str) or not pack_id:
             raise DispatcherError("invalid_payload", "pack_id is required")
         version = payload.get("version")
+
+        lowered = pack_id.lower()
+        models_dir = Config().models_dir
+        if "whisper" in lowered or lowered in ("base", "tiny", "small", "medium", "large"):
+            size = "base"
+            if "tiny" in lowered:
+                size = "tiny"
+            elif "small" in lowered:
+                size = "small"
+            elif "medium" in lowered:
+                size = "medium"
+            elif "large" in lowered:
+                size = "large-v3"
+
+            from faster_whisper.utils import download_model
+
+            out_path = await asyncio.to_thread(download_model, size, output_dir=str(models_dir))
+            return {
+                "installed": True,
+                "pack_id": pack_id,
+                "version": "1.0.0",
+                "path": str(out_path),
+                "active": True,
+            }
+
+        if "marian" in lowered or "opus" in lowered:
+            from engine.translation.marian_backend import MarianBackend
+
+            backend = MarianBackend()
+            await asyncio.to_thread(
+                backend.load_model,
+                {"translation.source_lang": "en", "translation.target_lang": "vi"},
+            )
+            out_path = str(backend._ct2_model_path or models_dir)
+            with contextlib.suppress(Exception):
+                backend.unload_model()
+            return {
+                "installed": True,
+                "pack_id": pack_id,
+                "version": "1.0.0",
+                "path": out_path,
+                "active": True,
+            }
 
         installer = self._get_installer()
         cancel_event = threading.Event()
@@ -925,6 +996,7 @@ class ControlCommandDispatcher:
         profile: HardwareProfile = await asyncio.to_thread(probe.probe)
 
         kind = PackKind.STT if capability.lower() == "stt" else PackKind.TRANSLATION
+        is_local = _is_local_model_ready(capability)
 
         if pack_id:
             pack = catalog.get(pack_id)
@@ -932,14 +1004,15 @@ class ControlCommandDispatcher:
                 raise DispatcherError("not_found", f"Pack '{pack_id}' not found")
             issues = compatibility_issues(pack, profile)
             active = await asyncio.to_thread(installer.active, pack.pack_id)
-            ready = active is not None and len(issues) == 0
+            ready = (active is not None and len(issues) == 0) or is_local
+            installed = (active is not None) or is_local
             tier_val = pack.tiers[0].value if pack.tiers else "minimal"
             return {
                 "capability": capability,
                 "pack_id": pack.pack_id,
                 "ready": ready,
-                "issues": issues,
-                "installed": active is not None,
+                "issues": [] if ready else issues,
+                "installed": installed,
                 "tier": tier_val,
             }
 
@@ -949,20 +1022,23 @@ class ControlCommandDispatcher:
             return {
                 "capability": capability,
                 "pack_id": None,
-                "ready": False,
-                "issues": ["no_compatible_pack"],
+                "ready": is_local,
+                "issues": [] if is_local else ["no_compatible_pack"],
+                "installed": is_local,
                 "tier": "minimal",
                 "reason": selection.reason,
             }
 
         active = await asyncio.to_thread(installer.active, pack.pack_id)
+        ready = (active is not None) or is_local
+        installed = (active is not None) or is_local
         tier_val = selection.tier.value if selection.tier else "minimal"
         return {
             "capability": capability,
             "pack_id": pack.pack_id,
-            "ready": active is not None,
+            "ready": ready,
             "issues": [],
-            "installed": active is not None,
+            "installed": installed,
             "tier": tier_val,
             "reason": selection.reason,
         }

@@ -1,0 +1,183 @@
+/* ── Overlay PiP Caption Mode ── */
+.overlay-wrapper {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background-color: rgba(12, 14, 18, 0.6);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: background-color 0.2s ease;
+}
+
+.overlay-wrapper.overlay-opaque {
+  background-color: rgba(12, 14, 18, 0.92);
+}
+
+.overlay-wrapper.locked {
+  background-color: transparent;
+}
+
+.overlay-controls {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  z-index: 20;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0.2));
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  cursor: grab;
+}
+
+.overlay-wrapper:hover .overlay-controls,
+.overlay-controls:focus-within {
+  opacity: 1;
+}
+
+.overlay-drag-handle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.overlay-btn-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.overlay-btn {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  padding: 3px 9px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.overlay-btn:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.overlay-btn-primary {
+  background: rgba(59, 130, 246, 0.88);
+  border-color: transparent;
+}
+
+.overlay-btn-primary:hover {
+  background: rgba(37, 99, 235, 0.95);
+}
+
+.overlay-unlock-hint {
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.overlay-unlock-hint span {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.55);
+  text-shadow: 1px 1px 2px #000;
+}
+
+.overlay-captions {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.overlay-empty {
+  color: rgba(255, 255, 255, 0.78);
+  text-shadow: 1px 1px 3px #000;
+  font-size: 13px;
+  margin: auto;
+}
+
+.overlay-caption-line {
+  background-color: rgba(20, 22, 28, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #f8fafc;
+}
+
+.overlay-caption-line.overlay-source-mic {
+  border-left-color: var(--accent);
+}
+
+.overlay-caption-line.overlay-source-system {
+  border-left-color: #a855f7;
+}
+
+.overlay-wrapper.locked .overlay-caption-line {
+  background-color: transparent;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  padding: 3px 10px;
+}
+
+.overlay-speaker-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #93c5fd;
+  margin-right: 8px;
+}
+
+.overlay-source-system .overlay-speaker-tag {
+  color: #d8b4fe;
+}
+
+.overlay-caption-text {
+  line-height: 1.4;
+}
+
+.overlay-caption-translation {
+  margin-top: 2px;
+  color: #cbd5e1;
+  font-size: 0.92em;
+}
+
+.overlay-wrapper.locked .overlay-caption-text,
+.overlay-wrapper.locked .overlay-caption-translation {
+  color: #ffffff;
+  text-shadow:
+    1px 1px 0 #000,
+    -1px -1px 0 #000,
+    1px -1px 0 #000,
+    -1px 1px 0 #000,
+    2px 2px 4px rgba(0, 0, 0, 0.9);
+}
+
+.overlay-font-sm .overlay-captions {
+  font-size: 12px;
+}
+
+.overlay-font-md .overlay-captions {
+  font-size: 14px;
+}
+
+.overlay-font-lg .overlay-captions {
+  font-size: 17px;
+}

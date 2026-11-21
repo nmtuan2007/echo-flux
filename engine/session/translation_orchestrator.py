@@ -370,6 +370,8 @@ def _text_strategy(resolved: ResolvedService, secrets: Mapping[str, str]) -> Any
             resolved.options.get("api_version", ""),
             key,
         )
+    if pid == "local-openai-compatible":
+        return text.LocalOpenAICompatibleStrategy(resolved.endpoint, key or None)
     if pid == "custom-openai-compatible":
         return text.CustomOpenAICompatibleStrategy(resolved.endpoint, key or None)
     raise ProviderRegistryError(

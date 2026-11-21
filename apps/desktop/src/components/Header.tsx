@@ -8,18 +8,10 @@ export function Header() {
     isToggling,
     activeView,
     theme,
-    entries,
-    config,
-    services,
-    activeConversationId,
-    summaryText,
     startPipeline,
     stopPipeline,
-    clearTranscript,
     setActiveView,
     setTheme,
-    requestSummary,
-    openSummary,
   } = useEngineStore();
 
   const handleStartStop = () => {
@@ -43,17 +35,13 @@ export function Header() {
     setTheme(theme === "light" ? "dark" : "light");
   };
 
-  const isAssistantEnabled = services?.assistant?.enabled || config.llmEnabled;
-  const hasActiveConversation = Boolean(activeConversationId || entries.length > 0);
-  const canSummarize = isAssistantEnabled && hasActiveConversation && connected;
-  const hasSummary = !!summaryText;
-
   return (
     <header className="header">
       <div className="header-left">
-        <h1 className="header-title" onClick={() => setActiveView("transcript")} style={{cursor: 'pointer'}}>
+        <h1 className="header-title" onClick={() => setActiveView("transcript")} style={{ cursor: "pointer" }}>
           EchoFlux
         </h1>
+        {running && <span className="header-live-pill">LIVE</span>}
       </div>
 
       <div className="header-center">
@@ -76,49 +64,14 @@ export function Header() {
         <button
           className="btn btn-secondary"
           onClick={() => {
-            console.log("[DEBUG] PiP Overlay button clicked!");
-            invoke("toggle_overlay_window")
-              .then(() => console.log("[DEBUG] toggle_overlay_window succeeded"))
-              .catch(e => console.error("[DEBUG] toggle_overlay_window failed:", e));
+            void invoke("toggle_overlay_window").catch((e) =>
+              console.error("Failed to toggle overlay window:", e),
+            );
           }}
           title="Toggle Floating Overlay (Ctrl+Shift+O)"
         >
           PiP Overlay
         </button>
-
-        <button
-          className="btn btn-secondary"
-          onClick={clearTranscript}
-          disabled={isToggling || activeView !== "transcript"}
-          title="Clear current transcript"
-        >
-          Clear
-        </button>
-
-        <button
-          className={`btn btn-summarize ${!canSummarize ? "btn-summarize-disabled" : ""}`}
-          onClick={requestSummary}
-          disabled={!canSummarize}
-          title={
-            !config.llmEnabled
-              ? "Enable AI Assistant in Settings first"
-              : entries.length === 0
-              ? "Start a meeting to summarize"
-              : "Summarize this meeting with AI"
-          }
-        >
-          📝 Summarize
-        </button>
-
-        {hasSummary && (
-          <button
-            className="btn btn-view-summary"
-            onClick={openSummary}
-            title="View saved meeting summary"
-          >
-            📋 View Summary
-          </button>
-        )}
       </div>
 
       <div className="header-right">

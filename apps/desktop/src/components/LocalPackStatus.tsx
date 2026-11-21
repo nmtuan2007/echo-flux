@@ -78,7 +78,7 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
   const sizeMb = item?.sizeBytes ? Math.round(item.sizeBytes / (1024 * 1024)) : capability === "stt" ? 145 : 250;
 
   return (
-    <div className="pack-status-card" data-capability={capability}>
+    <div className="pack-status-card local-pack-status-card" data-capability={capability}>
       <div className="pack-status-header">
         <div className="pack-status-title-row">
           <span className="pack-status-icon">{capability === "stt" ? "🎙️" : "🌐"}</span>

@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 export function SummaryModal() {
   const {
@@ -12,6 +13,7 @@ export function SummaryModal() {
     closeSummary,
   } = useEngineStore();
   const contentRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
 
   // Auto-scroll as content streams in
   useEffect(() => {
@@ -20,11 +22,22 @@ export function SummaryModal() {
     }
   }, [summaryText]);
 
+  useEffect(() => {
+    if (!summaryVisible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeSummary();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [summaryVisible, closeSummary]);
+
   if (!summaryVisible) return null;
 
   const handleCopyAll = async () => {
     try {
       await navigator.clipboard.writeText(summaryText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
     } catch {
       // Clipboard API unavailable
     }
@@ -58,7 +71,7 @@ export function SummaryModal() {
             )}
             {summaryText && !summaryLoading && (
               <button className="btn btn-secondary summary-copy-all-btn" onClick={handleCopyAll}>
-                📋 Copy All
+                {copied ? "✓ Copied" : "📋 Copy All"}
               </button>
             )}
             <button className="btn-icon summary-close-btn" onClick={closeSummary} title="Close">
@@ -108,89 +121,6 @@ export function SummaryModal() {
       </div>
     </div>
   );
-}
-
-/**
- * Very lightweight markdown renderer — handles bold, italic, code, and lists
- * without a full markdown library dependency.
- */
-function MarkdownRenderer({ text }: { text: string }) {
-  const lines = text.split("\n");
-  const elements: React.ReactNode[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Heading
-    if (line.startsWith("### ")) {
-      elements.push(<h3 key={i} className="summary-h3">{parseInline(line.slice(4))}</h3>);
-    } else if (line.startsWith("## ")) {
-      elements.push(<h2 key={i} className="summary-h2">{parseInline(line.slice(3))}</h2>);
-    } else if (line.startsWith("# ")) {
-      elements.push(<h1 key={i} className="summary-h1">{parseInline(line.slice(2))}</h1>);
-    }
-    // Bullet list item
-    else if (line.match(/^[-*] /)) {
-      elements.push(
-        <div key={i} className="summary-list-item">
-          <span className="summary-bullet">•</span>
-          <span>{parseInline(line.slice(2))}</span>
-        </div>
-      );
-    }
-    // Numbered list item
-    else if (line.match(/^\d+\. /)) {
-      const content = line.replace(/^\d+\. /, "");
-      const num = line.match(/^(\d+)\./)?.[1];
-      elements.push(
-        <div key={i} className="summary-list-item summary-numbered">
-          <span className="summary-number">{num}.</span>
-          <span>{parseInline(content)}</span>
-        </div>
-      );
-    }
-    // Blank line
-    else if (line.trim() === "") {
-      elements.push(<div key={i} className="summary-spacer" />);
-    }
-    // Paragraph
-    else {
-      elements.push(<p key={i} className="summary-para">{parseInline(line)}</p>);
-    }
-  }
-
-  return <div className="summary-markdown">{elements}</div>;
-}
-
-/** Render inline bold (**text**), italic (*text*), and code (`text`) */
-function parseInline(text: string): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  // Split on **bold**, *italic*, `code`
-  const regex = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith("**")) {
-      parts.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("*")) {
-      parts.push(<em key={key++}>{token.slice(1, -1)}</em>);
-    } else if (token.startsWith("`")) {
-      parts.push(<code key={key++} className="summary-inline-code">{token.slice(1, -1)}</code>);
-    }
-    lastIndex = match.index + token.length;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return parts.length === 1 ? parts[0] : parts;
 }
 
 function CloseIcon() {

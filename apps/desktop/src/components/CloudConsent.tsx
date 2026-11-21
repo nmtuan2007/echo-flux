@@ -50,58 +50,66 @@ export function CloudConsent({ mode = "onboarding", onConsentChange }: CloudCons
         </div>
       </div>
 
-      <div className="cloud-disclosures-list">
-        <label className="cloud-disclosure-item">
-          <input
-            type="checkbox"
-            checked={toggles.stt}
-            onChange={() => handleToggle("stt")}
-            className="cloud-checkbox"
-          />
-          <div className="cloud-disclosure-text">
-            <strong>Speech-to-Text (Audio Streaming)</strong>
-            <p>Transmits raw real-time microphone and system audio streams to configured external cloud endpoints (e.g. OpenAI, Deepgram, Gemini).</p>
-          </div>
-        </label>
+      <div className="consent-disclosure-list cloud-disclosures-list">
+        <div className="consent-opt-in-box">
+          <label className="consent-disclosure-item consent-checkbox-label cloud-disclosure-item">
+            <input
+              type="checkbox"
+              checked={toggles.stt}
+              onChange={() => handleToggle("stt")}
+              className="consent-checkbox cloud-checkbox"
+            />
+            <div className="consent-disclosure-text cloud-disclosure-text">
+              <strong>Speech-to-Text (Audio Streaming)</strong>
+              <p>Transmits raw real-time microphone and system audio streams to configured external cloud endpoints (e.g. OpenAI, Deepgram, Gemini).</p>
+            </div>
+          </label>
+        </div>
 
-        <label className="cloud-disclosure-item">
-          <input
-            type="checkbox"
-            checked={toggles.translation}
-            onChange={() => handleToggle("translation")}
-            className="cloud-checkbox"
-          />
-          <div className="cloud-disclosure-text">
-            <strong>Translation (Transcript Streaming)</strong>
-            <p>Transmits finalized transcript text segments to external cloud translation services.</p>
-          </div>
-        </label>
+        <div className="consent-opt-in-box">
+          <label className="consent-disclosure-item consent-checkbox-label cloud-disclosure-item">
+            <input
+              type="checkbox"
+              checked={toggles.translation}
+              onChange={() => handleToggle("translation")}
+              className="consent-checkbox cloud-checkbox"
+            />
+            <div className="consent-disclosure-text cloud-disclosure-text">
+              <strong>Translation (Transcript Streaming)</strong>
+              <p>Transmits finalized transcript text segments to external cloud translation services.</p>
+            </div>
+          </label>
+        </div>
 
-        <label className="cloud-disclosure-item">
-          <input
-            type="checkbox"
-            checked={toggles.assistant}
-            onChange={() => handleToggle("assistant")}
-            className="cloud-checkbox"
-          />
-          <div className="cloud-disclosure-text">
-            <strong>AI Assistant (Replies & Questions)</strong>
-            <p>Transmits selected message context windows and attached context profile snapshots to external LLM providers.</p>
-          </div>
-        </label>
+        <div className="consent-opt-in-box">
+          <label className="consent-disclosure-item consent-checkbox-label cloud-disclosure-item">
+            <input
+              type="checkbox"
+              checked={toggles.assistant}
+              onChange={() => handleToggle("assistant")}
+              className="consent-checkbox cloud-checkbox"
+            />
+            <div className="consent-disclosure-text cloud-disclosure-text">
+              <strong>AI Assistant (Replies & Questions)</strong>
+              <p>Transmits selected message context windows and attached context profile snapshots to external LLM providers.</p>
+            </div>
+          </label>
+        </div>
 
-        <label className="cloud-disclosure-item">
-          <input
-            type="checkbox"
-            checked={toggles.summary}
-            onChange={() => handleToggle("summary")}
-            className="cloud-checkbox"
-          />
-          <div className="cloud-disclosure-text">
-            <strong>Meeting Summary (Full Transcripts)</strong>
-            <p>Transmits complete meeting transcripts to external LLM providers when meeting summarization is requested.</p>
-          </div>
-        </label>
+        <div className="consent-opt-in-box">
+          <label className="consent-disclosure-item consent-checkbox-label cloud-disclosure-item">
+            <input
+              type="checkbox"
+              checked={toggles.summary}
+              onChange={() => handleToggle("summary")}
+              className="consent-checkbox cloud-checkbox"
+            />
+            <div className="consent-disclosure-text cloud-disclosure-text">
+              <strong>Meeting Summary (Full Transcripts)</strong>
+              <p>Transmits complete meeting transcripts to external LLM providers when meeting summarization is requested.</p>
+            </div>
+          </label>
+        </div>
       </div>
 
       <div className="cloud-consent-disclaimer" role="note">

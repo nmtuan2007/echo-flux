@@ -12,9 +12,16 @@ export function StatusBar() {
   const connected = useEngineStore((s) => s.connected);
   const running = useEngineStore((s) => s.running);
   const entryCount = useEngineStore((s) => s.entries.length);
-  const language = useEngineStore((s) => s.config.language);
-  const translationEnabled = useEngineStore((s) => s.config.translationEnabled);
-  const targetLang = useEngineStore((s) => s.config.targetLang);
+  const sourceLabels = useEngineStore((s) => s.sourceLabels);
+  const language = useEngineStore(
+    (s) => (s.services?.stt?.options?.language as string) || s.config.language,
+  );
+  const translationEnabled = useEngineStore(
+    (s) => s.services?.translation?.enabled ?? s.config.translationEnabled,
+  );
+  const targetLang = useEngineStore(
+    (s) => (s.services?.translation?.options?.target_lang as string) || s.config.targetLang,
+  );
   const sttStreams = useEngineStore((s) => s.sttStreams);
   const assistant = useEngineStore(isAssistantConfigured);
 
@@ -57,7 +64,10 @@ export function StatusBar() {
                     : "Speech-to-text provider"
                 }
               >
-                {STREAM_LABELS[stream.source] ?? stream.source}: {sttProviderLabel(stream.provider)}
+                {sourceLabels?.[stream.source as "mic" | "system"] ||
+                  STREAM_LABELS[stream.source] ||
+                  stream.source}
+                : {sttProviderLabel(stream.provider)}
                 {stream.fallbackFrom && <span className="status-fallback"> (fallback)</span>}
                 {stream.continuityCount > 0 && (
                   <span className="status-continuity" title="Intervals whose transcript may be missing or repeated">

@@ -80,7 +80,7 @@ export function connectionResetState(): Partial<EngineState> {
   };
 }
 
-export function sessionStartedState(): Partial<EngineState> {
+export function sessionStartedState(existingConversationId?: string | null): Partial<EngineState> {
   return {
     running: true,
     isToggling: false,
@@ -93,7 +93,7 @@ export function sessionStartedState(): Partial<EngineState> {
     downloading: false,
     downloadModel: "",
     downloadPercent: 0,
-    activeConversationId: null,
+    activeConversationId: existingConversationId ?? null,
   };
 }
 
@@ -493,6 +493,9 @@ export const createSessionSlice =
             authenticated = true;
             cancelReconnect();
             set({ connected: true });
+            if (get().history.length > 0) {
+              void get().migrateLegacyHistory();
+            }
           } else if (frame.op === "error") {
             set({ appError: describeTransportError(frame.code) });
           }
@@ -551,7 +554,15 @@ export const createSessionSlice =
       if (LEGACY_SECRET_FIELDS.some((field) => get().config[field])) {
         await get().commitLegacySecrets();
       }
-      const { config, secretStatus, services } = get();
+      const {
+        config,
+        secretStatus,
+        services,
+        activeConversationId,
+        engineConversationId,
+        pendingTitle,
+        sourceLabels,
+      } = get();
       const credentials: Record<string, StartCredentialRef> = {};
       if (secretStatus.llmApiKey) {
         credentials["llm.api_key"] = { ...LEGACY_CREDENTIALS.llmApiKey };
@@ -573,6 +584,19 @@ export const createSessionSlice =
       const publicConfig = publicStartConfig(deps.commands, config);
       if (services) {
         publicConfig.services = services;
+      }
+      const convId = activeConversationId || engineConversationId;
+      if (convId) {
+        publicConfig.conversation_id = convId;
+      }
+      if (pendingTitle.trim()) {
+        publicConfig.conversation_title = pendingTitle.trim();
+      }
+      if (sourceLabels) {
+        publicConfig.source_labels = {
+          mic: sourceLabels.mic || "Me",
+          system: sourceLabels.system || "Others",
+        };
       }
       await runControl(gen, () => forwardStart(publicConfig, credentials));
     };
