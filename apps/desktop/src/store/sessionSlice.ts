@@ -73,10 +73,12 @@ export function connectionResetState(): Partial<EngineState> {
     socket: null,
     running: false,
     isToggling: false,
+    preparedConversationId: null,
     activeTranslationBackend: null,
     downloading: false,
     downloadModel: "",
     downloadPercent: 0,
+    audioLevels: {},
   };
 }
 
@@ -84,6 +86,7 @@ export function sessionStartedState(existingConversationId?: string | null): Par
   return {
     running: true,
     isToggling: false,
+    preparedConversationId: null,
     entries: [],
     partials: {},
     suggestionLoading: {},
@@ -93,6 +96,8 @@ export function sessionStartedState(existingConversationId?: string | null): Par
     downloading: false,
     downloadModel: "",
     downloadPercent: 0,
+    audioLevels: {},
+    isViewingHistory: false,
     activeConversationId: existingConversationId ?? null,
   };
 }
@@ -105,6 +110,7 @@ export function sessionStoppedState(): Partial<EngineState> {
     downloading: false,
     downloadModel: "",
     downloadPercent: 0,
+    audioLevels: {},
   };
 }
 
@@ -161,6 +167,7 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   search_hub: "hub_search_results",
   request_suggestion: "suggestion_result",
   request_assist: null,
+  configure_assistant: null,
   request_summary: "llm_done",
   summary_cancel: null,
   conversation_create: null,
@@ -171,6 +178,7 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   conversation_delete: null,
   conversation_export: null,
   conversation_import: null,
+  message_update: null,
   profile_create: null,
   profile_list: null,
   profile_get: null,
@@ -195,6 +203,7 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   search_hub: "Hub search",
   request_suggestion: "Suggestion",
   request_assist: "Assist",
+  configure_assistant: "Configure assistant",
   request_summary: "Summary",
   summary_cancel: "Cancel summary",
   conversation_create: "Create conversation",
@@ -205,6 +214,7 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   conversation_delete: "Delete conversation",
   conversation_export: "Export conversation",
   conversation_import: "Import conversation",
+  message_update: "Update segment",
   profile_create: "Create profile",
   profile_list: "List profiles",
   profile_get: "Get profile",
@@ -254,15 +264,17 @@ export interface SessionSlice {
   // Pipeline
   running: boolean;
   isToggling: boolean;
+  preparedConversationId: string | null;
 
   // Downloads
   downloading: boolean;
   downloadModel: string;
   downloadPercent: number;
 
-  // Audio device lists & inline signal probe
+  // Audio device lists, live levels & inline signal probe
   availableMics: AudioDeviceInfo[];
   availableSpeakers: AudioDeviceInfo[];
+  audioLevels: Record<string, number>;
   audioProbeLoading: boolean;
   audioProbeResult: Record<string, { ok: boolean; level: number; error?: string }> | null;
 
@@ -576,7 +588,29 @@ export const createSessionSlice =
       }
 
       const gen = generation;
-      set({ isToggling: true, activeView: "transcript" });
+      const {
+        activeConversationId: prevActiveId,
+        engineConversationId: prevEngineId,
+        preparedConversationId,
+        isViewingHistory,
+      } = get();
+      const hasPrepared = Boolean(
+        preparedConversationId &&
+          (prevActiveId === preparedConversationId || prevEngineId === preparedConversationId),
+      );
+      set({
+        isToggling: true,
+        activeView: "transcript",
+        preparedConversationId: null,
+        ...(!hasPrepared
+          ? {
+              activeConversationId: null,
+              engineConversationId: null,
+              isViewingHistory: false,
+              ...(isViewingHistory ? { pendingTitle: "" } : {}),
+            }
+          : {}),
+      });
 
       if (LEGACY_SECRET_FIELDS.some((field) => get().config[field])) {
         await get().commitLegacySecrets();
@@ -639,11 +673,13 @@ export const createSessionSlice =
       engineGeneration: 0,
       running: false,
       isToggling: false,
+      preparedConversationId: null,
       downloading: false,
       downloadModel: "",
       downloadPercent: 0,
       availableMics: [],
       availableSpeakers: [],
+      audioLevels: {},
       audioProbeLoading: false,
       audioProbeResult: null,
       appError: null,
@@ -691,11 +727,34 @@ export const createSessionSlice =
           void startSecure();
           return;
         }
-        const { config } = get();
+        const {
+          config,
+          isViewingHistory,
+          activeConversationId,
+          engineConversationId,
+          preparedConversationId,
+        } = get();
         const socket = connectedSocket();
         if (!socket) return;
 
-        set({ isToggling: true, activeView: "transcript" });
+        const hasPrepared = Boolean(
+          preparedConversationId &&
+            (activeConversationId === preparedConversationId ||
+              engineConversationId === preparedConversationId),
+        );
+        set({
+          isToggling: true,
+          activeView: "transcript",
+          preparedConversationId: null,
+          ...(!hasPrepared
+            ? {
+                activeConversationId: null,
+                engineConversationId: null,
+                isViewingHistory: false,
+                ...(isViewingHistory ? { pendingTitle: "" } : {}),
+              }
+            : {}),
+        });
         socket.send(deps.commands.start(config));
       },
 
@@ -742,8 +801,15 @@ export const createSessionSlice =
           const dataMsg = res.messages.find((m) => (m as any).streams !== undefined) as any;
           const streams = dataMsg?.streams || null;
           set({ audioProbeResult: streams, audioProbeLoading: false });
-        } catch {
-          set({ audioProbeLoading: false });
+          if (!streams) {
+            set({ appError: "Audio check did not return stream metrics." });
+          }
+        } catch (error) {
+          const code = errorCodeOf(error);
+          set({
+            audioProbeLoading: false,
+            appError: `Audio check failed: ${describeCommandError(code)} (${code})`,
+          });
         }
       },
 

@@ -467,27 +467,38 @@ class WebSocketServer:
             except Exception as e:
                 logger.warning("Failed to enumerate microphones: %s", e)
 
-            # -- Speakers / loopback devices (pyaudiowpatch) --
-            try:
-                import pyaudiowpatch as pawp
-                pa2 = pawp.PyAudio()
+            # -- Speakers / loopback devices --
+            import sys
+
+            if sys.platform == "win32":
                 try:
-                    wasapi_info = pa2.get_host_api_info_by_type(pawp.paWASAPI)
-                    for i in range(pa2.get_device_count()):
-                        info = pa2.get_device_info_by_index(i)
-                        if info["hostApi"] != wasapi_info["index"]:
-                            continue
-                        if info.get("isLoopbackDevice", False):
-                            speakers.append({
-                                "id": str(info["index"]),
-                                "name": f"{info['name']} (Loopback)",
-                            })
+                    import pyaudiowpatch as pawp
+                    pa2 = pawp.PyAudio()
+                    try:
+                        wasapi_info = pa2.get_host_api_info_by_type(pawp.paWASAPI)
+                        for i in range(pa2.get_device_count()):
+                            info = pa2.get_device_info_by_index(i)
+                            if info["hostApi"] != wasapi_info["index"]:
+                                continue
+                            if info.get("isLoopbackDevice", False):
+                                speakers.append({
+                                    "id": str(info["index"]),
+                                    "name": f"{info['name']} (Loopback)",
+                                })
+                    except Exception as e:
+                        logger.warning("Failed to enumerate loopback devices: %s", e)
+                    finally:
+                        pa2.terminate()
                 except Exception as e:
-                    logger.warning("Failed to enumerate loopback devices: %s", e)
-                finally:
-                    pa2.terminate()
-            except Exception as e:
-                logger.warning("pyaudiowpatch not available: %s", e)
+                    logger.warning("pyaudiowpatch not available: %s", e)
+            else:
+                try:
+                    from engine.audio.system_audio import SystemAudioInput
+
+                    for dev in SystemAudioInput({}).list_devices():
+                        speakers.append({"id": dev.id, "name": dev.name})
+                except Exception as e:
+                    logger.warning("Failed to enumerate virtual loopback devices: %s", e)
 
             return mics, speakers
 

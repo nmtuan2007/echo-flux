@@ -178,9 +178,10 @@ describe("capability/provider matrix", () => {
 // ---------------------------------------------------------------------------
 
 describe("card layout", () => {
-  it("keeps the API URL visible and editable for every provider", () => {
+  it("hides API URL for local and keeps it editable for cloud providers", () => {
     const card = cardFor("stt");
-    for (const id of MATRIX.stt) {
+    expect(within(card).queryByLabelText(/^API URL/)).toBeNull();
+    for (const id of MATRIX.stt.filter((p) => p !== "local")) {
       chooseProvider(card, id);
       const url = within(card).getByLabelText(/^API URL/) as HTMLInputElement;
       expect(url.disabled).toBe(false);
@@ -272,6 +273,9 @@ describe("Test Connection states", () => {
     let resolveTest: (value: unknown) => void = () => undefined;
     handlers.provider_test_connection = () => new Promise((resolve) => (resolveTest = resolve));
     const card = cardFor("stt");
+    chooseProvider(card, "openai-realtime");
+    vault.set("stt:openai-realtime:api_key", SECRET);
+    await useEngineStore.getState().refreshServiceCredentials("stt");
     expect(phaseOf(card)).toBe("idle");
 
     fireEvent.click(testButton(card));
@@ -292,6 +296,9 @@ describe("Test Connection states", () => {
     handlers.provider_test_connection = () =>
       validationResult("stt", { status: "invalid", errorCode: "auth_failed" });
     const card = cardFor("stt");
+    chooseProvider(card, "openai-realtime");
+    vault.set("stt:openai-realtime:api_key", SECRET);
+    await useEngineStore.getState().refreshServiceCredentials("stt");
 
     fireEvent.click(testButton(card));
     await waitFor(() => expect(phaseOf(card)).toBe("error"));
@@ -313,6 +320,9 @@ describe("Test Connection states", () => {
       throw { code: "validator_unavailable", message: `leak ${SECRET}` };
     };
     const card = cardFor("stt");
+    chooseProvider(card, "openai-realtime");
+    vault.set("stt:openai-realtime:api_key", SECRET);
+    await useEngineStore.getState().refreshServiceCredentials("stt");
     fireEvent.click(testButton(card));
     await waitFor(() => expect(phaseOf(card)).toBe("error"));
     expect(card.textContent).not.toContain(SECRET);

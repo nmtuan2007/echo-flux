@@ -1,3 +1,4 @@
+import { describeCommandError, errorCodeOf, forwardCommand, isTauriRuntime } from "../lib/engineBridge";
 import type { EngineSliceCreator, EngineState } from "./engineStore";
 import type { EngineCommands } from "./sessionSlice";
 import { findProvider, publicConfigSnapshot } from "./settingsSlice";
@@ -718,6 +719,11 @@ export interface TranscriptSlice {
   requestSuggestion: (entryId: string, targetText: string, context: string[]) => void;
   // Manual Assist on one finalized message. Sends ids only; the engine selects the context.
   requestAssist: (entryId: string) => void;
+  // Inline text or speaker correction on a finalized message, persisted to SQLite when available.
+  updateEntry: (
+    entryId: string,
+    patch: { text?: string; source?: "mic" | "system" | "both" },
+  ) => Promise<boolean>;
 }
 
 export const createTranscriptSlice =
@@ -747,6 +753,8 @@ export const createTranscriptSlice =
           summaryText: "",
           summaryVisible: false,
           activeConversationId: null,
+          isViewingHistory: false,
+          pendingTitle: "",
         });
       },
 
@@ -789,6 +797,19 @@ export const createTranscriptSlice =
         }
 
         if (assistUnavailableReason(state, entry) !== null) return;
+        const assistantSvc = state.services?.assistant;
+        if (
+          isTauriRuntime() &&
+          assistantSvc?.enabled &&
+          assistantSvc.providerId !== "local-openai-compatible" &&
+          !state.consent?.assistant
+        ) {
+          set({
+            appError:
+              "Cloud consent is required for AI Assistant. Grant permission in Settings before using Assist.",
+          });
+          return;
+        }
 
         const conversationId = (entry.conversationId ?? state.engineConversationId) as string;
         assistCounter += 1;
@@ -807,9 +828,73 @@ export const createTranscriptSlice =
         const { type } = JSON.parse(
           commands.requestSuggestion(key, "", [], publicConfigSnapshot(state.config)),
         ) as { type: string };
-        state.socket?.send(
-          JSON.stringify({ type, conversation_id: conversationId, message_id: key, entry_id: key }),
+        const sendAssist = () => {
+          get().socket?.send(
+            JSON.stringify({ type, conversation_id: conversationId, message_id: key, entry_id: key }),
+          );
+        };
+        if (isTauriRuntime() && state.services?.assistant?.enabled) {
+          void state.syncAssistantService().then((ok) => {
+            if (!ok) {
+              set((s) => {
+                const suggestionLoading = { ...s.suggestionLoading };
+                delete suggestionLoading[key];
+                const assistRequests = { ...s.assistRequests };
+                delete assistRequests[key];
+                return {
+                  suggestionLoading,
+                  assistRequests,
+                  appError:
+                    "Assistant is not configured or credentials are missing. Check Assistant settings.",
+                };
+              });
+              return;
+            }
+            sendAssist();
+          });
+        } else {
+          sendAssist();
+        }
+      },
+
+      updateEntry: async (entryId, patch) => {
+        const state = get();
+        const idx = state.entries.findIndex(
+          (e) => e.id === entryId || (e.messageId && e.messageId === entryId),
         );
+        if (idx === -1) return false;
+        const prevEntry = state.entries[idx];
+        const nextText = patch.text !== undefined ? patch.text.trim() : prevEntry.text;
+        if (!nextText) return false;
+        const nextSource = patch.source !== undefined ? patch.source : prevEntry.source;
+        if (nextText === prevEntry.text && nextSource === prevEntry.source) return true;
+
+        const prevEntries = state.entries;
+        const updatedEntries = [...prevEntries];
+        updatedEntries[idx] = { ...prevEntry, text: nextText, source: nextSource };
+        set({ entries: updatedEntries });
+
+        const convId = prevEntry.conversationId ?? state.engineConversationId ?? state.activeConversationId;
+        const msgId = prevEntry.messageId ?? prevEntry.id;
+        if (isTauriRuntime() && convId && msgId) {
+          try {
+            await forwardCommand({
+              type: "message_update",
+              conversation_id: convId,
+              message_id: msgId,
+              ...(patch.text !== undefined ? { text: nextText } : {}),
+              ...(patch.source !== undefined && nextSource ? { source: nextSource } : {}),
+            });
+          } catch (err) {
+            set({
+              entries: prevEntries,
+              appError: `Update segment: ${describeCommandError(errorCodeOf(err))}`,
+            });
+            return false;
+          }
+        }
+        get().saveCurrentSession();
+        return true;
       },
     };
   };

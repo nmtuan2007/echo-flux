@@ -3,12 +3,25 @@ import { useEngineStore } from "../store/engineStore";
 
 export interface LocalPackStatusProps {
   capability: "stt" | "translation";
+  disabled?: boolean;
   onStatusChange?: (isReady: boolean) => void;
 }
 
-export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusProps) {
+function formatSize(bytes: number): string {
+  const mb = Math.round(bytes / (1024 * 1024));
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return `${mb} MB`;
+}
+
+export function LocalPackStatus({
+  capability,
+  disabled = false,
+  onStatusChange,
+}: LocalPackStatusProps) {
   const {
+    connected,
     packStatus,
+    packDownloads,
     hardwareInfo,
     services,
     config,
@@ -17,20 +30,27 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
     cancelLocalPack,
     retryLocalPack,
     isPackChecking,
-    downloading,
-    downloadPercent,
-    downloadModel,
   } = useEngineStore();
 
   const [installing, setInstalling] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const sourceLang =
+    (services?.translation?.options?.source_lang as string) || config.sourceLang || "en";
+  const targetLang =
+    (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
+
   useEffect(() => {
     void checkPackReadiness(capability);
-  }, [capability, checkPackReadiness]);
+  }, [capability, connected, checkPackReadiness, sourceLang, targetLang]);
 
   const item = packStatus[capability];
   const isReady = Boolean(item?.isReady);
+  const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
+  const activeProgress = packDownloads[packId];
+  const isDownloadingThis = installing || Boolean(activeProgress);
+  const percent = activeProgress?.percent ?? 0;
+  const activeModelName = activeProgress?.model;
 
   useEffect(() => {
     onStatusChange?.(isReady);
@@ -38,29 +58,22 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
 
   const langOptions =
     capability === "translation"
-      ? {
-          sourceLang:
-            (services?.translation?.options?.source_lang as string) || config.sourceLang || "en",
-          targetLang:
-            (services?.translation?.options?.target_lang as string) || config.targetLang || "vi",
-        }
+      ? { sourceLang, targetLang }
       : undefined;
 
   const handleDownload = async () => {
     setErrorMsg(null);
     setInstalling(true);
-    const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
     const ok = await installLocalPack(packId, langOptions);
-    setInstalling(false);
     if (ok) {
-      void checkPackReadiness(capability);
+      await checkPackReadiness(capability);
     } else {
-      setErrorMsg("Download failed or paused. You can resume at any time.");
+      setErrorMsg("Download failed or cancelled.");
     }
+    setInstalling(false);
   };
 
   const handleCancel = async () => {
-    const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
     await cancelLocalPack(packId);
     setInstalling(false);
   };
@@ -68,30 +81,31 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
   const handleRetry = async () => {
     setErrorMsg(null);
     setInstalling(true);
-    const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
     const ok = await retryLocalPack(packId, langOptions);
-    setInstalling(false);
     if (ok) {
-      void checkPackReadiness(capability);
+      await checkPackReadiness(capability);
     } else {
       setErrorMsg("Retry failed. Check network connection.");
     }
+    setInstalling(false);
   };
 
-  // Hardware tier recommendation calculation
   const cpuCores = hardwareInfo?.cpuCores ?? 8;
   const ramGb = hardwareInfo?.ramGb ?? 16;
   const hasGpu = hardwareInfo?.hasGpu ?? false;
 
-  let recommendedTier = "Standard Tier (Balanced, Recommended)";
+  let recommendedTier = "Standard Tier (Balanced)";
   if (hasGpu || (cpuCores >= 8 && ramGb >= 16)) {
-    recommendedTier = "Advanced Tier (High Accuracy, GPU/High-CPU)";
+    recommendedTier = "Advanced Tier (High Accuracy)";
   } else if (cpuCores <= 4 || ramGb <= 8) {
-    recommendedTier = "Minimal Tier (Lightweight, Low Memory)";
+    recommendedTier = "Minimal Tier (Lightweight)";
   }
 
-  const title = capability === "stt" ? "Speech-to-Text (Local Whisper)" : "Translation (Local Marian MT)";
-  const sizeMb = item?.sizeBytes ? Math.round(item.sizeBytes / (1024 * 1024)) : capability === "stt" ? 145 : 250;
+  const title =
+    capability === "stt" ? "Offline Speech Model (Whisper)" : "Offline Translation Model (Marian)";
+  const sizeLabel = formatSize(
+    item?.sizeBytes || (capability === "stt" ? 500_000_000 : 300_000_000),
+  );
 
   return (
     <div className="pack-status-card local-pack-status-card" data-capability={capability}>
@@ -114,8 +128,8 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
       <div className="pack-status-details">
         <p className="pack-desc">
           {capability === "stt"
-            ? "Faster-Whisper on-device acoustic model for private audio transcription without cloud latency."
-            : "Marian neural machine translation model running locally for real-time bilingual translation."}
+            ? "Runs Faster-Whisper locally on your CPU/GPU with zero cloud latency."
+            : `Offline Marian MT model (${sourceLang === "auto" ? "auto" : sourceLang} → ${targetLang}).`}
         </p>
 
         {hardwareInfo && (
@@ -127,17 +141,22 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
           </div>
         )}
 
-        {(installing || downloading) && (
+        {isDownloadingThis && (
           <div className="pack-progress-area">
             <div className="pack-progress-meta">
-              <span>Downloading model pack ({downloadModel || title})...</span>
-              <span>{downloadPercent}%</span>
+              <span>Downloading ({activeModelName || title})...</span>
+              <span>{percent}%</span>
             </div>
             <div className="pack-progress-bar">
-              <div className="pack-progress-fill" style={{ width: `${downloadPercent}%` }} />
+              <div className="pack-progress-fill" style={{ width: `${percent}%` }} />
             </div>
             <div className="pack-progress-actions">
-              <button className="btn btn-secondary btn-sm" onClick={handleCancel}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleCancel}
+                disabled={disabled}
+              >
                 Cancel
               </button>
             </div>
@@ -147,16 +166,26 @@ export function LocalPackStatus({ capability, onStatusChange }: LocalPackStatusP
         {errorMsg && (
           <div className="pack-error-alert" role="alert">
             <span>⚠️ {errorMsg}</span>
-            <button className="btn btn-secondary btn-sm" onClick={handleRetry}>
-              Resume Download
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleRetry}
+              disabled={disabled}
+            >
+              Retry Download
             </button>
           </div>
         )}
 
-        {!isReady && !installing && !downloading && !errorMsg && (
+        {!isReady && !isDownloadingThis && !errorMsg && (
           <div className="pack-action-row">
-            <button className="btn btn-primary pack-download-btn" onClick={handleDownload}>
-              Download Model Pack (~{sizeMb} MB)
+            <button
+              type="button"
+              className="btn btn-primary pack-download-btn"
+              onClick={handleDownload}
+              disabled={disabled}
+            >
+              Download Model Pack (~{sizeLabel})
             </button>
           </div>
         )}

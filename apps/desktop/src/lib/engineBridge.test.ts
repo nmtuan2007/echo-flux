@@ -1039,4 +1039,51 @@ describe("overlay sync payload", () => {
     expect(JSON.stringify(snapshot)).not.toContain(SECRET_HF);
     expect(LEGACY_CREDENTIALS.llmApiKey.capability).toBe("assistant");
   });
+
+  it("preserves typeless Phase B dispatcher payloads and populates packStatus", async () => {
+    const { store } = await authenticatedStore();
+    handlers.engine_forward_command = (args) => {
+      const command = args.command as { type?: string } | undefined;
+      if (command?.type === "pack_check_readiness") {
+        return {
+          messages: [
+            {
+              capability: "stt",
+              pack_id: "legacy-faster-whisper-small",
+              ready: true,
+              installed: true,
+              tier: "minimal",
+            },
+          ],
+        };
+      }
+      if (command?.type === "pack_status") {
+        return {
+          messages: [
+            {
+              packs: [],
+              hardware: { cpu_cores: 16, ram_gb: 32, platform: "windows", architecture: "AMD64", has_gpu: true },
+            },
+          ],
+        };
+      }
+      return { messages: [] };
+    };
+
+    await store.getState().checkPackReadiness("stt");
+    expect(store.getState().packStatus.stt?.isReady).toBe(true);
+    expect(store.getState().packStatus.stt?.packId).toBe("legacy-faster-whisper-small");
+    expect(store.getState().hardwareInfo?.hasGpu).toBe(true);
+  });
+
+  it("retries syncAssistantService when engine replies configured: false", async () => {
+    const { store } = await authenticatedStore();
+    store.getState().updateServiceConfig("assistant", { enabled: true });
+    let configuredReply = false;
+    handlers.engine_forward_command = () => ({ messages: [{ configured: configuredReply }] });
+
+    expect(await store.getState().syncAssistantService()).toBe(false);
+    configuredReply = true;
+    expect(await store.getState().syncAssistantService()).toBe(true);
+  });
 });

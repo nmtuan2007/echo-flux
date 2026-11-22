@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useEngineStore } from "../store/engineStore";
+import { createEngineStore, useEngineStore } from "../store/engineStore";
 import { DEFAULT_CONFIG, defaultServices } from "../store/settingsSlice";
 import { transcriptResetState } from "../store/transcriptSlice";
 import { LiveSessionBar } from "./LiveSessionBar";
@@ -199,5 +199,140 @@ describe("Phase 1-4 UI enhancements", () => {
     fireEvent.click(screen.getByRole("button", { name: /Export/i }));
     expect(screen.getByRole("menuitem", { name: /Export Subtitles \(\.srt\)/i })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /Export Markdown \(\.md\)/i })).toBeTruthy();
+  });
+
+  it("persists granular per-capability cloud consent across store reloads", () => {
+    useEngineStore.getState().acceptCloudConsent({
+      stt: true,
+      translation: false,
+      assistant: true,
+      summary: false,
+    });
+    const reloaded = createEngineStore();
+    expect(reloaded.getState().consent).toMatchObject({
+      accepted: true,
+      stt: true,
+      translation: false,
+      assistant: true,
+      summary: false,
+    });
+  });
+
+  it("clears archived history conversation id when starting a new recording", () => {
+    useEngineStore.setState({
+      history: [
+        {
+          id: "hist-1",
+          name: "Old Meeting",
+          date: 1000,
+          entries: [{ id: "m1", text: "Old text", translation: null, isFinal: true, timestamp: 1 }],
+        },
+      ],
+    });
+    useEngineStore.getState().loadConversation("hist-1");
+    expect(useEngineStore.getState().isViewingHistory).toBe(true);
+    expect(useEngineStore.getState().activeConversationId).toBe("hist-1");
+
+    const sent: string[] = [];
+    useEngineStore.setState({
+      connected: true,
+      socket: { readyState: 1, send: (d: string) => sent.push(d) } as unknown as WebSocket,
+    });
+    useEngineStore.getState().startPipeline();
+    expect(useEngineStore.getState().isViewingHistory).toBe(false);
+    expect(useEngineStore.getState().activeConversationId).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("renders Start/Stop control and error banner inside OverlayPanel", () => {
+    useEngineStore.setState({ connected: true, running: false, appError: "Mic disconnected" });
+    render(<OverlayPanel />);
+    expect(screen.getByRole("button", { name: /Start/i })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Mic disconnected");
+  });
+
+  it("uses exact startMs/endMs spans in exportAsSRT when available", () => {
+    const srt = exportAsSRT([
+      {
+        text: "Exact timing",
+        translation: null,
+        timestamp: 0,
+        startMs: 1000,
+        endMs: 3250,
+      },
+      {
+        text: "Second cue",
+        translation: null,
+        timestamp: 0,
+        startMs: 4500,
+        endMs: 6000,
+      },
+    ]);
+    expect(srt).toContain("1\n00:00:00,000 --> 00:00:02,250\nExact timing");
+    expect(srt).toContain("2\n00:00:03,500 --> 00:00:05,000\nSecond cue");
+  });
+
+  it("resets previous quick-session conversation ids when starting a new session without setup", () => {
+    const sent: string[] = [];
+    useEngineStore.setState({
+      connected: true,
+      running: false,
+      activeConversationId: "conv-old",
+      engineConversationId: "conv-old",
+      preparedConversationId: null,
+      socket: { readyState: 1, send: (d: string) => sent.push(d) } as unknown as WebSocket,
+    });
+
+    useEngineStore.getState().startPipeline();
+    expect(useEngineStore.getState().activeConversationId).toBeNull();
+    expect(useEngineStore.getState().engineConversationId).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("shows listening state in TranscriptPanel when running with no entries yet", () => {
+    useEngineStore.setState({ running: true, entries: [], partials: {} });
+    render(<TranscriptPanel />);
+    expect(screen.getByText("Listening for speech...")).toBeTruthy();
+    expect(screen.queryByText(/Press Start/i)).toBeNull();
+  });
+
+  it("supports inline segment editing, speaker switching, and spoken language selection", async () => {
+    useEngineStore.setState({
+      entries: [
+        {
+          id: "e-edit",
+          text: "Initial ASR text",
+          translation: null,
+          isFinal: true,
+          timestamp: 1000,
+          source: "mic",
+        },
+      ],
+    });
+
+    render(
+      <>
+        <LiveSessionBar />
+        <TranscriptPanel />
+      </>,
+    );
+
+    const spokenSelect = screen.getByLabelText("Spoken language") as HTMLSelectElement;
+    fireEvent.change(spokenSelect, { target: { value: "vi" } });
+    expect(useEngineStore.getState().services.stt.options.language).toBe("vi");
+    expect(useEngineStore.getState().config.language).toBe("vi");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit segment" }));
+    const editor = screen.getByLabelText("Edit transcript text") as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "Corrected transcript text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => {
+      expect(useEngineStore.getState().entries[0].text).toBe("Corrected transcript text");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Switch speaker from Tuan/i }));
+    await vi.waitFor(() => {
+      expect(useEngineStore.getState().entries[0].source).toBe("system");
+    });
   });
 });

@@ -1,13 +1,22 @@
-import threading
+import contextlib
+import sys
+from queue import Empty, Queue
 from typing import List, Optional
-from queue import Queue, Empty
+
 import numpy as np
 
-from engine.audio.input_manager import AudioInput, AudioDevice, AudioSourceType
-from engine.core.logging import get_logger
+from engine.audio.input_manager import AudioDevice, AudioInput, AudioSourceType
 from engine.core.exceptions import AudioError
+from engine.core.logging import get_logger
 
 logger = get_logger("audio.system")
+
+_VIRTUAL_LOOPBACK_TOKENS = ("blackhole", "loopback", "soundflower", "monitor", "stereo mix")
+
+
+def is_virtual_loopback_name(name: str) -> bool:
+    lowered = (name or "").lower()
+    return any(tok in lowered for tok in _VIRTUAL_LOOPBACK_TOKENS)
 
 
 class SystemAudioInput(AudioInput):
@@ -29,12 +38,16 @@ class SystemAudioInput(AudioInput):
         if self._active:
             return
 
+        if sys.platform != "win32":
+            self._start_virtual_loopback()
+            return
+
         try:
             import pyaudiowpatch as pyaudio
         except ImportError:
             raise AudioError(
                 "pyaudiowpatch is not installed. Install with: pip install pyaudiowpatch"
-            )
+            ) from None
 
         self._pa = pyaudio.PyAudio()
 
@@ -77,6 +90,51 @@ class SystemAudioInput(AudioInput):
             self._cleanup()
             raise AudioError(f"Failed to open WASAPI loopback: {e}") from e
 
+    def _start_virtual_loopback(self) -> None:
+        """Fallback for macOS/Linux using virtual audio loopback/monitor input devices (e.g. BlackHole)."""
+        try:
+            import pyaudio
+        except ImportError:
+            raise AudioError("pyaudio is not installed") from None
+
+        self._pa = pyaudio.PyAudio()
+        candidates = []
+        for i in range(self._pa.get_device_count()):
+            info = self._pa.get_device_info_by_index(i)
+            if info.get("maxInputChannels", 0) > 0:
+                candidates.append(info)
+
+        selected = None
+        if self._device_id:
+            selected = next((d for d in candidates if str(d["index"]) == str(self._device_id)), None)
+        if selected is None:
+            selected = next((d for d in candidates if is_virtual_loopback_name(d.get("name", ""))), None)
+        if selected is None:
+            self._pa.terminate()
+            self._pa = None
+            raise AudioError("No virtual loopback device found (install BlackHole or configure a monitor input)")
+
+        self._native_sample_rate = int(selected.get("defaultSampleRate", self._target_sample_rate))
+        self._native_channels = max(1, min(int(selected.get("maxInputChannels", 1)), 2))
+        frames_per_chunk = int(self._native_sample_rate * self._chunk_ms / 1000)
+
+        try:
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=self._native_channels,
+                rate=self._native_sample_rate,
+                input=True,
+                input_device_index=selected["index"],
+                frames_per_buffer=frames_per_chunk,
+                stream_callback=self._audio_callback,
+            )
+            self._active = True
+            self._stream.start_stream()
+            logger.info("System audio capture started via virtual loopback: %s", selected.get("name"))
+        except Exception as e:
+            self._cleanup()
+            raise AudioError(f"Failed to open virtual loopback: {e}") from e
+
     def stop(self) -> None:
         if not self._active:
             return
@@ -102,10 +160,36 @@ class SystemAudioInput(AudioInput):
         return self._active
 
     def list_devices(self) -> List[AudioDevice]:
+        if sys.platform != "win32":
+            try:
+                import pyaudio
+            except ImportError:
+                raise AudioError("pyaudio is not installed") from None
+            pa = pyaudio.PyAudio()
+            devices: List[AudioDevice] = []
+            try:
+                for i in range(pa.get_device_count()):
+                    info = pa.get_device_info_by_index(i)
+                    if info.get("maxInputChannels", 0) > 0 and is_virtual_loopback_name(
+                        info.get("name", "")
+                    ):
+                        devices.append(
+                            AudioDevice(
+                                id=str(info["index"]),
+                                name=f"{info['name']} (Loopback)",
+                                source_type=AudioSourceType.SYSTEM,
+                                sample_rate=int(info.get("defaultSampleRate", 16000)),
+                                channels=int(info.get("maxInputChannels", 1)),
+                            )
+                        )
+            finally:
+                pa.terminate()
+            return devices
+
         try:
             import pyaudiowpatch as pyaudio
         except ImportError:
-            raise AudioError("pyaudiowpatch is not installed")
+            raise AudioError("pyaudiowpatch is not installed") from None
 
         pa = pyaudio.PyAudio()
         devices = []
@@ -207,25 +291,21 @@ class SystemAudioInput(AudioInput):
         return selected
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
-        import pyaudiowpatch as pyaudio
-
         if status:
-            logger.debug("WASAPI callback status: %s", status)
+            logger.debug("Loopback audio callback status: %s", status)
 
         if not self._active or not in_data:
-            return (None, pyaudio.paContinue)
+            return (None, 0)  # paContinue == 0 in both pyaudio and pyaudiowpatch
 
         try:
             processed = self._process_audio(in_data)
             if processed:
-                try:
+                with contextlib.suppress(Exception):
                     self._queue.put_nowait(processed)
-                except Exception:
-                    pass
         except Exception as e:
             logger.error("Audio processing error: %s", e)
 
-        return (None, pyaudio.paContinue)
+        return (None, 0)
 
     def _process_audio(self, raw_data: bytes) -> bytes:
         # Use frombuffer to avoid "fromstring" binary mode error in newer numpy versions
@@ -244,14 +324,22 @@ class SystemAudioInput(AudioInput):
 
     @staticmethod
     def _resample_int16(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-        if from_rate == to_rate:
+        if from_rate == to_rate or len(audio) == 0:
             return audio
+
+        # Exact integer decimation (e.g. 48k -> 16k) with boxcar averaging prevents aliasing
+        # and chunk-boundary phase jumps that degrade speech recognition.
+        if from_rate > to_rate and from_rate % to_rate == 0:
+            factor = from_rate // to_rate
+            trimmed = (len(audio) // factor) * factor
+            if trimmed > 0:
+                return audio[:trimmed].reshape(-1, factor).mean(axis=1).astype(np.int16)
 
         ratio = to_rate / from_rate
         n_in = len(audio)
-        n_out = int(n_in * ratio)
+        n_out = max(1, int(n_in * ratio))
 
-        indices = np.linspace(0, n_in - 1, n_out)
+        indices = np.linspace(0, n_in, n_out, endpoint=False)
         idx_floor = np.floor(indices).astype(int)
         idx_ceil = np.minimum(idx_floor + 1, n_in - 1)
         frac = (indices - idx_floor).astype(np.float32)

@@ -893,3 +893,94 @@ def test_marian_lifecycle_is_idempotent_and_reload_releases_previous(monkeypatch
     assert backend.is_loaded and len(unloads) == 1
     backend.unload_model()
     assert not backend.is_loaded
+
+
+def test_system_audio_resample_uses_exact_decimation_for_integer_ratios():
+    import numpy as np
+
+    from engine.audio.system_audio import SystemAudioInput
+
+    ramp = np.arange(960, dtype=np.int16)
+    decimated = SystemAudioInput._resample_int16(ramp, 48000, 16000)
+    assert len(decimated) == 320
+    # Mean of (0,1,2) == 1, (3,4,5) == 4, ..., (957,958,959) == 958
+    assert decimated[0] == 1 and decimated[1] == 4 and decimated[-1] == 958
+
+
+def test_faster_whisper_skips_low_confidence_auto_partials(fake_faster_whisper):
+    import numpy as np
+
+    from engine.asr.faster_whisper_backend import FasterWhisperBackend
+    from engine.core.config import TranscriptionConfig
+
+    backend = FasterWhisperBackend()
+    backend.load_model(TranscriptionConfig("small", "auto", "cpu", "int8"))
+    seg = SimpleNamespace(
+        text="Enligt svenska", no_speech_prob=0.1, avg_logprob=-0.4, compression_ratio=1.2
+    )
+    backend._model.transcribe = lambda audio, **kw: (
+        iter([seg]),
+        SimpleNamespace(language="sv", language_probability=0.35),
+    )
+
+    stream = backend._get_stream("system")
+    # 0.8s+ auto-detected partial with prob 0.35 < 0.50 should be suppressed on partial pass
+    stream["audio_buffer"] = np.zeros(14000, dtype=np.float32)
+    assert backend._run_inference("system", stream, is_final=False) is None
+    # Higher probability emits normally
+    backend._model.transcribe = lambda audio, **kw: (
+        iter([seg]),
+        SimpleNamespace(language="en", language_probability=0.88),
+    )
+    res = backend._run_inference("system", stream, is_final=False)
+    assert res is not None and res.text == "Enligt svenska"
+
+    # Once 'en' is locked at >=0.80, a stray 'sv' spike (<0.95) re-runs under 'en'
+    calls = []
+
+    def fake_transcribe(audio, **kw):
+        calls.append(kw.get("language"))
+        if kw.get("language") is None:
+            return iter([seg]), SimpleNamespace(language="sv", language_probability=0.91)
+        return (
+            iter([SimpleNamespace(text="English recovered", no_speech_prob=0.1, avg_logprob=-0.3, compression_ratio=1.1)]),
+            SimpleNamespace(language="en", language_probability=0.99),
+        )
+
+    backend._model.transcribe = fake_transcribe
+    recovered = backend._run_inference("system", stream, is_final=True)
+    assert recovered is not None and recovered.text == "English recovered"
+    assert calls == [None, "en"]
+
+
+def test_marian_translate_batch_sets_repetition_and_length_guards():
+    from engine.translation.marian_backend import MarianBackend
+
+    captured = {}
+
+    class FakeTranslator:
+        def translate_batch(self, source_tokens, **kwargs):
+            captured["kwargs"] = kwargs
+            return [SimpleNamespace(hypotheses=[["xin", "chao"]])]
+
+    class FakeTokenizer:
+        def encode(self, s, **kwargs):
+            return [1, 2]
+
+        def convert_ids_to_tokens(self, ids):
+            return ["one", "unexpected"]
+
+        def convert_tokens_to_ids(self, toks):
+            return [1, 2]
+
+        def decode(self, ids, **kwargs):
+            return "một bất ngờ"
+
+    backend = MarianBackend()
+    backend._translator = FakeTranslator()
+    backend._tokenizer = FakeTokenizer()
+    res = backend.translate_raw("one unexpected", "en", "vi")
+    assert res.translated_text == "một bất ngờ"
+    assert captured["kwargs"]["repetition_penalty"] >= 1.2
+    assert captured["kwargs"]["no_repeat_ngram_size"] == 3
+    assert captured["kwargs"]["max_decoding_length"] == 24

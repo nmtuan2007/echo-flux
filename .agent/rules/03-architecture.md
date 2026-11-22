@@ -51,7 +51,7 @@ file — `tests/test_ws_contract.py` fails if the three ever disagree.
 
 An unrecognized type is answered with an `error` message, not ignored.
 
-### Engine to UI (10 messages)
+### Engine to UI (11 messages)
 
 **Transcription**
 
@@ -66,6 +66,7 @@ arrives later in a `translation_update` matched on `entry_id`.
 
 - `{"type": "status", "status": "started|stopped"}`
 - `{"type": "error", "message": "..."}`
+- `{"type": "audio_level", "source": "mic|system", "level": 0.45}`
 
 **Devices**
 

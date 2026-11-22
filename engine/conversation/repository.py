@@ -528,15 +528,34 @@ class ConversationRepository:
             ).fetchall()
         return [_conversation_from_row(row) for row in rows]
 
-    def list_conversations_with_stats(self) -> List[Tuple[ConversationRecord, int, bool]]:
+    def list_conversations_with_stats(
+        self, search_query: Optional[str] = None
+    ) -> List[Tuple[ConversationRecord, int, bool]]:
         """List conversations along with message counts and summary presence in one query."""
+        query = (search_query or "").strip().lower()
+        params: Tuple[Any, ...] = ()
+        where_clause = ""
+        if query:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            where_clause = (
+                " WHERE LOWER(c.title) LIKE ? ESCAPE '\\'"
+                " OR EXISTS ("
+                "SELECT 1 FROM messages m WHERE m.conversation_id = c.conversation_id"
+                " AND (LOWER(m.text) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(m.translation, '')) LIKE ? ESCAPE '\\')"
+                ")"
+            )
+            params = (pattern, pattern, pattern)
+
         with self.read() as conn:
             rows = conn.execute(
                 "SELECT c.*,"
                 " (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.conversation_id) AS message_count,"
                 " EXISTS(SELECT 1 FROM summaries s WHERE s.conversation_id = c.conversation_id) AS has_summary"
                 " FROM conversations c"
-                " ORDER BY c.created_at_ms DESC, c.conversation_id"
+                f"{where_clause}"
+                " ORDER BY c.created_at_ms DESC, c.conversation_id",
+                params,
             ).fetchall()
         return [
             (_conversation_from_row(row), int(row["message_count"]), bool(row["has_summary"]))
@@ -806,6 +825,43 @@ class ConversationRepository:
                     conversation_id,
                     message_id,
                 ),
+            )
+            self._touch(conn, conversation_id, _now_ms() if now_ms is None else now_ms)
+        return stored
+
+    def update_message(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        text: Optional[str] = None,
+        source: Optional[str] = None,
+        now_ms: Optional[float] = None,
+    ) -> TranscriptMessage:
+        """Edit text and/or speaker source of an existing persisted message."""
+        validate_record_id("message_id", message_id)
+        if text is None and source is None:
+            raise ConversationValidationError("message", "nothing_to_update")
+        if text is not None and (not isinstance(text, str) or not text.strip()):
+            raise ConversationValidationError("text", "empty_text")
+        if source is not None and source not in SOURCES:
+            raise ConversationValidationError("source", "unknown_source")
+
+        with self.transaction() as conn:
+            self.require_conversation(conn, conversation_id)
+            row = self._get_message_row(conn, conversation_id, message_id)
+            if row is None:
+                raise RecordNotFoundError("message_id", "not_found")
+            existing = _message_from_row(row)
+            stored = replace(
+                existing,
+                text=text.strip() if text is not None else existing.text,
+                source=source if source is not None else existing.source,
+            )
+            conn.execute(
+                "UPDATE messages SET text = ?, source = ?"
+                " WHERE conversation_id = ? AND message_id = ?",
+                (stored.text, stored.source, conversation_id, message_id),
             )
             self._touch(conn, conversation_id, _now_ms() if now_ms is None else now_ms)
         return stored

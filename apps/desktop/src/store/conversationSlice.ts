@@ -1,7 +1,15 @@
 import type { EngineSliceCreator, EngineState } from "./engineStore";
 import type { EngineCommands } from "./sessionSlice";
 import { publicConfigSnapshot } from "./settingsSlice";
-import { describeCommandError, forwardCommand, isTauriRuntime } from "../lib/engineBridge";
+import {
+  describeCommandError,
+  errorCodeOf,
+  forwardCommand,
+  isTauriRuntime,
+  testConnectionService,
+  type StartCredentialRef,
+} from "../lib/engineBridge";
+import { LEGACY_CREDENTIALS } from "../lib/secureStore";
 import type {
   ContextProfile,
   ContextProfileInfo,
@@ -105,6 +113,7 @@ export interface ConversationSlice {
   // Legacy history (client-side)
   history: Conversation[];
   activeConversationId: string | null;
+  isViewingHistory: boolean;
 
   // EF-029 Summary
   summaryText: string;
@@ -116,6 +125,7 @@ export interface ConversationSlice {
   activeSummaryConversationId: string | null;
   summaryStreamedViaEvent: boolean;
 
+  syncAssistantService: () => Promise<boolean>;
   requestSummary: () => void;
   cancelSummary: () => Promise<void>;
   openSummary: () => void;
@@ -128,11 +138,11 @@ export interface ConversationSlice {
   historySearchQuery: string;
 
   setHistorySearchQuery: (query: string) => void;
-  loadHistoryList: () => Promise<void>;
+  loadHistoryList: (searchQuery?: string) => Promise<void>;
   getConversationDetail: (conversationId: string) => Promise<any | null>;
   clearSelectedConversationDetail: () => void;
-  renameConversation: (id: string, name: string) => void;
-  deleteConversation: (id: string) => void;
+  renameConversation: (id: string, name: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
   exportConversation: (id: string) => Promise<any | null>;
   importConversation: (exportData: Record<string, unknown> | string) => Promise<boolean>;
   migrateLegacyHistory: () => Promise<void>;
@@ -175,9 +185,13 @@ export interface ConversationSlice {
 
 export const createConversationSlice =
   (commands: EngineCommands): EngineSliceCreator<ConversationSlice> =>
-  (set, get) => ({
+  (set, get) => {
+    let lastSyncedAssistantKey: string | null = null;
+
+    return {
     history: [],
     activeConversationId: null,
+    isViewingHistory: false,
 
     // Summary state
     summaryText: "",
@@ -205,12 +219,76 @@ export const createConversationSlice =
     isSetupOpen: false,
     pendingTitle: "",
 
+    syncAssistantService: async () => {
+      const { connected, services, secretStatus, engineGeneration } = get();
+      if (!connected || !isTauriRuntime()) return false;
+      const assistantCfg = services?.assistant;
+      if (!assistantCfg?.enabled) {
+        lastSyncedAssistantKey = null;
+        return false;
+      }
+      const syncKey = JSON.stringify({
+        gen: engineGeneration,
+        service: testConnectionService(assistantCfg),
+        legacyKey: secretStatus.llmApiKey,
+      });
+      if (syncKey === lastSyncedAssistantKey) return true;
+
+      const credentials: Record<string, StartCredentialRef> = {};
+      for (const [slot, ref] of Object.entries(assistantCfg.credentialRefs || {})) {
+        if (ref && ref.configId) {
+          credentials[`assistant.${slot}`] = {
+            capability: "assistant",
+            configId: ref.configId,
+            slot: ref.slot || slot,
+          };
+        }
+      }
+      if (!credentials["assistant.api_key"] && secretStatus.llmApiKey) {
+        credentials["assistant.api_key"] = { ...LEGACY_CREDENTIALS.llmApiKey };
+      }
+
+      try {
+        const res = await forwardCommand(
+          {
+            type: "configure_assistant",
+            service: testConnectionService(assistantCfg),
+          },
+          credentials,
+        );
+        const configured = res.messages.some((m) => (m as { configured?: unknown }).configured === true);
+        if (configured) {
+          lastSyncedAssistantKey = syncKey;
+          return true;
+        }
+        lastSyncedAssistantKey = null;
+        return false;
+      } catch {
+        lastSyncedAssistantKey = null;
+        return false;
+      }
+    },
+
     requestSummary: () => {
       const state = get();
       const conversationId = state.engineConversationId || state.activeConversationId;
-      const { socket, connected, entries, config } = state;
+      const { socket, connected, entries, config, services, consent } = state;
 
       if (!socket || !connected || (entries.length === 0 && !conversationId)) return;
+
+      const assistantSvc = services?.assistant;
+      if (
+        isTauriRuntime() &&
+        assistantSvc?.enabled &&
+        assistantSvc.providerId !== "local-openai-compatible" &&
+        !consent?.summary
+      ) {
+        set({
+          appError:
+            "Cloud consent is required for Meeting Summary. Grant permission in Settings before summarizing.",
+        });
+        return;
+      }
 
       const requestId = `sum-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       set({
@@ -224,13 +302,35 @@ export const createConversationSlice =
         summaryStreamedViaEvent: false,
       });
 
-      if (conversationId) {
-        const { type } = JSON.parse(
-          commands.requestSummary([], publicConfigSnapshot(config)),
-        ) as { type: string };
-        socket.send(JSON.stringify({ type, conversation_id: conversationId }));
+      const sendSummary = () => {
+        const current = get();
+        if (!current.socket || !current.connected) return;
+        if (conversationId) {
+          const { type } = JSON.parse(
+            commands.requestSummary([], publicConfigSnapshot(current.config)),
+          ) as { type: string };
+          current.socket.send(JSON.stringify({ type, conversation_id: conversationId }));
+        } else {
+          current.socket.send(commands.requestSummary(entries, config));
+        }
+      };
+
+      if (conversationId && isTauriRuntime() && state.services?.assistant?.enabled) {
+        void get()
+          .syncAssistantService()
+          .then((ok) => {
+            if (!ok) {
+              set({
+                summaryLoading: false,
+                summaryError:
+                  "Assistant is not configured or credentials are missing. Check Assistant settings.",
+              });
+              return;
+            }
+            sendSummary();
+          });
       } else {
-        socket.send(commands.requestSummary(entries, config));
+        sendSummary();
       }
     },
 
@@ -268,10 +368,14 @@ export const createConversationSlice =
       set({ historySearchQuery: query });
     },
 
-    loadHistoryList: async () => {
+    loadHistoryList: async (searchQuery?: string) => {
       set({ historyLoading: true });
       try {
-        const res = await forwardCommand({ type: "conversation_list" });
+        const q = (searchQuery ?? get().historySearchQuery).trim();
+        const res = await forwardCommand({
+          type: "conversation_list",
+          ...(q ? { search_query: q } : {}),
+        });
         const dataMsg = res.messages.find(
           (m) => (m as any).conversations !== undefined || m.type === "conversation_list_result",
         );
@@ -290,8 +394,14 @@ export const createConversationSlice =
           has_summary: Boolean(c.has_summary ?? c.hasSummary),
         }));
         set({ savedConversations: convs, historyLoading: false });
-      } catch {
-        set({ historyLoading: false });
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({
+          historyLoading: false,
+          ...(isTauriRuntime()
+            ? { appError: `Failed to load history: ${describeCommandError(code)} (${code})` }
+            : {}),
+        });
       }
     },
 
@@ -307,13 +417,18 @@ export const createConversationSlice =
           res.messages[0];
         set({ selectedConversationDetail: first });
         return first;
-      } catch {
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({ appError: `Failed to open conversation: ${describeCommandError(code)} (${code})` });
         return null;
       }
     },
 
-    renameConversation: (id: string, name: string) => {
+    renameConversation: async (id: string, name: string) => {
       const trimmed = name.trim().slice(0, MAX_TITLE_CHARS);
+      if (!trimmed) return;
+      const prevHistory = get().history;
+      const prevSaved = get().savedConversations;
       set((state) => ({
         history: state.history.map((c) => (c.id === id ? { ...c, name: trimmed } : c)),
         savedConversations: state.savedConversations.map((c) =>
@@ -321,15 +436,28 @@ export const createConversationSlice =
         ),
       }));
       if (isTauriRuntime()) {
-        void forwardCommand({
-          type: "conversation_rename",
-          conversation_id: id,
-          title: trimmed,
-        }).catch(() => {});
+        try {
+          await forwardCommand({
+            type: "conversation_rename",
+            conversation_id: id,
+            title: trimmed,
+          });
+        } catch (err) {
+          const code = errorCodeOf(err);
+          set({
+            history: prevHistory,
+            savedConversations: prevSaved,
+            appError: `Rename failed: ${describeCommandError(code)} (${code})`,
+          });
+        }
       }
     },
 
-    deleteConversation: (id: string) => {
+    deleteConversation: async (id: string) => {
+      const prevHistory = get().history;
+      const prevSaved = get().savedConversations;
+      const prevActive = get().activeConversationId;
+      const prevDetail = get().selectedConversationDetail;
       set((state) => ({
         history: state.history.filter((c) => c.id !== id),
         savedConversations: state.savedConversations.filter((c) => c.conversation_id !== id),
@@ -340,10 +468,21 @@ export const createConversationSlice =
             : state.selectedConversationDetail,
       }));
       if (isTauriRuntime()) {
-        void forwardCommand({
-          type: "conversation_delete",
-          conversation_id: id,
-        }).catch(() => {});
+        try {
+          await forwardCommand({
+            type: "conversation_delete",
+            conversation_id: id,
+          });
+        } catch (err) {
+          const code = errorCodeOf(err);
+          set({
+            history: prevHistory,
+            savedConversations: prevSaved,
+            activeConversationId: prevActive,
+            selectedConversationDetail: prevDetail,
+            appError: `Delete failed: ${describeCommandError(code)} (${code})`,
+          });
+        }
       }
     },
 
@@ -359,7 +498,9 @@ export const createConversationSlice =
         });
         const first = res.messages.find((m) => (m as any).export !== undefined) || res.messages[0];
         return (first as any)?.export || first;
-      } catch {
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({ appError: `Export failed: ${describeCommandError(code)} (${code})` });
         return null;
       }
     },
@@ -373,8 +514,14 @@ export const createConversationSlice =
           export_data: payload,
         });
         await get().loadHistoryList();
-        return !res.messages.some((m) => m.type === "error");
-      } catch {
+        const hasError = res.messages.some((m) => m.type === "error");
+        if (hasError) {
+          set({ appError: "Failed to import conversation data." });
+        }
+        return !hasError;
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({ appError: `Import failed: ${describeCommandError(code)} (${code})` });
         return false;
       }
     },
@@ -487,6 +634,7 @@ export const createConversationSlice =
           summaryLoading: false,
           activeConversationId: id,
           pendingTitle: target.name || "",
+          isViewingHistory: true,
         });
         return;
       }
@@ -517,6 +665,8 @@ export const createConversationSlice =
                 : typeof m.timestamp === "number"
                   ? m.timestamp
                   : 0,
+            startMs: typeof m.start_ms === "number" ? m.start_ms : null,
+            endMs: typeof m.end_ms === "number" ? m.end_ms : null,
             source:
               m.source === "mic" || m.source === "system" || m.source === "both"
                 ? m.source
@@ -553,6 +703,7 @@ export const createConversationSlice =
           summaryLoading: false,
           activeConversationId: id,
           engineConversationId: id,
+          isViewingHistory: true,
           pendingTitle: detail.conversation?.title || detail.title || "",
           ...(convLabels?.mic || convLabels?.system
             ? {
@@ -753,10 +904,12 @@ export const createConversationSlice =
           set({
             activeConversationId: convId,
             engineConversationId: convId,
+            preparedConversationId: convId,
+            isViewingHistory: false,
             isSetupOpen: false,
           });
         } else {
-          set({ isSetupOpen: false });
+          set({ isViewingHistory: false, isSetupOpen: false });
         }
       } catch (err: any) {
         set({
@@ -768,4 +921,5 @@ export const createConversationSlice =
       }
       get().startPipeline();
     },
-  });
+  };
+  };

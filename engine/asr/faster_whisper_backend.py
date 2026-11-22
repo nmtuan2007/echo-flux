@@ -20,11 +20,11 @@ _MODEL_INFERENCE_INTERVAL = {
 }
 
 _MODEL_MAX_BUFFER = {
-    "tiny": 5.0,
-    "base": 5.0,
-    "small": 4.0,
-    "medium": 3.0,
-    "large": 3.0,
+    "tiny": 10.0,
+    "base": 10.0,
+    "small": 8.0,
+    "medium": 6.0,
+    "large": 6.0,
 }
 
 class FasterWhisperBackend(ASRBackend):
@@ -47,7 +47,10 @@ class FasterWhisperBackend(ASRBackend):
             self._streams[stream_id] = {
                 "audio_buffer": np.array([], dtype=np.float32),
                 "last_inference_time": 0.0,
-                "last_final_text": ""
+                "last_final_text": "",
+                "dominant_language": None,
+                "alt_lang": None,
+                "alt_streak": 0,
             }
         return self._streams[stream_id]
 
@@ -142,7 +145,10 @@ class FasterWhisperBackend(ASRBackend):
             return None
         stream["last_inference_time"] = now
 
-        if len(stream["audio_buffer"]) < int(0.4 * self._sample_rate):
+        # Auto-detect needs a longer window than fixed-language mode to avoid wild guesses.
+        target_lang = self.normalize_language(self._config.language) if self._config else None
+        min_partial_sec = 0.8 if target_lang is None else 0.4
+        if len(stream["audio_buffer"]) < int(min_partial_sec * self._sample_rate):
             return None
 
         return self._run_inference(stream_id, stream, is_final=False)
@@ -161,11 +167,10 @@ class FasterWhisperBackend(ASRBackend):
 
     def _run_inference(self, stream_id: str, stream: dict, is_final: bool) -> Optional[TranscriptResult]:
         buffer_duration = len(stream["audio_buffer"]) / self._sample_rate
+        target_lang = self.normalize_language(self._config.language) if self._config else None
 
         # Fixed parameter name: log_prob_threshold instead of logprob_threshold
-        segments_gen, info = self._model.transcribe(
-            stream["audio_buffer"],
-            language=self.normalize_language(self._config.language),
+        transcribe_kwargs = dict(
             beam_size=1,
             best_of=1,
             temperature=0.0,
@@ -175,6 +180,35 @@ class FasterWhisperBackend(ASRBackend):
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
         )
+        segments_gen, info = self._model.transcribe(stream["audio_buffer"], language=target_lang, **transcribe_kwargs)
+
+        if target_lang is None:
+            detected_lang = getattr(info, "language", None)
+            lang_prob = getattr(info, "language_probability", 1.0)
+            dominant = stream.get("dominant_language")
+            if dominant is None:
+                if detected_lang and lang_prob >= 0.80:
+                    stream["dominant_language"] = detected_lang
+                elif not is_final and lang_prob < 0.50:
+                    return None
+            elif detected_lang == dominant:
+                stream["alt_lang"] = None
+                stream["alt_streak"] = 0
+            else:
+                if detected_lang and lang_prob >= 0.95:
+                    streak = (stream.get("alt_streak", 0) + 1) if stream.get("alt_lang") == detected_lang else 1
+                    stream["alt_lang"] = detected_lang
+                    stream["alt_streak"] = streak
+                else:
+                    streak = 0
+                    stream["alt_lang"] = None
+                    stream["alt_streak"] = 0
+                if streak >= 2:
+                    stream["dominant_language"] = detected_lang
+                    stream["alt_lang"] = None
+                    stream["alt_streak"] = 0
+                else:
+                    segments_gen, info = self._model.transcribe(stream["audio_buffer"], language=dominant, **transcribe_kwargs)
 
         segments = list(segments_gen)
         if not segments:
@@ -222,11 +256,11 @@ class FasterWhisperBackend(ASRBackend):
         # We only drop absolute garbage that the hallucination filter might miss.
         
         # 1. No Speech Probability
-        if segment.no_speech_prob > 0.95:
+        if segment.no_speech_prob > 0.85:
             return False
 
         # 2. Average Log Probability (Confidence)
-        if segment.avg_logprob < -2.5:
+        if segment.avg_logprob < -1.8:
             return False
 
         # 3. Compression Ratio (Internal Whisper Metric)

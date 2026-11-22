@@ -164,7 +164,7 @@ class MarianBackend(TranslationBackend):
             # Marian / opus-mt models are trained on single short sentences.
             # Always split on sentence boundaries first (max 120 chars per chunk)
             # so the model never sees multi-sentence input as one block.
-            sentences = self.split_sentences(text, max_length=120)
+            sentences = self.split_sentences(text, max_length=200)
 
             source_tokens = []
             for s in sentences:
@@ -176,11 +176,15 @@ class MarianBackend(TranslationBackend):
                 )
                 source_tokens.append(self._tokenizer.convert_ids_to_tokens(ids))
 
+            max_src_len = max((len(t) for t in source_tokens), default=8)
             results = self._translator.translate_batch(
                 source_tokens,
                 batch_type="tokens",
                 max_batch_size=2048,
                 beam_size=4,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
+                max_decoding_length=min(256, max(24, max_src_len * 3 + 12)),
             )
 
             translated_sentences = []

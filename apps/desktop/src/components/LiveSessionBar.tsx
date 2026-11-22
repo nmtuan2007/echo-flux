@@ -1,19 +1,10 @@
 import { useEffect, useState } from "react";
+import { isTauriRuntime } from "../lib/engineBridge";
 import { EngineConfig, useEngineStore } from "../store/engineStore";
+import { findProvider, PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
 import { isAssistantConfigured } from "../store/transcriptSlice";
 import type { ExportEntry } from "../utils/export";
 import { ExportMenu } from "./ExportMenu";
-
-const TARGET_LANG_OPTIONS = [
-  { code: "vi", label: "Vietnamese (vi)" },
-  { code: "en", label: "English (en)" },
-  { code: "ja", label: "Japanese (ja)" },
-  { code: "ko", label: "Korean (ko)" },
-  { code: "zh", label: "Chinese (zh)" },
-  { code: "fr", label: "French (fr)" },
-  { code: "de", label: "German (de)" },
-  { code: "es", label: "Spanish (es)" },
-];
 
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -32,10 +23,16 @@ export function LiveSessionBar() {
     services,
     activeConversationId,
     engineConversationId,
+    isViewingHistory,
+    audioLevels,
     pendingTitle,
     attachedProfileIds,
     sourceLabels,
     summaryText,
+    packStatus,
+    consent,
+    checkPackReadiness,
+    setActiveView,
     updateConfig,
     updateServiceConfig,
     setServiceOptionInput,
@@ -53,6 +50,12 @@ export function LiveSessionBar() {
   const [renameDraft, setRenameDraft] = useState("");
 
   useEffect(() => {
+    if (connected && isTauriRuntime() && !packStatus.stt) {
+      void checkPackReadiness();
+    }
+  }, [connected, packStatus.stt, checkPackReadiness]);
+
+  useEffect(() => {
     if (!running) {
       setElapsedSec(0);
       return;
@@ -65,21 +68,55 @@ export function LiveSessionBar() {
     return () => clearInterval(timer);
   }, [running]);
 
+  const spokenLang =
+    (services?.stt?.options?.language as string) || config.language || "auto";
+  const hasCustomSpokenLang = !PRESET_INPUT_LANGUAGES.some((o) => o.code === spokenLang);
   const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
   const targetLang =
     (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
-  const hasCustomLang = !TARGET_LANG_OPTIONS.some((o) => o.code === targetLang);
+  const hasCustomLang = !PRESET_TARGET_LANGUAGES.some((o) => o.code === targetLang);
   const convId = activeConversationId || engineConversationId;
   const hasActiveConversation = Boolean(convId || entries.length > 0);
   const canSummarize = isAssistantEnabled && hasActiveConversation && connected;
   const hasSummary = Boolean(summaryText);
   const activeStreams = Object.keys(partials);
 
+  const sttSvc = services?.stt;
+  const sttManifest = sttSvc ? findProvider("stt", sttSvc.providerId) : undefined;
+  const sttIsCloud = Boolean(sttManifest && sttManifest.protocolFamily !== "local");
+  const sttMissingCred =
+    sttIsCloud && (!consent?.stt || Object.keys(sttSvc?.credentialRefs || {}).length === 0);
+  const sttMissingLocal = !sttIsCloud && packStatus.stt && !packStatus.stt.isReady;
+
+  const transSvc = services?.translation;
+  const transManifest = transSvc ? findProvider("translation", transSvc.providerId) : undefined;
+  const transIsCloud = Boolean(transManifest && transManifest.protocolFamily !== "local");
+  const transMissingCred =
+    translationEnabled &&
+    transIsCloud &&
+    (!consent?.translation || Object.keys(transSvc?.credentialRefs || {}).length === 0);
+  const transMissingLocal =
+    translationEnabled && !transIsCloud && packStatus.translation && !packStatus.translation.isReady;
+
+  const setupReason = !connected
+    ? "Engine offline"
+    : sttMissingCred
+      ? "STT key/consent needed"
+      : sttMissingLocal
+        ? "Offline STT model needed"
+        : transMissingCred
+          ? "Translation key/consent needed"
+          : transMissingLocal
+            ? "Offline Translation model needed"
+            : null;
+
   const buildExportEntries = (): ExportEntry[] =>
     entries.map((e) => ({
       text: e.text,
       translation: e.translation,
       timestamp: e.timestamp,
+      startMs: e.startMs ?? null,
+      endMs: e.endMs ?? null,
       speaker:
         e.source === "mic"
           ? sourceLabels.mic || "Me"
@@ -139,6 +176,11 @@ export function LiveSessionBar() {
               )}
               {!running && <span className="session-edit-hint">Edit</span>}
             </button>
+            {!running && isViewingHistory && (
+              <span className="session-profile-badge" title="Viewing archived conversation">
+                History
+              </span>
+            )}
             {!running && convId && (
               <button
                 type="button"
@@ -153,6 +195,16 @@ export function LiveSessionBar() {
                 ✎
               </button>
             )}
+            {!running && isViewingHistory && (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={clearTranscript}
+                title="Return to a fresh session"
+              >
+                + New Session
+              </button>
+            )}
           </>
         )}
 
@@ -161,7 +213,9 @@ export function LiveSessionBar() {
             <span className="session-timer">{formatDuration(elapsedSec)}</span>
             {(config.audioSource === "microphone" || config.audioSource === "both") && (
               <span
-                className={`stream-meter-pill ${activeStreams.includes("mic") ? "active" : ""}`}
+                className={`stream-meter-pill ${
+                  (audioLevels.mic ?? 0) >= 0.02 || activeStreams.includes("mic") ? "active" : ""
+                }`}
                 title={`Microphone: ${sourceLabels.mic || "Me"}`}
               >
                 <span className="stream-meter-bars">
@@ -174,7 +228,11 @@ export function LiveSessionBar() {
             )}
             {(config.audioSource === "system" || config.audioSource === "both") && (
               <span
-                className={`stream-meter-pill ${activeStreams.includes("system") ? "active" : ""}`}
+                className={`stream-meter-pill ${
+                  (audioLevels.system ?? 0) >= 0.02 || activeStreams.includes("system")
+                    ? "active"
+                    : ""
+                }`}
                 title={`System Audio: ${sourceLabels.system || "Others"}`}
               >
                 <span className="stream-meter-bars">
@@ -206,11 +264,35 @@ export function LiveSessionBar() {
             <option value="both">🔄 Mic + System</option>
           </select>
 
+          <select
+            className="quick-select"
+            aria-label="Spoken language"
+            value={spokenLang}
+            onChange={(e) => {
+              const lang = e.target.value;
+              setServiceOptionInput("stt", "language", lang);
+              updateConfig({ language: lang });
+            }}
+            disabled={isToggling}
+            title="Spoken language for Speech-to-Text"
+          >
+            {hasCustomSpokenLang && <option value={spokenLang}>{spokenLang}</option>}
+            {PRESET_INPUT_LANGUAGES.map((opt) => (
+              <option key={opt.code} value={opt.code}>
+                🗣 {opt.label}
+              </option>
+            ))}
+          </select>
+
           <label className="quick-toggle" title="Toggle live translation">
             <input
               type="checkbox"
               checked={translationEnabled}
-              onChange={(e) => updateServiceConfig("translation", { enabled: e.target.checked })}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                updateServiceConfig("translation", { enabled });
+                updateConfig({ translationEnabled: enabled });
+              }}
               disabled={isToggling}
             />
             <span>Translate</span>
@@ -230,7 +312,7 @@ export function LiveSessionBar() {
               title="Translation target language"
             >
               {hasCustomLang && <option value={targetLang}>{targetLang}</option>}
-              {TARGET_LANG_OPTIONS.map((opt) => (
+              {PRESET_TARGET_LANGUAGES.map((opt) => (
                 <option key={opt.code} value={opt.code}>
                   → {opt.label}
                 </option>
@@ -241,21 +323,34 @@ export function LiveSessionBar() {
       )}
 
       <div className="live-session-actions">
-        <button
-          type="button"
-          className={`btn btn-sm btn-summarize ${!canSummarize ? "btn-summarize-disabled" : ""}`}
-          onClick={requestSummary}
-          disabled={!canSummarize}
-          title={
-            !isAssistantEnabled
-              ? "Enable AI Assistant in Settings first"
-              : !hasActiveConversation
-                ? "Start a meeting to summarize"
-                : "Summarize this meeting with AI"
-          }
-        >
-          📝 Summarize
-        </button>
+        {!running && (
+          <button
+            type="button"
+            className={`readiness-pill ${setupReason ? "readiness-warn" : "readiness-ok"}`}
+            onClick={() => {
+              if (setupReason && connected) setActiveView("settings");
+            }}
+            title={
+              setupReason
+                ? `${setupReason} — click to open Settings`
+                : "Audio & AI pipeline ready"
+            }
+          >
+            {setupReason ? `⚠ ${setupReason}` : "✓ Ready"}
+          </button>
+        )}
+
+        {isAssistantEnabled && (
+          <button
+            type="button"
+            className={`btn btn-sm btn-summarize ${!canSummarize ? "btn-summarize-disabled" : ""}`}
+            onClick={requestSummary}
+            disabled={!canSummarize}
+            title={!hasActiveConversation ? "Start a meeting to summarize" : "Summarize this meeting with AI"}
+          >
+            📝 Summarize
+          </button>
+        )}
 
         {hasSummary && (
           <button

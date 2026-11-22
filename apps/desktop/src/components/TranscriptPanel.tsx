@@ -24,14 +24,37 @@ function resolveSourceLabel(
   return SOURCE_LABELS[source as NonNullable<TranscriptSource>]?.label ?? source;
 }
 
-function SourceBadge({ source }: { source: TranscriptSource | undefined }) {
+function SourceBadge({
+  source,
+  onToggle,
+}: {
+  source: TranscriptSource | undefined;
+  onToggle?: () => void;
+}) {
   const sourceLabels = useEngineStore((s) => s.sourceLabels);
   if (!source) return null;
   const meta = SOURCE_LABELS[source];
   if (!meta) return null;
+  const label = resolveSourceLabel(source, sourceLabels);
+  if (onToggle && (source === "mic" || source === "system")) {
+    return (
+      <button
+        type="button"
+        className={`source-badge source-badge-btn ${meta.cls}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        title="Click to switch speaker (Me ↔ Others)"
+        aria-label={`Switch speaker from ${label}`}
+      >
+        {meta.icon} {label}
+      </button>
+    );
+  }
   return (
     <span className={`source-badge ${meta.cls}`}>
-      {meta.icon} {resolveSourceLabel(source, sourceLabels)}
+      {meta.icon} {label}
     </span>
   );
 }
@@ -58,7 +81,10 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
   const translationEnabled = useEngineStore(
     (s) => s.services?.translation?.enabled ?? s.config.translationEnabled,
   );
+  const updateEntry = useEngineStore((s) => s.updateEntry);
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftText, setDraftText] = useState(entry.text);
 
   const handleCopyEntry = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -75,6 +101,18 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
     }
   };
 
+  const handleSaveEdit = async () => {
+    const trimmed = draftText.trim();
+    if (!trimmed) return;
+    const ok = await updateEntry(entry.id, { text: trimmed });
+    if (ok) setEditing(false);
+  };
+
+  const handleToggleSpeaker = () => {
+    if (entry.source !== "mic" && entry.source !== "system") return;
+    void updateEntry(entry.id, { source: entry.source === "mic" ? "system" : "mic" });
+  };
+
   return (
     <div
       className={`transcript-entry transcript-final ${sourceBorderClass(entry.source)}`}
@@ -83,7 +121,10 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
     >
       <div className="transcript-entry-top">
         <div className="transcript-entry-header">
-          <SourceBadge source={entry.source} />
+          <SourceBadge
+            source={entry.source}
+            onToggle={entry.source === "mic" || entry.source === "system" ? handleToggleSpeaker : undefined}
+          />
           {entry.sttFallbackFrom && (
             <span
               className="transcript-fallback-badge"
@@ -101,17 +142,72 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
             </span>
           )}
         </div>
-        <button
-          type="button"
-          className="transcript-copy-btn"
-          onClick={handleCopyEntry}
-          title="Copy segment"
-          aria-label="Copy segment"
-        >
-          {copied ? "Copied" : "Copy"}
-        </button>
+        <div className="transcript-entry-actions">
+          {!editing && (
+            <button
+              type="button"
+              className="transcript-copy-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                setDraftText(entry.text);
+                setEditing(true);
+              }}
+              title="Edit segment text"
+              aria-label="Edit segment"
+            >
+              Edit
+            </button>
+          )}
+          <button
+            type="button"
+            className="transcript-copy-btn"
+            onClick={handleCopyEntry}
+            title="Copy segment"
+            aria-label="Copy segment"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
       </div>
-      <div className="transcript-text">{entry.text}</div>
+      {editing ? (
+        <div className="transcript-edit-box">
+          <textarea
+            className="transcript-edit-input"
+            value={draftText}
+            rows={2}
+            onChange={(e) => setDraftText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void handleSaveEdit();
+              } else if (e.key === "Escape") {
+                setEditing(false);
+              }
+            }}
+            aria-label="Edit transcript text"
+            autoFocus
+          />
+          <div className="transcript-edit-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => void handleSaveEdit()}
+              disabled={!draftText.trim()}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setEditing(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="transcript-text">{entry.text}</div>
+      )}
       {translationEnabled && entry.translation && (
         <div
           className="transcript-translation"
@@ -196,9 +292,6 @@ export function TranscriptPanel() {
   const entries = useEngineStore((s) => s.entries);
   const partials = useEngineStore((s) => s.partials);
   const running = useEngineStore((s) => s.running);
-  const downloading = useEngineStore((s) => s.downloading);
-  const downloadModel = useEngineStore((s) => s.downloadModel);
-  const downloadPercent = useEngineStore((s) => s.downloadPercent);
   const sourceLabels = useEngineStore((s) => s.sourceLabels);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -206,6 +299,7 @@ export function TranscriptPanel() {
   const [showJumpBtn, setShowJumpBtn] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<"all" | "mic" | "system">("all");
+  const [visibleLimit, setVisibleLimit] = useState(200);
 
   const checkNearBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -248,6 +342,13 @@ export function TranscriptPanel() {
   }, [entries, normalizedQuery, sourceFilter]);
 
   const hasContent = entries.length > 0 || partialStreams.length > 0;
+  const isFiltered = Boolean(normalizedQuery || sourceFilter !== "all");
+  const hiddenCount =
+    !isFiltered && filteredEntries.length > visibleLimit
+      ? filteredEntries.length - visibleLimit
+      : 0;
+  const renderedEntries =
+    hiddenCount > 0 ? filteredEntries.slice(-visibleLimit) : filteredEntries;
 
   return (
     <div className="transcript-panel-shell">
@@ -288,27 +389,27 @@ export function TranscriptPanel() {
       )}
 
       <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
-        {downloading && (
-          <div className="download-progress-overlay">
-            <div className="download-progress-card">
-              <h4>Downloading AI model for the first time...</h4>
-              <p>{downloadModel}</p>
-              <div className="progress-bar-bg">
-                <div className="progress-bar-fill" style={{ width: `${downloadPercent}%` }}></div>
-              </div>
-              <div className="progress-text-container">
-                <span className="progress-text">{downloadPercent}%</span>
-              </div>
-            </div>
-          </div>
-        )}
-
         <SttNoticeBar />
 
-        {!hasContent && !downloading && (
+        {!hasContent && (
           <div className="transcript-empty">
-            <p>No transcript yet.</p>
-            <p>Press <strong>Start</strong> to begin transcription.</p>
+            {running ? (
+              <>
+                <div className="transcript-listening" aria-label="Listening for speech">
+                  <span className="listening-dot" />
+                  <span className="listening-dot" />
+                  <span className="listening-dot" />
+                </div>
+                <p>Listening for speech...</p>
+              </>
+            ) : (
+              <>
+                <p>No transcript yet.</p>
+                <p>
+                  Press <strong>Start</strong> to begin transcription.
+                </p>
+              </>
+            )}
           </div>
         )}
 
@@ -318,7 +419,19 @@ export function TranscriptPanel() {
           </div>
         )}
 
-        {filteredEntries.map((entry) => (
+        {hiddenCount > 0 && (
+          <div style={{ display: "flex", justifyContent: "center", padding: "6px 0" }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setVisibleLimit((n) => n + 200)}
+            >
+              Show {Math.min(hiddenCount, 200)} earlier segments ({hiddenCount} hidden)
+            </button>
+          </div>
+        )}
+
+        {renderedEntries.map((entry) => (
           <FinalEntry key={entry.id} entry={entry} />
         ))}
 

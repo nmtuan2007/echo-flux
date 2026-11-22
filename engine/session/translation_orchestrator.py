@@ -377,7 +377,7 @@ def _text_strategy(resolved: ResolvedService, secrets: Mapping[str, str]) -> Any
     raise ProviderRegistryError(
         RegistryErrorCode.FACTORY_UNAVAILABLE,
         provider_id=pid,
-        capability=ProviderCapability.TRANSLATION,
+        capability=resolved.capability,
     )
 
 

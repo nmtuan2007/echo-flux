@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
 import type { ManifestField, ServiceOptionValue } from "../store/types";
 
 // Presentational inputs for one manifest field. Parsing, validation, and vault calls live in
@@ -112,21 +113,55 @@ export function ProviderField({
         ))}
       </select>
     );
+  } else if (field.key === "target_lang" && field.fieldType === "string") {
+    const currentVal = typeof value === "string" ? value : defaultText;
+    const isPreset = PRESET_TARGET_LANGUAGES.some((l) => l.code === currentVal);
+    control = (
+      <select
+        id={id}
+        value={currentVal}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        {...aria}
+      >
+        {!isPreset && currentVal && <option value={currentVal}>{currentVal}</option>}
+        {PRESET_TARGET_LANGUAGES.map((lang) => (
+          <option key={lang.code} value={lang.code}>
+            {lang.label}
+          </option>
+        ))}
+      </select>
+    );
   } else {
     const numeric = field.fieldType === "integer" || field.fieldType === "number";
     const shown = draft ?? (value === null || value === undefined ? "" : String(value));
+    const hasLangList =
+      field.fieldType === "string" && (field.key === "language" || field.key === "source_lang");
+    const listId = hasLangList ? `${id}-presets` : undefined;
     control = (
-      <input
-        id={id}
-        type="text"
-        inputMode={field.fieldType === "integer" ? "numeric" : numeric ? "decimal" : undefined}
-        value={shown}
-        placeholder={defaultText || "Provider default"}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        spellCheck={false}
-        {...aria}
-      />
+      <>
+        <input
+          id={id}
+          type="text"
+          list={listId}
+          inputMode={field.fieldType === "integer" ? "numeric" : numeric ? "decimal" : undefined}
+          value={shown}
+          placeholder={defaultText || "Provider default"}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          spellCheck={false}
+          {...aria}
+        />
+        {hasLangList && (
+          <datalist id={listId}>
+            {PRESET_INPUT_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {lang.label}
+              </option>
+            ))}
+          </datalist>
+        )}
+      </>
     );
   }
 

@@ -179,6 +179,7 @@ DOCUMENTED_ENGINE_TO_UI = {
     "translation_update",
     "status",
     "error",
+    "audio_level",
     "devices_list",
     "suggestion_result",
     "llm_chunk",

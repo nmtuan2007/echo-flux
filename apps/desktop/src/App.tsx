@@ -97,34 +97,54 @@ export default function App() {
   useEffect(() => {
     let unlistenSync: (() => void) | undefined;
     let unlistenReq: (() => void) | undefined;
+    let unlistenClosed: (() => void) | undefined;
     let unlistenRelay: (() => void) | undefined;
     let unlistenAssistRelay: (() => void) | undefined;
+    let unlistenToggleRelay: (() => void) | undefined;
     let unsubStore: (() => void) | undefined;
+    let overlayActive = false;
 
-    const getSyncPayload = () => {
+    let lastSyncedServices: unknown = null;
+    let lastSyncedConfig: unknown = null;
+    let lastSyncedLabels: unknown = null;
+
+    const getSyncPayload = (full: boolean) => {
       const state = useEngineStore.getState();
-      return {
+      const payload: Record<string, unknown> = {
         // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
         entries: state.entries.slice(-20),
         partials: state.partials,
         running: state.running,
         connected: state.connected,
+        isToggling: state.isToggling,
+        appError: state.appError,
         suggestionLoading: state.suggestionLoading,
         assistRequests: state.assistRequests,
         engineConversationId: state.engineConversationId,
-        sourceLabels: state.sourceLabels,
         sttStreams: state.sttStreams,
-        services: state.services,
-        config: publicConfigSnapshot(state.config),
       };
+      if (full || state.sourceLabels !== lastSyncedLabels) {
+        lastSyncedLabels = state.sourceLabels;
+        payload.sourceLabels = state.sourceLabels;
+      }
+      if (full || state.services !== lastSyncedServices) {
+        lastSyncedServices = state.services;
+        payload.services = state.services;
+      }
+      if (full || state.config !== lastSyncedConfig) {
+        lastSyncedConfig = state.config;
+        payload.config = publicConfigSnapshot(state.config);
+      }
+      return payload;
     };
 
     let syncTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleSync = () => {
-      if (syncTimer) return;
+      if (!overlayActive || syncTimer) return;
       syncTimer = setTimeout(() => {
         syncTimer = null;
-        void emit("sync_state", getSyncPayload());
+        if (!overlayActive) return;
+        void emit("sync_state", getSyncPayload(false));
       }, 60);
     };
 
@@ -140,8 +160,13 @@ export default function App() {
       void bootstrapEngine();
 
       listen("request_sync_state", () => {
-        emit("sync_state", getSyncPayload());
+        overlayActive = true;
+        emit("sync_state", getSyncPayload(true));
       }).then((f) => (unlistenReq = f));
+
+      listen("overlay_closed", () => {
+        overlayActive = false;
+      }).then((f) => (unlistenClosed = f));
 
       listen("relay_request_suggestion", (event: any) => {
         const { entryId, targetText, context } = event.payload;
@@ -155,12 +180,19 @@ export default function App() {
         }
       }).then((f) => (unlistenAssistRelay = f));
 
+      listen("relay_toggle_pipeline", () => {
+        useEngineStore.getState().togglePipeline();
+      }).then((f) => (unlistenToggleRelay = f));
+
       unsubStore = useEngineStore.subscribe((state, prev) => {
+        if (!overlayActive) return;
         if (
           state.entries !== prev.entries ||
           state.partials !== prev.partials ||
           state.running !== prev.running ||
           state.connected !== prev.connected ||
+          state.isToggling !== prev.isToggling ||
+          state.appError !== prev.appError ||
           state.suggestionLoading !== prev.suggestionLoading ||
           state.assistRequests !== prev.assistRequests ||
           state.engineConversationId !== prev.engineConversationId ||
@@ -193,6 +225,9 @@ export default function App() {
               state.requestAssist(target.id);
             }
           });
+          await register("CommandOrControl+Shift+U", () => {
+            void emit("overlay_unlock");
+          });
         } catch (e) {
           console.error("Failed to setup global shortcuts:", e);
         }
@@ -204,12 +239,16 @@ export default function App() {
       if (syncTimer) clearTimeout(syncTimer);
       if (unlistenSync) unlistenSync();
       if (unlistenReq) unlistenReq();
+      if (unlistenClosed) unlistenClosed();
       if (unlistenRelay) unlistenRelay();
       if (unlistenAssistRelay) unlistenAssistRelay();
+      if (unlistenToggleRelay) unlistenToggleRelay();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
         unregisterAll().catch(console.error);
         disconnect();
+      } else {
+        void emit("overlay_closed");
       }
     };
   }, [bootstrapEngine, disconnect, isOverlay]);

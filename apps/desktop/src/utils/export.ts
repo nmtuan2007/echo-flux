@@ -3,6 +3,8 @@ export interface ExportEntry {
   translation: string | null;
   timestamp: number;
   speaker?: string;
+  startMs?: number | null;
+  endMs?: number | null;
 }
 
 export function exportAsText(entries: ExportEntry[]): string {
@@ -22,11 +24,21 @@ export function exportAsText(entries: ExportEntry[]): string {
 export function exportAsSRT(entries: ExportEntry[]): string {
   if (entries.length === 0) return "";
   const baseTimestamp = entries[0].timestamp;
+  const firstStartMs = entries[0].startMs;
   return entries
     .map((entry, index) => {
-      const startSec = Math.max(0, entry.timestamp - baseTimestamp);
+      const hasExactSpan =
+        typeof entry.startMs === "number" &&
+        typeof entry.endMs === "number" &&
+        entry.endMs > entry.startMs;
+      const startSec =
+        hasExactSpan && typeof firstStartMs === "number"
+          ? Math.max(0, (entry.startMs! - firstStartMs) / 1000)
+          : Math.max(0, entry.timestamp - baseTimestamp);
       const start = formatSRTOffset(startSec);
-      const duration = estimateDuration(entry.text);
+      const duration = hasExactSpan
+        ? Math.max((entry.endMs! - entry.startMs!) / 1000, 0.4)
+        : estimateDuration(entry.text);
       const end = formatSRTOffset(startSec + duration);
 
       const speaker = entry.speaker ? `${entry.speaker}: ` : "";

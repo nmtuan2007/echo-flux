@@ -102,7 +102,13 @@ export function SummaryModal() {
         {/* Content */}
         <div className="summary-content" ref={contentRef}>
           {summaryText ? (
-            <MarkdownRenderer text={summaryText} />
+            summaryLoading ? (
+              <div className="summary-markdown" style={{ whiteSpace: "pre-wrap" }}>
+                {summaryText}
+              </div>
+            ) : (
+              <MarkdownRenderer text={summaryText} />
+            )
           ) : summaryLoading ? (
             <div className="summary-placeholder">
               <span className="summary-placeholder-spinner" />

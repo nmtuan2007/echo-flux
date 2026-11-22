@@ -469,10 +469,18 @@ class EchoFluxEngine:
         return cleaned_config, flat_secrets, service_secrets
 
     async def _on_client_start(self, config: dict, secrets: Optional[dict] = None):
-        # Log the shape only: the start config carries provider settings and API keys.
-        key_count = len(config) if isinstance(config, dict) else 0
-        logger.info("Starting pipeline (%d client config keys)", key_count)
         self._client = self._ws_server.current_requester()
+        if not isinstance(config, dict):
+            logger.warning("Refused start command with non-dict config (%s)", type(config).__name__)
+            if self._client:
+                await self._client.send(
+                    json.dumps({"type": "error", "message": "Invalid start configuration."})
+                )
+            return False
+
+        # Log the shape only: the start config carries provider settings and API keys.
+        key_count = len(config)
+        logger.info("Starting pipeline (%d client config keys)", key_count)
         cleaned_config, flat_secrets, service_secrets = self._extract_start_secrets(config, secrets)
 
         if self._running:
@@ -749,6 +757,12 @@ class EchoFluxEngine:
     def _capture_loop(self, stream_id: str, audio_input, audio_queue: Queue):
         logger.info("Capture thread [%s] started.", stream_id)
         chunk_count = 0
+        last_level_emit = 0.0
+        last_nonzero = False
+        import math
+
+        import numpy as np
+
         try:
             while self._running:
                 chunk = audio_input.read_chunk()
@@ -756,6 +770,19 @@ class EchoFluxEngine:
                     chunk_count += 1
                     if chunk_count % 100 == 0:
                         logger.debug("Capture [%s]: Read 100 chunks. Current queue size: %d", stream_id, audio_queue.qsize())
+
+                    now = time.monotonic()
+                    if now - last_level_emit >= 0.2:
+                        last_level_emit = now
+                        arr = np.frombuffer(chunk, dtype=np.int16)
+                        if arr.size > 0:
+                            rms = math.sqrt(float(np.mean(arr.astype(np.float32) ** 2))) / 32768.0
+                            level = round(min(1.0, rms * 5.0), 3)
+                            if level >= 0.01 or last_nonzero:
+                                last_nonzero = level >= 0.01
+                                self._result_queue.put(
+                                    {"type": "audio_level", "source": stream_id, "level": level}
+                                )
 
                     if not audio_queue.full():
                         audio_queue.put(chunk)
@@ -765,6 +792,12 @@ class EchoFluxEngine:
                     time.sleep(0.005)
         except Exception as e:
             logger.error("Capture thread [%s] error: %s", stream_id, e, exc_info=True)
+            self._result_queue.put(
+                {
+                    "type": "error",
+                    "message": f"Audio capture stopped for {stream_id}. Check your audio device.",
+                }
+            )
         finally:
             logger.info("Capture thread [%s] ended.", stream_id)
 
@@ -781,23 +814,21 @@ class EchoFluxEngine:
             with contextlib.suppress(Exception):
                 await provider.stop()
 
-    async def _start_assistant_service(self, settings: dict) -> None:
-        """Compose repository-backed Assist and Summary from v2 ``services.assistant``."""
+    async def configure_assistant_from_service(
+        self, section: Any, secrets: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """Hot-reload repository-backed Assist and Summary from a v2 ``services.assistant`` dict."""
         if getattr(self, "_assistant_provider", None) is not None:
-            return
-        services = settings.get("services")
-        section = settings.get("services.assistant")
-        if section is None and isinstance(services, dict):
-            section = services.get("assistant")
+            return True
         if not isinstance(section, dict):
-            return
+            return False
 
         await self._close_owned_assistant_provider()
         if not section.get("enabled", False):
             self.configure_assistant_services(None, None)
-            return
+            return False
 
-        assistant_secrets = dict(self._service_secrets.pop("assistant", {}))
+        assistant_secrets = dict(secrets or {})
         try:
             from engine.assistant.summary_service import (
                 EngineAssistantPromptPolicy,
@@ -815,6 +846,14 @@ class EchoFluxEngine:
                 if slot not in assistant_secrets and slot in self._ephemeral_secrets:
                     assistant_secrets[slot] = self._ephemeral_secrets[slot]
 
+            if resolved.protocol_family not in (
+                ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
+                ProtocolFamily.GEMINI_TEXT,
+            ):
+                logger.warning("Unsupported assistant protocol family: %s", resolved.protocol_family)
+                self.configure_assistant_services(None, None)
+                return False
+
             factory = await asyncio.to_thread(
                 registry.load_factory, resolved.capability, resolved.provider_id
             )
@@ -828,21 +867,29 @@ class EchoFluxEngine:
                 provider_id=resolved.provider_id,
                 generation=_generation_options(resolved),
             )
-            if resolved.protocol_family not in (
-                ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
-                ProtocolFamily.GEMINI_TEXT,
-            ):
-                logger.warning("Unsupported assistant protocol family: %s", resolved.protocol_family)
-                return
             await provider.start()
             self._owned_assistant_provider = provider
             self.configure_assistant_services(
                 self._conversation_repo, provider, model=resolved.model
             )
+            return True
         except Exception as exc:
             # Assistant setup failure never halts STT/Translation capture.
             logger.warning("Assistant service could not be started (%s)", type(exc).__name__)
             self.configure_assistant_services(None, None)
+            return False
+        finally:
+            assistant_secrets.clear()
+
+    async def _start_assistant_service(self, settings: dict) -> None:
+        """Compose repository-backed Assist and Summary from v2 ``services.assistant``."""
+        services = settings.get("services")
+        section = settings.get("services.assistant")
+        if section is None and isinstance(services, dict):
+            section = services.get("assistant")
+        assistant_secrets = dict(self._service_secrets.pop("assistant", {}))
+        try:
+            await self.configure_assistant_from_service(section, assistant_secrets)
         finally:
             assistant_secrets.clear()
 
@@ -1323,4 +1370,8 @@ def run_engine(config_path=None, insecure_dev: bool = False):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--validate-provider":
+        from engine.providers.validation import main as _validate_main
+
+        raise SystemExit(_validate_main())
     run_engine()

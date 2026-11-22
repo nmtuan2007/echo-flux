@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { AudioDeviceInfo, EngineConfig, useEngineStore } from "../store/engineStore";
 import { SERVICE_NAMES } from "../store/settingsSlice";
 import { CloudConsent } from "./CloudConsent";
-import { LocalPackStatus } from "./LocalPackStatus";
 import { ServiceSettingsCard } from "./ServiceSettingsCard";
 const AUDIO_SOURCES: { value: EngineConfig["audioSource"]; label: string }[] = [
   { value: "microphone", label: "Microphone only" },
@@ -205,18 +204,6 @@ export function SettingsPanel() {
         <p className="settings-note">
           Filters silence before sending audio to local STT so pauses finalize cleanly and CPU/GPU usage stays low.
         </p>
-      </section>
-
-      {/* ── Local Offline Model Packs ────────────────────────────────── */}
-      <section className="settings-section">
-        <h3 className="settings-section-title">Local Offline Models</h3>
-        <p className="settings-note">
-          Manage curated on-device models for offline speech recognition and translation.
-        </p>
-        <div className="settings-packs-grid">
-          <LocalPackStatus capability="stt" />
-          <LocalPackStatus capability="translation" />
-        </div>
       </section>
 
       {/* ── Privacy & Cloud Consent ──────────────────────────────────── */}

@@ -21,16 +21,29 @@ async fn create_overlay_window(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    tauri::WindowBuilder::new(&app, "overlay", tauri::WindowUrl::App("index.html".into()))
-        .title("EchoFlux Overlay")
-        .inner_size(600.0, 200.0)
-        .always_on_top(true)
-        .decorations(false)
-        .transparent(true)
-        .skip_taskbar(true)
-        .resizable(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let overlay =
+        tauri::WindowBuilder::new(&app, "overlay", tauri::WindowUrl::App("index.html".into()))
+            .title("EchoFlux Overlay")
+            .inner_size(620.0, 240.0)
+            .always_on_top(true)
+            .decorations(false)
+            .transparent(true)
+            .skip_taskbar(true)
+            .resizable(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+    // Always restore main window if the overlay is closed via OS shortcuts (e.g. Alt+F4).
+    let app_handle = app.clone();
+    overlay.on_window_event(move |event| {
+        if let tauri::WindowEvent::Destroyed = event {
+            if let Some(main) = app_handle.get_window("main") {
+                let _ = main.show();
+                let _ = main.set_focus();
+            }
+            let _ = app_handle.emit_all("overlay_closed", ());
+        }
+    });
 
     Ok(())
 }

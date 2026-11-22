@@ -105,6 +105,8 @@ export interface TranscriptEntry {
   translationRevision?: number;
   translationProvider?: string;
   translationFallback?: boolean;
+  startMs?: number | null;
+  endMs?: number | null;
   assist?: AssistOutcome;
 }
 
@@ -297,6 +299,7 @@ export type EngineEventType =
   | "translation_update"
   | "status"
   | "error"
+  | "audio_level"
   | "devices_list"
   | "suggestion_result"
   | "llm_chunk"

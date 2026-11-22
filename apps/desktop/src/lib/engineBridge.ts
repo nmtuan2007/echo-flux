@@ -130,10 +130,11 @@ function normalizeStatus(raw: unknown): EngineProcessStatus {
 function normalizeForward(raw: unknown, summary: string): ControlForwardResult {
   const messages = (raw as { messages?: unknown } | null)?.messages;
   if (!Array.isArray(messages)) throw invalidResponse(summary);
+  // Phase B dispatcher replies carry structured fields without a legacy `type` key,
+  // so keep any non-null plain object returned by the control bridge.
   return {
     messages: messages.filter(
-      (m): m is EngineMessage =>
-        typeof m === "object" && m !== null && typeof (m as EngineMessage).type === "string",
+      (m): m is EngineMessage => typeof m === "object" && m !== null && !Array.isArray(m),
     ),
   };
 }
@@ -170,6 +171,7 @@ export const FORWARDED_COMMAND_TYPES = [
   "search_hub",
   "request_suggestion",
   "request_assist",
+  "configure_assistant",
   "request_summary",
   "summary_cancel",
   "conversation_create",
@@ -180,6 +182,7 @@ export const FORWARDED_COMMAND_TYPES = [
   "conversation_delete",
   "conversation_export",
   "conversation_import",
+  "message_update",
   "profile_create",
   "profile_list",
   "profile_get",

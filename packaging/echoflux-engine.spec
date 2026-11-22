@@ -45,6 +45,14 @@ hiddenimports = [
     # Assistant Services
     "engine.assistant.service",
     "engine.assistant.summary_service",
+    # Provider Validation (Test Connection)
+    "engine.providers.validation",
+    "engine.providers.text.openai_compatible",
+    "engine.providers.text.gemini",
+    "engine.providers.translation.openai_compatible",
+    "engine.providers.translation.gemini",
+    "engine.providers.assistant.openai_compatible",
+    "engine.providers.assistant.gemini",
     # Session Orchestration
     "engine.session.session_orchestrator",
     "engine.session.translation_orchestrator",
@@ -54,11 +62,12 @@ hiddenimports = [
     # Local Model Catalog & Installer
     "engine.local_models.catalog",
     "engine.local_models.installer",
-    "engine.local_models.hardware",
+    "engine.local_models.selector",
     # Server & Protocol Dispatcher
     "engine.server.websocket_server",
     "engine.server.protocol",
     "engine.server.control_dispatcher",
+    "engine.server.control_helpers",
     # Dynamic Websocket & Audio Dependencies
     "websockets.legacy",
     "websockets.legacy.server",

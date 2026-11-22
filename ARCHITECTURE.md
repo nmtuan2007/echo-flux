@@ -84,7 +84,7 @@ The engine never knows a UI exists — it communicates over authenticated localh
 | `engine/assistant/summary_service.py` | Real-time meeting summary chunk streaming |
 | `engine/providers/` | Capability provider registry (`stt/`, `translation/`, `assistant/`) |
 | `engine/local_models/` | Local model pack catalog, hardware tier inspection, on-demand downloader |
-| `engine/audio/` | Microphone, WASAPI system audio loopback, Silero VAD, stream mixer |
+| `engine/audio/` | Microphone, WASAPI system audio loopback, Silero VAD |
 | `apps/desktop/src/store/` | Unified Zustand store composed from typed slices (`session`, `transcript`, `settings`, `conversation`) |
 | `apps/desktop/src/components/` | Modular React panels (`TranscriptPanel`, `AssistPanel`, `HistoryPanel`, `ContextProfilesPanel`, `OnboardingDialog`, etc.) |
 | `apps/desktop/src-tauri/src/` | Rust desktop bridge (`control_bridge`, `engine_process`, `secure_store`, `main`) |

@@ -52,9 +52,20 @@ from engine.local_models import (
     compatibility_issues,
     select_default_pack,
 )
-from engine.providers.manifests import ManifestField, ProviderManifest
 from engine.providers.registry import build_default_registry
 from engine.providers.types import AssistQuestion, AssistSuggestion, ProviderCapability
+from engine.server.control_helpers import (
+    is_local_model_ready as _is_local_model_ready,
+)
+from engine.server.control_helpers import (
+    probe_audio_stream as _probe_audio_stream,
+)
+from engine.server.control_helpers import (
+    serialize_manifest as _serialize_manifest,
+)
+from engine.server.control_helpers import (
+    warning_dict as _warning_dict,
+)
 from engine.server.protocol import (
     BootstrapTokens,
     complete_frame,
@@ -72,73 +83,6 @@ class DispatcherError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
-
-
-def _warning_dict(warning: Any) -> Optional[Dict[str, Any]]:
-    if warning is None:
-        return None
-    return {
-        "omitted_message_count": getattr(warning, "omitted_message_count", 0),
-        "first_omitted_timestamp_ms": getattr(warning, "first_omitted_timestamp_ms", None),
-        "last_omitted_timestamp_ms": getattr(warning, "last_omitted_timestamp_ms", None),
-        "reason": getattr(warning, "reason", "context_limit"),
-    }
-
-
-def _serialize_field(f: ManifestField) -> Dict[str, Any]:
-    return {
-        "key": f.key,
-        "label": f.label,
-        "field_type": f.field_type.value,
-        "default": f.default,
-        "required": f.required,
-        "advanced": f.advanced,
-        "secret": f.secret,
-        "choices": list(f.choices),
-        "minimum": f.minimum,
-        "maximum": f.maximum,
-        "description": f.description,
-        "applies_to": [c.value for c in f.applies_to],
-    }
-
-
-def _serialize_manifest(m: ProviderManifest) -> Dict[str, Any]:
-    return {
-        "provider_id": m.provider_id,
-        "display_name": m.display_name,
-        "capabilities": [c.value for c in m.capabilities],
-        "protocol_family": m.protocol_family.value,
-        "recommended_endpoint": m.recommended_endpoint,
-        "recommended_model": m.recommended_model,
-        "endpoint_editable": m.endpoint_editable,
-        "requires_endpoint": m.requires_endpoint,
-        "model_selectable": m.model_selectable,
-        "fields": [_serialize_field(f) for f in m.fields],
-        "protocol_profiles": {k: v.value for k, v in m.protocol_profiles.items()},
-        "profile_field": m.profile_field,
-    }
-
-
-def _is_local_model_ready(capability: str) -> bool:
-    """Checks whether local STT or Translation models exist on disk in models_dir."""
-    try:
-        models_dir = Config().models_dir
-        if not models_dir or not models_dir.exists():
-            return False
-        cap = (capability or "").lower()
-        if cap in ("stt", "speech", "whisper"):
-            stt_dirs = list(models_dir.glob("models--Systran--faster-whisper-*")) + list(
-                models_dir.glob("models--openai--whisper-*")
-            )
-            return len(stt_dirs) > 0
-        elif cap in ("translation", "translate", "marian", "opus"):
-            ct2_dir = models_dir / "ct2"
-            if ct2_dir.exists():
-                trans_dirs = list(ct2_dir.glob("Helsinki-NLP_opus-mt-*"))
-                return len(trans_dirs) > 0
-        return False
-    except Exception:
-        return False
 
 
 class ControlCommandDispatcher:
@@ -189,6 +133,7 @@ class ControlCommandDispatcher:
             "conversation_delete": self._handle_conversation_delete,
             "conversation_export": self._handle_conversation_export,
             "conversation_import": self._handle_conversation_import,
+            "message_update": self._handle_message_update,
             # Local Model Packs
             "pack_status": self._handle_pack_status,
             "pack_install": self._handle_pack_install,
@@ -200,6 +145,7 @@ class ControlCommandDispatcher:
             # Audio Input Probe
             "audio_probe": self._handle_audio_probe,
             # Manual Assist
+            "configure_assistant": self._handle_configure_assistant,
             "request_assist": self._handle_request_assist,
             "request_suggestion": self._handle_request_assist,
             # Streaming Summary & Cancel
@@ -570,8 +516,13 @@ class ControlCommandDispatcher:
 
     async def _handle_conversation_list(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         repo = self.conversation_repo
+        raw_query = payload.get("search_query")
+        search_query = raw_query.strip() if isinstance(raw_query, str) and raw_query.strip() else None
         if hasattr(repo, "list_conversations_with_stats"):
-            items = await asyncio.to_thread(repo.list_conversations_with_stats)
+            try:
+                items = await asyncio.to_thread(repo.list_conversations_with_stats, search_query)
+            except TypeError:
+                items = await asyncio.to_thread(repo.list_conversations_with_stats)
         else:
             convs = await asyncio.to_thread(repo.list_conversations)
             items = [(c, 0, False) for c in convs]
@@ -644,6 +595,8 @@ class ControlCommandDispatcher:
                     "is_final": m.is_final,
                     "revision": m.revision,
                     "timestamp_ms": m.timestamp_ms,
+                    "start_ms": m.start_ms,
+                    "end_ms": m.end_ms,
                 }
                 for m in msgs
             ]
@@ -811,7 +764,7 @@ class ControlCommandDispatcher:
             )
 
         assist_results: List[StoredAssistResult] = []
-        for a in export_data.get("assist_results", []):
+        for idx, a in enumerate(export_data.get("assist_results", [])):
             prov = a.get("provider")
             replies_raw = a.get("suggested_replies") or ()
             questions_raw = a.get("clarifying_questions") or ()
@@ -853,9 +806,9 @@ class ControlCommandDispatcher:
 
             assist_results.append(
                 StoredAssistResult(
-                    assist_id=a["assist_id"],
+                    assist_id=a.get("assist_id") or a.get("id") or f"migrated-assist-{idx}",
                     conversation_id=cid,
-                    target_message_id=a["target_message_id"],
+                    target_message_id=a.get("target_message_id") or a.get("entry_id") or f"migrated-msg-{idx}",
                     suggested_replies=tuple(parsed_replies),
                     clarifying_questions=tuple(parsed_questions),
                     created_at_ms=float(a.get("created_at_ms", time.time() * 1000.0)),
@@ -874,11 +827,11 @@ class ControlCommandDispatcher:
             )
 
         summaries: List[StoredSummary] = []
-        for s in export_data.get("summaries", []):
+        for idx, s in enumerate(export_data.get("summaries", [])):
             prov = s.get("provider")
             summaries.append(
                 StoredSummary(
-                    summary_id=s["summary_id"],
+                    summary_id=s.get("summary_id") or s.get("id") or f"migrated-sum-{idx}",
                     conversation_id=cid,
                     summary_markdown=s.get("summary_markdown", ""),
                     created_at_ms=s.get("created_at_ms", time.time() * 1000.0),
@@ -903,6 +856,43 @@ class ControlCommandDispatcher:
 
         return {"conversation_id": outcome.conversation_id, "imported": outcome.imported}
 
+    async def _handle_message_update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cid = payload.get("conversation_id")
+        mid = payload.get("message_id")
+        text = payload.get("text")
+        source = payload.get("source")
+
+        if not isinstance(cid, str) or not cid:
+            raise DispatcherError("invalid_payload", "conversation_id is required")
+        if not isinstance(mid, str) or not mid:
+            raise DispatcherError("invalid_payload", "message_id is required")
+        if text is None and source is None:
+            raise DispatcherError("invalid_payload", "text or source is required")
+        if text is not None and (not isinstance(text, str) or not text.strip()):
+            raise DispatcherError("invalid_payload", "text must be a non-empty string")
+        if source is not None and source not in ("mic", "system", "both"):
+            raise DispatcherError("invalid_payload", "source must be mic, system, or both")
+
+        try:
+            updated = await asyncio.to_thread(
+                self.conversation_repo.update_message,
+                cid,
+                mid,
+                text=text,
+                source=source,
+            )
+        except RecordNotFoundError:
+            raise DispatcherError("not_found", "Message or conversation not found") from None
+        except ConversationValidationError as err:
+            raise DispatcherError("validation_error", str(err)) from None
+
+        return {
+            "conversation_id": cid,
+            "message_id": updated.message_id,
+            "text": updated.text,
+            "source": updated.source,
+        }
+
     # --- 3. Local Model Packs -----------------------------------------------------------------
 
     async def _handle_pack_status(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -912,9 +902,27 @@ class ControlCommandDispatcher:
         probe = self._get_probe()
         profile: HardwareProfile = await asyncio.to_thread(probe.probe)
 
+        hw_info = {
+            "cpu_cores": profile.cpu_cores,
+            "ram_gb": round(profile.ram_gb, 2),
+            "platform": profile.platform,
+            "architecture": profile.architecture,
+            "has_gpu": profile.gpu is not None,
+        }
+
         if pack_id:
             pack = catalog.get(pack_id)
             if pack is None:
+                progress = self._pack_progress.get(pack_id)
+                if progress is not None:
+                    return {
+                        "pack_id": pack_id,
+                        "hardware": hw_info,
+                        "download_progress": progress,
+                        "is_active": False,
+                        "is_ready": False,
+                        "installed": False,
+                    }
                 raise DispatcherError("not_found", f"Pack '{pack_id}' not found in catalog")
             packs_to_check = [pack]
         else:
@@ -945,14 +953,6 @@ class ControlCommandDispatcher:
                     "is_compatible": len(issues) == 0 or local_ready,
                 }
             )
-
-        hw_info = {
-            "cpu_cores": profile.cpu_cores,
-            "ram_gb": round(profile.ram_gb, 2),
-            "platform": profile.platform,
-            "architecture": profile.architecture,
-            "has_gpu": profile.gpu is not None,
-        }
 
         if pack_id and status_list:
             progress = self._pack_progress.get(pack_id)
@@ -1013,7 +1013,8 @@ class ControlCommandDispatcher:
 
             set_progress_callback(_on_progress)
             try:
-                out_path = await asyncio.to_thread(download_model, size, output_dir=str(models_dir))
+                # Use cache_dir so HuggingFace layout matches WhisperModel(..., download_root=models_dir).
+                out_path = await asyncio.to_thread(download_model, size, cache_dir=str(models_dir))
                 if cancel_event.is_set():
                     raise InstallCancelledError("cancelled")
                 return {
@@ -1100,13 +1101,19 @@ class ControlCommandDispatcher:
     async def _handle_pack_check_readiness(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         capability = payload.get("capability", "stt")
         pack_id = payload.get("pack_id")
+        source_lang = payload.get("source_lang")
+        target_lang = payload.get("target_lang")
         installer = self._get_installer()
         catalog = self._get_catalog()
         probe = self._get_probe()
         profile: HardwareProfile = await asyncio.to_thread(probe.probe)
 
         kind = PackKind.STT if capability.lower() == "stt" else PackKind.TRANSLATION
-        is_local = _is_local_model_ready(capability)
+        is_local = _is_local_model_ready(
+            capability,
+            source_lang=source_lang if isinstance(source_lang, str) else None,
+            target_lang=target_lang if isinstance(target_lang, str) else None,
+        )
 
         if pack_id:
             pack = catalog.get(pack_id)
@@ -1190,58 +1197,38 @@ class ControlCommandDispatcher:
         if not isinstance(duration_ms, int) or duration_ms < 100 or duration_ms > 1500:
             duration_ms = 300
 
-        def _probe_one(kind: str, device_id: Optional[str]) -> Dict[str, Any]:
-            import math
-
-            import numpy as np
-
-            cfg = {"sample_rate": 16000, "channels": 1, "chunk_ms": 20}
-            inp = None
-            try:
-                if kind == "mic":
-                    from engine.audio.microphone import MicrophoneInput
-
-                    dev = int(device_id) if device_id else None
-                    inp = MicrophoneInput(cfg, device_id=dev)
-                else:
-                    from engine.audio.system_audio import SystemAudioInput
-
-                    inp = SystemAudioInput(cfg, device_id=device_id or None)
-
-                inp.start()
-                deadline = time.monotonic() + (duration_ms / 1000.0)
-                squares = 0.0
-                samples = 0
-                while time.monotonic() < deadline:
-                    chunk = inp.read_chunk()
-                    if chunk:
-                        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float64) / 32768.0
-                        if arr.size > 0:
-                            squares += float(np.sum(arr * arr))
-                            samples += int(arr.size)
-                rms = math.sqrt(squares / samples) if samples > 0 else 0.0
-                # Scale RMS so conversational speech (~0.05-0.2) reads cleanly on 0..1 meter.
-                level = round(min(1.0, rms * 5.0), 3)
-                return {"ok": True, "level": level, "rms": round(rms, 5), "samples": samples}
-            except Exception as exc:
-                return {"ok": False, "level": 0.0, "error": type(exc).__name__}
-            finally:
-                if inp is not None:
-                    with contextlib.suppress(Exception):
-                        inp.stop()
-
         results: Dict[str, Any] = {}
         if audio_source in ("microphone", "both"):
             results["mic"] = await asyncio.to_thread(
-                _probe_one, "mic", str(mic_id) if mic_id else None
+                _probe_audio_stream, "mic", str(mic_id) if mic_id else None, duration_ms
             )
         if audio_source in ("system", "both"):
             results["system"] = await asyncio.to_thread(
-                _probe_one, "system", str(speaker_id) if speaker_id else None
+                _probe_audio_stream, "system", str(speaker_id) if speaker_id else None, duration_ms
             )
         return {"streams": results}
 
     # --- 5. Manual Assist ---------------------------------------------------------------------
+
+    async def _handle_configure_assistant(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        secrets = payload.pop("secrets", None)
+        service = payload.get("service")
+        if not isinstance(service, dict):
+            raise DispatcherError("invalid_payload", "service must be an object")
+        secret_map: Dict[str, str] = {}
+        if isinstance(secrets, dict):
+            for k, v in secrets.items():
+                if isinstance(k, str) and isinstance(v, str) and v:
+                    secret_map[k] = v
+        try:
+            if self._engine is None or not hasattr(self._engine, "configure_assistant_from_service"):
+                raise DispatcherError("assistant_unavailable", "Engine cannot configure assistant")
+            configured = await self._engine.configure_assistant_from_service(service, secret_map)
+            return {"configured": bool(configured)}
+        finally:
+            secret_map.clear()
+            if isinstance(secrets, dict):
+                secrets.clear()
 
     async def _handle_request_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         cid = payload.get("conversation_id")

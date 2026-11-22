@@ -333,9 +333,11 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
-def _is_loopback(url: str) -> bool:
+def _is_loopback(url: Any) -> bool:
+    if not isinstance(url, str):
+        return False
     try:
-        return (urlsplit(url).hostname or "") in LOOPBACK_HOSTS
+        return (urlsplit(url.strip()).hostname or "") in LOOPBACK_HOSTS
     except ValueError:
         return False
 
@@ -402,7 +404,7 @@ class OpenAIStrategy(_BaseURLStrategy):
     supports_stream_usage = True
 
     def __init__(self, base_url: str, api_key: str) -> None:
-        super().__init__(base_url, allow_insecure=False)
+        super().__init__(base_url, allow_insecure=_is_loopback(base_url))
         self._api_key = _require_secret(api_key, "api_key")
 
     def auth_headers(self) -> Dict[str, str]:
@@ -478,7 +480,7 @@ class AssemblyAIGatewayStrategy(_BaseURLStrategy):
     mode = "assemblyai-llm-gateway"
 
     def __init__(self, base_url: str, api_key: str) -> None:
-        super().__init__(base_url, allow_insecure=False)
+        super().__init__(base_url, allow_insecure=_is_loopback(base_url))
         self._api_key = _require_secret(api_key, "api_key")
 
     def probe_url(self) -> Optional[str]:

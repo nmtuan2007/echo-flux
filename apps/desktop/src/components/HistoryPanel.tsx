@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { isTauriRuntime } from "../lib/engineBridge";
 import { useEngineStore, Conversation } from "../store/engineStore";
 import type { ExportEntry } from "../utils/export";
 import { ExportMenu } from "./ExportMenu";
@@ -39,8 +40,15 @@ export function HistoryPanel() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    loadHistoryList().catch(() => {});
-  }, [loadHistoryList]);
+    if (!isTauriRuntime()) {
+      loadHistoryList().catch(() => {});
+      return;
+    }
+    const t = setTimeout(() => {
+      loadHistoryList(historySearchQuery).catch(() => {});
+    }, 200);
+    return () => clearTimeout(t);
+  }, [historySearchQuery, loadHistoryList]);
 
   // Combine savedConversations and legacy history, de-duplicating by ID
   const displayItems: DisplayItem[] = [];
@@ -73,11 +81,22 @@ export function HistoryPanel() {
     });
   }
 
-  // Filter items by search query
+  // Filter items by search query (in Tauri mode, SQLite already searched title + message text)
   const query = historySearchQuery.trim().toLowerCase();
-  const filteredItems = displayItems.filter((item) =>
-    query ? item.title.toLowerCase().includes(query) : true,
-  );
+  const filteredItems = isTauriRuntime()
+    ? displayItems
+    : displayItems.filter((item) =>
+        query
+          ? item.title.toLowerCase().includes(query) ||
+            Boolean(
+              item.legacyData?.entries?.some(
+                (e) =>
+                  e.text.toLowerCase().includes(query) ||
+                  Boolean(e.translation && e.translation.toLowerCase().includes(query)),
+              ),
+            )
+          : true,
+      );
 
   // Sorting: most recent first
   filteredItems.sort((a, b) => b.date - a.date);
@@ -100,7 +119,12 @@ export function HistoryPanel() {
     if (item.isLegacy && item.legacyData) {
       jsonString = JSON.stringify(item.legacyData, null, 2);
     } else {
-      jsonString = await exportConversation(item.id);
+      const exported = await exportConversation(item.id);
+      if (typeof exported === "string") {
+        jsonString = exported;
+      } else if (exported && typeof exported === "object") {
+        jsonString = JSON.stringify(exported, null, 2);
+      }
     }
     if (!jsonString) return;
 
@@ -174,6 +198,22 @@ export function HistoryPanel() {
               clearSelectedConversationDetail();
             }
           }}
+          onExportBackup={async () => {
+            const convId =
+              selectedConversationDetail.conversation?.conversation_id ||
+              selectedConversationDetail.conversation_id;
+            if (!convId) return;
+            const legacyMatch = history.find((h) => h.id === convId);
+            await handleExport({
+              id: convId,
+              title: selectedConversationDetail.conversation?.title || convId,
+              date: Date.now(),
+              messageCount: 0,
+              hasSummary: false,
+              isLegacy: Boolean(legacyMatch),
+              legacyData: legacyMatch,
+            });
+          }}
           disabled={running}
         />
       ) : (
@@ -184,7 +224,7 @@ export function HistoryPanel() {
               <input
                 type="text"
                 className="history-search-input"
-                placeholder="Search conversations..."
+                placeholder="Search titles or transcript..."
                 value={historySearchQuery}
                 onChange={(e) => setHistorySearchQuery(e.target.value)}
                 aria-label="Search conversations"
@@ -283,8 +323,8 @@ export function HistoryPanel() {
                     <button
                       className="btn-icon-sm history-export-btn"
                       onClick={() => handleExport(item)}
-                      title="Export JSON"
-                      aria-label="Export JSON"
+                      title="Export Full Backup (.json)"
+                      aria-label="Export Full Backup (.json)"
                     >
                       📤
                     </button>
@@ -360,11 +400,13 @@ function ConversationDetailView({
   detail,
   onBack,
   onLoadToActive,
+  onExportBackup,
   disabled,
 }: {
   detail: any;
   onBack: () => void;
   onLoadToActive: () => void;
+  onExportBackup: () => void;
   disabled: boolean;
 }) {
   const conv = detail.conversation || detail;
@@ -381,6 +423,8 @@ function ConversationDetailView({
         text: m.stt_text || m.text || "",
         translation: m.translation_text ?? m.translation ?? null,
         timestamp: tsMs > 1e12 ? tsMs / 1000 : tsMs,
+        startMs: typeof m.start_ms === "number" ? m.start_ms : null,
+        endMs: typeof m.end_ms === "number" ? m.end_ms : null,
         speaker:
           m.speaker_label ||
           conv.source_labels?.[m.source] ||
@@ -405,6 +449,7 @@ function ConversationDetailView({
             entries={toExportEntries()}
             title={conv.title || "EchoFlux Conversation"}
             summaryMarkdown={summaryMarkdown || null}
+            onExportBackup={onExportBackup}
           />
           <button
             className="btn btn-primary"

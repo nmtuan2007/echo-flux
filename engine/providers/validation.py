@@ -104,7 +104,7 @@ MAX_REQUEST_BYTES = 64 * 1024
 
 # Probe payloads are fixed and tiny so a Test Connection costs as little as possible.
 PROBE_TEXT = "Hello."
-PROBE_MAX_OUTPUT_TOKENS = 16
+PROBE_MAX_OUTPUT_TOKENS = 128
 PROBE_STREAM_ID = "validation"
 
 ERROR_INVALID_REQUEST = ProviderErrorCode.INVALID_REQUEST.value
@@ -334,6 +334,68 @@ def build_gemini_live(
     return factory(config)
 
 
+class _ValidationAssistPromptPolicy:
+    """Minimal AssistantPromptPolicy for connectivity validation."""
+
+    def build_assist_messages(self, request: AssistRequest):
+        from engine.providers.text.openai_compatible import TextMessage
+
+        return (TextMessage(role="user", content="Reply with OK."),)
+
+    def parse_assist_result(self, request: AssistRequest, completion: Any) -> AssistResult:
+        text = getattr(completion, "text", None)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("empty")
+        return AssistResult(
+            target_message_id=request.target_message.message_id,
+            suggested_replies=(),
+            clarifying_questions=(),
+        )
+
+    def build_summary_messages(self, request: Any):
+        from engine.providers.text.openai_compatible import TextMessage
+
+        return (TextMessage(role="user", content="Reply with OK."),)
+
+
+def build_text_provider(
+    factory: Callable[..., Any], resolved: ResolvedService, secrets: Mapping[str, str]
+) -> BaseProvider:
+    from engine.providers.text.openai_compatible import (
+        TextConfigError,
+        config_error_to_provider_error,
+    )
+    from engine.session.translation_orchestrator import (
+        _generation_options,
+        _text_strategy,
+        build_translation_messages,
+    )
+
+    try:
+        strategy = _text_strategy(resolved, secrets)
+    except TextConfigError as exc:
+        raise config_error_to_provider_error(exc, resolved.capability) from None
+
+    generation = _generation_options(resolved)
+    if resolved.capability is ProviderCapability.TRANSLATION:
+        return factory(
+            strategy,
+            resolved.model,
+            message_builder=build_translation_messages,
+            provider_id=resolved.provider_id,
+            generation=generation,
+        )
+    if resolved.capability is ProviderCapability.ASSISTANT:
+        return factory(
+            strategy,
+            resolved.model,
+            prompt_policy=_ValidationAssistPromptPolicy(),
+            provider_id=resolved.provider_id,
+            generation=generation,
+        )
+    raise ValidationFailedError(ERROR_FACTORY_UNAVAILABLE)
+
+
 def build_from_resolved(
     factory: Callable[..., Any], resolved: ResolvedService, secrets: Mapping[str, str]
 ) -> BaseProvider:
@@ -347,6 +409,8 @@ def build_from_resolved(
 DEFAULT_BUILDERS: Dict[ProtocolFamily, AdapterBuilder] = {
     ProtocolFamily.OPENAI_REALTIME: build_openai_realtime,
     ProtocolFamily.GEMINI_LIVE: build_gemini_live,
+    ProtocolFamily.OPENAI_COMPATIBLE_TEXT: build_text_provider,
+    ProtocolFamily.GEMINI_TEXT: build_text_provider,
 }
 
 

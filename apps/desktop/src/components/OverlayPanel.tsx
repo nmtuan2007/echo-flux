@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
@@ -13,6 +14,9 @@ export const OverlayPanel: React.FC = () => {
     partials,
     running,
     connected,
+    isToggling,
+    appError,
+    clearAppError,
     sourceLabels,
     engineConversationId,
     suggestionLoading,
@@ -38,33 +42,28 @@ export const OverlayPanel: React.FC = () => {
   }, [config.stealthMode]);
 
   useEffect(() => {
-    const SHORTCUT = "CommandOrControl+Shift+U";
-    let registered = false;
+    let unlisten: (() => void) | undefined;
+    let active = true;
 
-    const setupUnlock = async () => {
-      try {
-        const { register, unregister, isRegistered } = await import("@tauri-apps/api/globalShortcut");
-        if (await isRegistered(SHORTCUT)) {
-          await unregister(SHORTCUT);
-        }
-        await register(SHORTCUT, async () => {
+    void import("@tauri-apps/api/event")
+      .then((mod) => {
+        if (!active || typeof mod.listen !== "function") return;
+        return mod.listen("overlay_unlock", async () => {
           await invoke("set_ignore_cursor_events", { ignore: false });
           setIsLocked(false);
         });
-        registered = true;
-      } catch (e) {
-        console.error("Failed to bind unlock shortcut", e);
-      }
-    };
-
-    setupUnlock();
+      })
+      .then((fn) => {
+        if (typeof fn === "function") {
+          if (active) unlisten = fn;
+          else fn();
+        }
+      })
+      .catch(() => {});
 
     return () => {
-      if (registered) {
-        import("@tauri-apps/api/globalShortcut").then(({ unregister }) => {
-          unregister(SHORTCUT).catch(() => {});
-        });
-      }
+      active = false;
+      unlisten?.();
     };
   }, []);
 
@@ -85,7 +84,12 @@ export const OverlayPanel: React.FC = () => {
   };
 
   const handleBackToMain = async () => {
+    await emit("overlay_closed").catch(() => {});
     await invoke("revert_to_main_window").catch(console.error);
+  };
+
+  const handleToggleLive = async () => {
+    await emit("relay_toggle_pipeline").catch(console.error);
   };
 
   const cycleFontSize = () => {
@@ -169,6 +173,15 @@ export const OverlayPanel: React.FC = () => {
           <div className="overlay-btn-group">
             <button
               type="button"
+              className={`overlay-btn ${running ? "overlay-btn-stop" : "overlay-btn-start"}`}
+              onClick={() => void handleToggleLive()}
+              disabled={!connected || isToggling}
+              title={running ? "Stop Transcription (Ctrl+Shift+M)" : "Start Transcription (Ctrl+Shift+M)"}
+            >
+              {isToggling ? "..." : running ? "■ Stop" : "● Start"}
+            </button>
+            <button
+              type="button"
               className="overlay-btn"
               onClick={cycleFontSize}
               title="Cycle subtitle text size"
@@ -216,6 +229,20 @@ export const OverlayPanel: React.FC = () => {
       {isLocked && (
         <div className="overlay-unlock-hint">
           <span>Ctrl+Shift+U to Unlock</span>
+        </div>
+      )}
+
+      {appError && !isLocked && (
+        <div className="overlay-error-banner" role="alert">
+          <span>⚠ {appError}</span>
+          <button
+            type="button"
+            className="overlay-assist-close"
+            onClick={clearAppError}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
         </div>
       )}
 

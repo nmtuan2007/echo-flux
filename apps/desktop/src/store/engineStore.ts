@@ -157,6 +157,17 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
       set({ isToggling: false, appError: message.message as string });
       break;
 
+    case "audio_level": {
+      const src = message.source;
+      const lvl = message.level;
+      if ((src === "mic" || src === "system") && typeof lvl === "number" && Number.isFinite(lvl)) {
+        set((state) => ({
+          audioLevels: { ...state.audioLevels, [src]: lvl },
+        }));
+      }
+      break;
+    }
+
     case "devices_list":
       set(applyDevicesList(message));
       break;

@@ -11,6 +11,7 @@ import {
   type TestConnectionPhase,
 } from "../store/settingsSlice";
 import type { ManifestField, ServiceName } from "../store/types";
+import { LocalPackStatus } from "./LocalPackStatus";
 import { ProviderField, SecretProviderField } from "./ProviderField";
 
 // One provider-aware service card. Presentational: every change is dispatched to the store,
@@ -78,6 +79,7 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const needsModel = provider ? modelRequired(provider) : false;
   const hasHint = fields.some((f) => LANGUAGE_HINT_KEYS.includes(f.key));
   const blocked = Object.keys(issues).length > 0;
+  const isLocalProvider = Boolean(provider && provider.protocolFamily === "local");
   const isCloudProvider = Boolean(provider && provider.protocolFamily !== "local");
   const serviceConsented = Boolean(
     consent?.[service === "assistant" ? "assistant" : service],
@@ -151,10 +153,13 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
         <h3 id={`${id}-title`} className="settings-section-title">
           {copy.title}
         </h3>
-        {active && (
+        {active && !isLocalProvider && (
           <span className={`service-badge service-badge-${phase}`} data-phase={phase}>
             {phase === "retry" ? "retrying" : phase}
           </span>
+        )}
+        {active && isLocalProvider && (
+          <span className="service-badge service-badge-success">offline</span>
         )}
       </div>
       <p className="settings-note service-card-description">{copy.description}</p>
@@ -197,41 +202,36 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
 
           {provider && (
             <>
-              <div className={`settings-field${issues.endpoint ? " has-error" : ""}`}>
-                <label htmlFor={`${id}-endpoint`}>
-                  API URL
-                  {endpointRequired && <span className="field-required"> (required)</span>}
-                </label>
-                <input
-                  id={`${id}-endpoint`}
-                  type="text"
-                  value={config.endpoint}
-                  placeholder={
-                    provider.recommendedEndpoint ||
-                    (provider.protocolFamily === "local"
-                      ? "Not used by the local runtime"
-                      : "https://")
-                  }
-                  onChange={(e) => updateServiceConfig(service, { endpoint: e.target.value })}
-                  disabled={locked}
-                  spellCheck={false}
-                  aria-required={endpointRequired || undefined}
-                  aria-invalid={issues.endpoint ? true : undefined}
-                  aria-describedby={[endpointHintId, endpointErrorId].filter(Boolean).join(" ")}
-                />
-                <p id={endpointHintId} className="field-hint">
-                  {provider.recommendedEndpoint
-                    ? "Leave empty to use the recommended URL shown."
-                    : provider.protocolFamily === "local"
-                      ? "Optional. The local runtime runs on this device."
+              {!isLocalProvider && (
+                <div className={`settings-field${issues.endpoint ? " has-error" : ""}`}>
+                  <label htmlFor={`${id}-endpoint`}>
+                    API URL
+                    {endpointRequired && <span className="field-required"> (required)</span>}
+                  </label>
+                  <input
+                    id={`${id}-endpoint`}
+                    type="text"
+                    value={config.endpoint}
+                    placeholder={provider.recommendedEndpoint || "https://"}
+                    onChange={(e) => updateServiceConfig(service, { endpoint: e.target.value })}
+                    disabled={locked}
+                    spellCheck={false}
+                    aria-required={endpointRequired || undefined}
+                    aria-invalid={issues.endpoint ? true : undefined}
+                    aria-describedby={[endpointHintId, endpointErrorId].filter(Boolean).join(" ")}
+                  />
+                  <p id={endpointHintId} className="field-hint">
+                    {provider.recommendedEndpoint
+                      ? "Leave empty to use the recommended URL shown."
                       : "Enter the full API URL for your resource or server."}
-                </p>
-                {issues.endpoint && (
-                  <p id={endpointErrorId ?? undefined} className="field-error">
-                    {issues.endpoint}
                   </p>
-                )}
-              </div>
+                  {issues.endpoint && (
+                    <p id={endpointErrorId ?? undefined} className="field-error">
+                      {issues.endpoint}
+                    </p>
+                  )}
+                </div>
+              )}
 
               {needsModel ? (
                 <div className={`settings-field${issues.model ? " has-error" : ""}`}>
@@ -270,11 +270,15 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
                       )}
                     </>
                   ) : provider.protocolFamily === "local" ? (
-                    "Model: managed by the local model packs."
+                    "Model: hardware-selected offline model pack."
                   ) : (
                     "Model: this provider has no model setting."
                   )}
                 </p>
+              )}
+
+              {isLocalProvider && (service === "stt" || service === "translation") && (
+                <LocalPackStatus capability={service} disabled={locked} />
               )}
 
               {service !== "assistant" && (
@@ -332,25 +336,27 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
                 </details>
               )}
 
-              <div className="service-test">
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => void testServiceConnection(service)}
-                  disabled={locked || testUi.inFlight || blocked}
-                  aria-describedby={`${id}-test-status`}
-                >
-                  {testButtonLabel(phase)}
-                </button>
-                <p
-                  id={`${id}-test-status`}
-                  className={`service-test-status service-test-${phase}`}
-                  role="status"
-                  aria-live="polite"
-                >
-                  {testMessage}
-                </p>
-              </div>
+              {!isLocalProvider && (
+                <div className="service-test">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => void testServiceConnection(service)}
+                    disabled={locked || testUi.inFlight || blocked}
+                    aria-describedby={`${id}-test-status`}
+                  >
+                    {testButtonLabel(phase)}
+                  </button>
+                  <p
+                    id={`${id}-test-status`}
+                    className={`service-test-status service-test-${phase}`}
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {testMessage}
+                  </p>
+                </div>
+              )}
             </>
           )}
         </>

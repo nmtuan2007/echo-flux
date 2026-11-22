@@ -856,3 +856,64 @@ def test_subprocess_with_noisy_fake_adapter_keeps_stdout_and_stderr_clean():
     [line] = proc.stdout.decode("utf-8").splitlines()
     result = json.loads(line)
     assert (result["id"], result["status"]) == ("val-proc", "valid")
+
+
+def test_default_builders_build_text_and_assistant_adapters_with_loopback_http():
+    from engine.providers.assistant.gemini import GeminiAssistantProvider
+    from engine.providers.assistant.openai_compatible import OpenAICompatibleAssistantProvider
+    from engine.providers.translation.openai_compatible import OpenAICompatibleTranslationProvider
+
+    registry = build_default_registry()
+
+    resolved_local_openai = registry.resolve_service(
+        service(
+            "assistant",
+            "openai",
+            endpoint="http://localhost:20128/v1",
+            model_override="cx/gpt-5.6-luna(low)",
+        )
+    )
+    adapter = validation.DEFAULT_BUILDERS[ProtocolFamily.OPENAI_COMPATIBLE_TEXT](
+        OpenAICompatibleAssistantProvider, resolved_local_openai, {"api_key": SECRET}
+    )
+    assert isinstance(adapter, OpenAICompatibleAssistantProvider)
+
+    resolved_trans = registry.resolve_service(service("translation", "openai"))
+    trans_adapter = validation.DEFAULT_BUILDERS[ProtocolFamily.OPENAI_COMPATIBLE_TEXT](
+        OpenAICompatibleTranslationProvider, resolved_trans, {"api_key": SECRET}
+    )
+    assert isinstance(trans_adapter, OpenAICompatibleTranslationProvider)
+
+    resolved_gem = registry.resolve_service(service("assistant", "gemini"))
+    gem_adapter = validation.DEFAULT_BUILDERS[ProtocolFamily.GEMINI_TEXT](
+        GeminiAssistantProvider, resolved_gem, {"api_key": SECRET}
+    )
+    assert isinstance(gem_adapter, GeminiAssistantProvider)
+
+    resolved_remote_http = registry.resolve_service(
+        service("assistant", "openai", endpoint="http://api.openai.com/v1")
+    )
+    with pytest.raises(ProviderRuntimeError) as excinfo:
+        validation.DEFAULT_BUILDERS[ProtocolFamily.OPENAI_COMPATIBLE_TEXT](
+            OpenAICompatibleAssistantProvider, resolved_remote_http, {"api_key": SECRET}
+        )
+    assert excinfo.value.error.code is ProviderErrorCode.INVALID_REQUEST
+
+
+def test_validation_assist_prompt_policy_parses_short_ok_and_rejects_empty():
+    policy = validation._ValidationAssistPromptPolicy()
+    req = AssistRequest(
+        target_message=validation.ConversationMessage(
+            message_id="m-1",
+            speaker="user",
+            text=PROBE_TEXT,
+            timestamp_ms=0.0,
+            stream_id=validation.PROBE_STREAM_ID,
+        )
+    )
+    messages = policy.build_assist_messages(req)
+    assert len(messages) == 1
+    parsed = policy.parse_assist_result(req, type("Comp", (), {"text": "OK"})())
+    assert parsed.target_message_id == "m-1"
+    with pytest.raises(ValueError):
+        policy.parse_assist_result(req, type("Comp", (), {"text": "   "})())

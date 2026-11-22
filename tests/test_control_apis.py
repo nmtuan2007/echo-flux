@@ -1003,6 +1003,7 @@ def test_control_commands_do_not_trip_ws_contract_regexes():
         "translation_update",
         "status",
         "error",
+        "audio_level",
         "devices_list",
         "suggestion_result",
         "llm_chunk",
@@ -1055,4 +1056,210 @@ async def test_audio_probe_samples_stream_and_refuses_when_running(control_serve
         assert busy["error"]["code"] == "engine_busy"
     finally:
         dispatcher._engine = None
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_searches_message_text_and_translation(control_server, repo):
+    from engine.conversation.models import ConversationRecord, TranscriptMessage
+
+    repo.create_conversation(
+        ConversationRecord(
+            conversation_id="conv-alpha",
+            title="Weekly Catchup",
+            created_at_ms=1000.0,
+            updated_at_ms=1000.0,
+        )
+    )
+    repo.upsert_message(
+        "conv-alpha",
+        TranscriptMessage(
+            message_id="m-1",
+            source="mic",
+            text="Let us deploy the Kubernetes cluster tomorrow.",
+            translation="Hãy triển khai cụm Kubernetes vào ngày mai.",
+            timestamp_ms=1100.0,
+            is_final=True,
+            start_ms=500.0,
+            end_ms=2200.0,
+        ),
+    )
+    repo.create_conversation(
+        ConversationRecord(
+            conversation_id="conv-beta",
+            title="Design Review",
+            created_at_ms=2000.0,
+            updated_at_ms=2000.0,
+        )
+    )
+
+    server, _ = control_server
+    client = await connect_client(server)
+    try:
+        by_msg = await client.call("conversation_list", {"search_query": "kubernetes"})
+        assert [c["conversation_id"] for c in by_msg["data"]["conversations"]] == ["conv-alpha"]
+
+        by_trans = await client.call("conversation_list", {"search_query": "triển khai"})
+        assert [c["conversation_id"] for c in by_trans["data"]["conversations"]] == ["conv-alpha"]
+
+        detail = await client.call(
+            "conversation_get", {"conversation_id": "conv-alpha", "include_messages": True}
+        )
+        assert detail["data"]["messages"][0]["start_ms"] == 500.0
+        assert detail["data"]["messages"][0]["end_ms"] == 2200.0
+    finally:
+        await client.close()
+
+
+def test_local_translation_readiness_checks_specific_language_pair(tmp_path, monkeypatch):
+    from engine.core.config import Config
+    from engine.server.control_dispatcher import _is_local_model_ready
+
+    ct2_dir = tmp_path / "ct2"
+    (ct2_dir / "Helsinki-NLP_opus-mt-en-vi").mkdir(parents=True)
+    monkeypatch.setattr(Config, "models_dir", property(lambda self: tmp_path))
+
+    assert _is_local_model_ready("translation", source_lang="en", target_lang="vi") is True
+    assert _is_local_model_ready("translation", source_lang="en", target_lang="ja") is False
+
+
+@pytest.mark.asyncio
+async def test_configure_assistant_hot_reload_and_secret_clearing(control_server):
+    import types
+
+    server, dispatcher = control_server
+    seen = {}
+
+    async def fake_configure(section, secrets):
+        seen["section"] = dict(section)
+        seen["secrets"] = dict(secrets)
+        return True
+
+    dispatcher._engine = types.SimpleNamespace(configure_assistant_from_service=fake_configure)
+    client = await connect_client(server)
+    try:
+        res = await client.call(
+            "configure_assistant",
+            {
+                "service": {"enabled": True, "providerId": "openai"},
+                "secrets": {"api_key": "sk-test-not-real-hot-reload"},
+            },
+        )
+        assert res["ok"] is True
+        assert res["data"]["configured"] is True
+        assert seen["secrets"]["api_key"] == "sk-test-not-real-hot-reload"
+    finally:
+        dispatcher._engine = None
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_pack_status_returns_active_progress_for_alias_and_import_handles_missing_summary_id(
+    control_server, tmp_path, monkeypatch
+):
+    from engine.core.config import Config
+    from engine.server.control_dispatcher import _is_local_model_ready
+
+    (tmp_path / "model.bin").write_bytes(b"ok")
+    monkeypatch.setattr(Config, "models_dir", property(lambda self: tmp_path))
+    assert _is_local_model_ready("stt") is True
+
+    server, dispatcher = control_server
+    dispatcher._pack_progress["whisper-base"] = {"active": True, "percent": 42, "model": "whisper-base"}
+    client = await connect_client(server)
+    try:
+        prog_res = await client.call("pack_status", {"pack_id": "whisper-base"})
+        assert prog_res["ok"] is True
+        assert prog_res["data"]["download_progress"]["percent"] == 42
+
+        missing_res = await client.call("pack_status", {"pack_id": "unknown-pack-id"})
+        assert missing_res["ok"] is False
+        assert missing_res["error"]["code"] == "not_found"
+
+        imp = await client.call(
+            "conversation_import",
+            {
+                "export_data": {
+                    "conversation": {"conversation_id": "conv-legacy-summary"},
+                    "messages": [
+                        {
+                            "message_id": "msg-1",
+                            "seq": 1,
+                            "source": "mic",
+                            "text": "Hello there",
+                            "finalized": True,
+                        }
+                    ],
+                    "assist_results": [
+                        {
+                            "target_message_id": "msg-1",
+                            "suggested_replies": [{"strategy": "Direct", "text": "Hi"}],
+                            "clarifying_questions": [],
+                        }
+                    ],
+                    "summaries": [{"summary_markdown": "# Summary\nDone"}],
+                }
+            },
+        )
+        assert imp["ok"] is True
+        assert imp["data"]["imported"] is True
+    finally:
+        dispatcher._pack_progress.pop("whisper-base", None)
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_message_update_edits_text_and_speaker_in_repository(control_server):
+    from engine.conversation.models import ConversationRecord, TranscriptMessage
+
+    server, dispatcher = control_server
+    dispatcher.conversation_repo.create_conversation(
+        ConversationRecord(
+            conversation_id="conv-edit-1",
+            title="Edit Check",
+            created_at_ms=1000.0,
+            updated_at_ms=1000.0,
+        )
+    )
+    dispatcher.conversation_repo.upsert_message(
+        "conv-edit-1",
+        TranscriptMessage(
+            message_id="msg-edit-1",
+            source="mic",
+            text="Original text",
+            timestamp_ms=1000.0,
+            is_final=True,
+        ),
+    )
+
+    client = await connect_client(server)
+    try:
+        res = await client.call(
+            "message_update",
+            {
+                "conversation_id": "conv-edit-1",
+                "message_id": "msg-edit-1",
+                "text": "Corrected text",
+                "source": "system",
+            },
+        )
+        assert res["ok"] is True
+        assert res["data"]["text"] == "Corrected text"
+        assert res["data"]["source"] == "system"
+
+        msgs = dispatcher.conversation_repo.list_messages("conv-edit-1")
+        assert msgs[0].text == "Corrected text"
+        assert msgs[0].source == "system"
+
+        bad = await client.call(
+            "message_update",
+            {
+                "conversation_id": "conv-edit-1",
+                "message_id": "msg-edit-1",
+                "text": "   ",
+            },
+        )
+        assert bad["ok"] is False
+        assert bad["error"]["code"] == "invalid_payload"
+    finally:
         await client.close()
