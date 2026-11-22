@@ -258,6 +258,36 @@
   font-size: 13px;
 }
 
+.summary-ask-history {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.summary-ask-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.summary-ask-question-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.summary-ask-question {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.summary-ask-copy {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 
 /* ==========================================================================
    Milestone 3 UX Styles (EF-026, EF-027, EF-028, EF-029)
@@ -409,6 +439,15 @@
   flex-direction: column;
   gap: 16px;
   margin-bottom: 20px;
+}
+
+.onboarding-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
 }
 
 .onboarding-tips-card {

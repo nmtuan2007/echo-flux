@@ -12,7 +12,7 @@ import {
 import { LEGACY_CREDENTIALS } from "../lib/secureStore";
 import { createHistoryActions, sanitizeHistory, type HistorySliceFields } from "./historySlice";
 import { createProfileActions, utf8ByteLength, type ProfilesSliceFields } from "./profilesSlice";
-import type { EngineMessage, SummaryWarning } from "./types";
+import type { AskTurn, EngineMessage, SummaryWarning } from "./types";
 
 export { sanitizeHistory, utf8ByteLength };
 
@@ -44,6 +44,7 @@ export interface ConversationSlice extends HistorySliceFields, ProfilesSliceFiel
   activeSummaryConversationId: string | null;
   summaryStreamedViaEvent: boolean;
   askAnswer: string;
+  askHistory: AskTurn[];
   askLoading: boolean;
   askError: string | null;
 
@@ -73,6 +74,7 @@ export const createConversationSlice =
       activeSummaryConversationId: null,
       summaryStreamedViaEvent: false,
       askAnswer: "",
+      askHistory: [],
       askLoading: false,
       askError: null,
 
@@ -222,7 +224,7 @@ export const createConversationSlice =
         set({ summaryVisible: false });
       },
 
-      clearAsk: () => set({ askAnswer: "", askError: null, askLoading: false }),
+      clearAsk: () => set({ askAnswer: "", askHistory: [], askError: null, askLoading: false }),
 
       askMeeting: async (question) => {
         const trimmed = question.trim();
@@ -271,7 +273,19 @@ export const createConversationSlice =
             set({ askLoading: false, askError: "Assistant returned an empty answer." });
             return;
           }
-          set({ askAnswer: answer, askLoading: false, askError: null });
+          set((prev) => ({
+            askAnswer: answer,
+            askHistory: [
+              ...prev.askHistory,
+              {
+                id: `${Date.now()}-${prev.askHistory.length}`,
+                question: trimmed,
+                answer,
+              },
+            ],
+            askLoading: false,
+            askError: null,
+          }));
         } catch (err) {
           const code = errorCodeOf(err);
           set({

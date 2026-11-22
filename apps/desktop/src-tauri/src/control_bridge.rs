@@ -812,7 +812,6 @@ const MAX_FORWARD_COMMAND_BYTES: usize = 512 * 1024;
 /// A summary streams one `llm_chunk` per model delta; the cap only stops a runaway engine.
 const MAX_FORWARD_RESPONSES: usize = 8192;
 const FORWARD_FRAME_OVERHEAD_BYTES: usize = 256;
-const HF_TOKEN_KEY: &str = "hf_token";
 
 /// Substrings of secret-looking keys (lowercased, `_`/`-` removed). Broader than
 /// `SECRET_KEY_NAMES` because no legitimate legacy command field contains any of them.
@@ -831,69 +830,61 @@ pub struct ForwardPolicy {
     /// Legacy message type that ends collection; `None` returns on `complete`.
     pub terminal: Option<&'static str>,
     pub timeout: Duration,
-    /// Only the Hugging Face commands may receive a vault-held `hf_token`.
-    pub accepts_hf_token: bool,
     /// Only `configure_assistant` may receive vault-held `assistant.*` credentials.
     pub accepts_assistant_credentials: bool,
 }
 
 /// The allowlist. `start` and `stop` keep their dedicated commands and are absent on purpose.
 pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
-    let (terminal, seconds, accepts_hf_token, accepts_assistant_credentials) = match kind {
-        "list_devices" => (Some("devices_list"), 10, false, false),
-        "request_models_list" => (Some("models_list"), 10, false, false),
-        // Progress and the result are broadcast as events, so `complete` is enough.
-        "download_model" => (None, CONTROL_TIMEOUT.as_secs(), true, false),
-        "delete_model" => (Some("model_action_result"), 30, false, false),
-        "search_hub" => (Some("hub_search_results"), 30, true, false),
-        "request_suggestion" => (Some("suggestion_result"), 120, false, false),
-        "request_assist" => (None, 120, false, false),
-        "configure_assistant" => (None, 15, false, true),
-        "request_summary" => (Some("llm_done"), 300, false, false),
-        "test_connection" => (Some("test_connection_result"), 30, false, false),
+    let (terminal, seconds, accepts_assistant_credentials) = match kind {
+        "list_devices" => (Some("devices_list"), 10, false),
+        "request_suggestion" => (Some("suggestion_result"), 120, false),
+        "request_assist" => (None, 120, false),
+        "configure_assistant" => (None, 15, true),
+        "request_summary" => (Some("llm_done"), 300, false),
+        "test_connection" => (Some("test_connection_result"), 30, false),
 
         // Phase B: Context Profiles (EF-020)
-        "profile_create" => (None, 10, false, false),
-        "profile_list" => (None, 10, false, false),
-        "profile_get" => (None, 10, false, false),
-        "profile_update" => (None, 10, false, false),
-        "profile_delete" => (None, 10, false, false),
-        "profile_attach" => (None, 10, false, false),
+        "profile_create" => (None, 10, false),
+        "profile_list" => (None, 10, false),
+        "profile_get" => (None, 10, false),
+        "profile_update" => (None, 10, false),
+        "profile_delete" => (None, 10, false),
+        "profile_attach" => (None, 10, false),
 
         // Phase B: Conversations (EF-020 / EF-021)
-        "conversation_create" => (None, 10, false, false),
-        "conversation_start" => (None, 10, false, false),
-        "conversation_list" => (None, 10, false, false),
-        "conversation_get" => (None, 15, false, false),
-        "conversation_rename" => (None, 10, false, false),
-        "conversation_delete" => (None, 10, false, false),
-        "conversation_export" => (None, 30, false, false),
-        "conversation_import" => (None, 30, false, false),
-        "message_update" => (None, 10, false, false),
+        "conversation_create" => (None, 10, false),
+        "conversation_start" => (None, 10, false),
+        "conversation_list" => (None, 10, false),
+        "conversation_get" => (None, 15, false),
+        "conversation_rename" => (None, 10, false),
+        "conversation_delete" => (None, 10, false),
+        "conversation_export" => (None, 30, false),
+        "conversation_import" => (None, 30, false),
+        "message_update" => (None, 10, false),
 
         // Phase B: Local Model Packs (EF-008)
-        "pack_status" => (None, 10, false, false),
-        "pack_install" => (None, 600, false, false),
-        "pack_cancel" => (None, 10, false, false),
-        "pack_retry" => (None, 600, false, false),
-        "pack_check_readiness" => (None, 15, false, false),
+        "pack_status" => (None, 10, false),
+        "pack_install" => (None, 600, false),
+        "pack_cancel" => (None, 10, false),
+        "pack_retry" => (None, 600, false),
+        "pack_check_readiness" => (None, 15, false),
 
         // Phase B: Provider Manifests (EF-003 / EF-022)
-        "get_provider_manifests" => (None, 10, false, false),
+        "get_provider_manifests" => (None, 10, false),
 
         // Audio Input Probe
-        "audio_probe" => (None, 10, false, false),
+        "audio_probe" => (None, 10, false),
 
         // Phase B: Summary Streaming & Cancellation (EF-022)
-        "summary_cancel" => (None, 10, false, false),
-        "assistant_ask" => (None, 60, false, false),
+        "summary_cancel" => (None, 10, false),
+        "assistant_ask" => (None, 60, false),
 
         _ => return None,
     };
     Some(ForwardPolicy {
         terminal,
         timeout: Duration::from_secs(seconds),
-        accepts_hf_token,
         accepts_assistant_credentials,
     })
 }
@@ -966,7 +957,6 @@ pub struct CheckedCommand {
     policy: ForwardPolicy,
     command: Map<String, Value>,
     size: usize,
-    hf_token: Option<CredentialId>,
     assistant_credentials: Vec<(String, CredentialId)>,
 }
 
@@ -980,7 +970,7 @@ impl fmt::Debug for CheckedCommand {
 }
 
 /// Validates a webview command: object with an allowlisted string `type`, bounded size, no
-/// secret-named key at any depth, and at most an `hf_token` reference where one is accepted.
+/// secret-named key at any depth, and at most `assistant.*` references for `configure_assistant`.
 pub fn check_forward_command(
     command: Value,
     credentials: Option<Value>,
@@ -1013,20 +1003,11 @@ pub fn check_forward_command(
     }) {
         return Err(BridgeError::new(ErrorCode::SecretInCommand));
     }
-    let mut hf_token = None;
     let mut assistant_credentials = Vec::new();
     if let Some(value) = credentials.filter(|v| !v.is_null()) {
-        let mut refs: BTreeMap<String, CredentialRefInput> =
+        let refs: BTreeMap<String, CredentialRefInput> =
             serde_json::from_value(value).map_err(|_| invalid())?;
-        if let Some(reference) = refs.remove(HF_TOKEN_KEY) {
-            if !policy.accepts_hf_token || !refs.is_empty() {
-                return Err(invalid());
-            }
-            hf_token = Some(
-                CredentialId::parse(&reference.capability, &reference.config_id, &reference.slot)
-                    .map_err(|_| invalid())?,
-            );
-        } else if !refs.is_empty() {
+        if !refs.is_empty() {
             if !policy.accepts_assistant_credentials {
                 return Err(invalid());
             }
@@ -1052,7 +1033,6 @@ pub fn check_forward_command(
         policy,
         command,
         size: counter.0,
-        hf_token,
         assistant_credentials,
     })
 }
@@ -1431,8 +1411,8 @@ impl ControlBridge {
         self.control_endpoint(status).map_err(forward_error)
     }
 
-    /// Blocking: reads a referenced `hf_token` from the vault and serialises the request
-    /// frame. The injected value is wiped from the command map once the frame exists.
+    /// Blocking: reads referenced assistant credentials from the vault and serialises the
+    /// request frame. The injected values are wiped from the command map once the frame exists.
     pub fn prepare_forward(
         &self,
         store: &CredentialStore,
@@ -1441,18 +1421,10 @@ impl ControlBridge {
         let CheckedCommand {
             mut command,
             size,
-            hf_token,
             assistant_credentials,
             ..
         } = checked;
         let mut redactions = Vec::new();
-        if let Some(id) = &hf_token {
-            let secret = store
-                .read_secret(id)
-                .map_err(|_| BridgeError::new(ErrorCode::VaultError))?;
-            command.insert(HF_TOKEN_KEY.to_owned(), Value::String(secret.as_str().to_owned()));
-            redactions.push(secret);
-        }
         let has_assistant_secrets = !assistant_credentials.is_empty();
         if has_assistant_secrets {
             let mut secrets_map = Map::new();
@@ -1478,11 +1450,6 @@ impl ControlBridge {
                 command: &command,
             },
         );
-        if hf_token.is_some() {
-            if let Some(Value::String(mut value)) = command.remove(HF_TOKEN_KEY) {
-                value.zeroize();
-            }
-        }
         if has_assistant_secrets {
             if let Some(Value::Object(mut map)) = command.remove("secrets") {
                 for (_, val) in map.iter_mut() {

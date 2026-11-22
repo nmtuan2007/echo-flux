@@ -145,7 +145,12 @@ export function routeEngineMessage(message: EngineMessage, set: StoreSet, get: S
 
     case "status":
       if (message.status === "started") {
-        set((state) => sessionStartedState(state.activeConversationId || state.engineConversationId));
+        set((state) =>
+          sessionStartedState(
+            state.activeConversationId || state.engineConversationId,
+            state.preserveEntriesOnStart,
+          ),
+        );
       } else if (message.status === "stopped") {
         get().saveCurrentSession();
         set(sessionStoppedState());

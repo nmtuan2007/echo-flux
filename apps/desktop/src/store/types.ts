@@ -105,6 +105,7 @@ export interface TranscriptEntry {
   translationRevision?: number;
   translationProvider?: string;
   translationFallback?: boolean;
+  translationError?: { code: string; message: string } | null;
   startMs?: number | null;
   endMs?: number | null;
   assist?: AssistOutcome;
@@ -117,6 +118,12 @@ export interface PartialTranscript {
   itemId?: string;
   revision?: number;
   sttProvider?: string;
+}
+
+export interface AskTurn {
+  id: string;
+  question: string;
+  answer: string;
 }
 
 export interface Conversation {

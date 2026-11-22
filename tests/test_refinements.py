@@ -124,3 +124,79 @@ def test_probe_hardware_with_gpu_respects_fake_and_enriches_system(monkeypatch):
     enriched = probe_hardware_with_gpu(SystemHardwareProbe())
     assert isinstance(enriched.gpu, GpuInfo)
     assert enriched.gpu.backend == "cuda"
+
+
+def test_microphone_resolves_shifted_device_index_by_name():
+    from engine.audio.microphone import MicrophoneInput
+
+    class FakePA:
+        def __init__(self, devices):
+            self._devices = devices
+
+        def get_device_count(self):
+            return len(self._devices)
+
+        def get_device_info_by_index(self, idx):
+            return self._devices[idx]
+
+    mic = MicrophoneInput({}, device_id=0, device_name="USB Yeti")
+    pa = FakePA(
+        [
+            {"name": "Built-in Mic", "maxInputChannels": 1},
+            {"name": "USB Yeti Stereo", "maxInputChannels": 2},
+        ]
+    )
+    assert mic._resolve_device_index(pa) == 1
+
+
+def test_local_stt_quality_preset_maps_to_model_size():
+    from engine.local_models import PackKind, builtin_catalog
+    from engine.local_models.selector import HardwareTier
+    from engine.providers.stt.local import LocalSTTSettings, resolve_stt_pack, validate_settings
+
+    validate_settings(LocalSTTSettings(quality_preset="fast"))
+    catalog = builtin_catalog()
+    profile = HardwareProfile(4, 16.0, "windows", "x86_64")
+    profile_probe = type("P", (HardwareProbe,), {"probe": lambda self: profile})()
+    resolved_fast = resolve_stt_pack(catalog, profile_probe, "en", quality_preset="fast")
+    resolved_acc = resolve_stt_pack(catalog, profile_probe, "en", quality_preset="accurate")
+    assert resolved_fast.model_size == "tiny"
+    assert resolved_fast.pack_id == "legacy-faster-whisper-tiny"
+    assert resolved_acc.model_size == "medium"
+    assert resolved_acc.pack_id == "legacy-faster-whisper-medium"
+    assert HardwareTier.CPU_16GB is not None and PackKind.STT is not None
+
+
+@pytest.mark.asyncio
+async def test_retranslate_message_post_stop_uses_local_provider_and_persists(monkeypatch):
+    import engine.providers.translation.local as local_mod
+
+    class FakeLocalTrans:
+        def __init__(self, settings, provider_id="local"):
+            self.provider_id = provider_id
+
+        async def start(self):
+            return None
+
+        async def translate(self, req):
+            return types.SimpleNamespace(translated_text=f"VI:{req.text}")
+
+        async def stop(self):
+            return None
+
+    monkeypatch.setattr(local_mod, "LocalTranslationProvider", FakeLocalTrans)
+
+    engine = EchoFluxEngine.__new__(EchoFluxEngine)
+    engine._translation_session = None
+    engine._conversation_repo = MagicMock()
+    engine._last_translation_config = types.SimpleNamespace(
+        enabled=True,
+        source_lang="en",
+        target_lang="vi",
+        fallback=types.SimpleNamespace(provider_id="local", options={"source_lang": "en", "target_lang": "vi"}),
+        primary=None,
+    )
+
+    out = await engine.retranslate_message("conv-1", "msg-1", "Hello team")
+    assert out == "VI:Hello team"
+    engine._conversation_repo.set_translation.assert_called_once()

@@ -1185,3 +1185,21 @@
   padding-top: 4px;
   border-top: 1px solid var(--border);
 }
+
+.transcript-translation-fallback {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--warning);
+  background-color: rgba(245, 166, 35, 0.14);
+  vertical-align: middle;
+}
+
+.transcript-translation-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--danger);
+}

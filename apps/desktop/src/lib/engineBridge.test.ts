@@ -126,14 +126,8 @@ function forwardReplies(type: string, command: unknown): Record<string, unknown>
   switch (type) {
     case "list_devices":
       return [{ type: "devices_list", microphones: [{ id: "m1", name: "Mic" }], speakers: [] }];
-    case "request_models_list":
-      return [{ type: "models_list", asr: [{ id: "tiny" }], translation: [] }];
-    case "download_model":
-      return [];
-    case "delete_model":
-      return [{ type: "model_action_result", action: "delete", model_id: c.model_id, success: true, error: null }];
-    case "search_hub":
-      return [{ type: "hub_search_results", results: [{ id: "openai/whisper-tiny" }] }];
+    case "configure_assistant":
+      return [{ configured: true }];
     case "request_suggestion":
       return [{ type: "suggestion_result", entry_id: c.entry_id, options: [{ text: "Sure" }] }];
     case "request_summary":
@@ -373,32 +367,27 @@ describe("forwarded commands through the control bridge", () => {
     expect(JSON.parse(ws.sent[0]).op).toBe("auth");
   });
 
-  it("passes the hf_token vault reference only when configured and never a raw secret", async () => {
+  it("forwards assistant credential references only on configure_assistant and never a raw secret", async () => {
     const { store, ws } = await authenticatedStore();
-
-    await forwardCommand({ type: "search_hub", query: "whisper", task: "asr" });
-    await flush();
-    expect(calls("engine_forward_command")[0]).not.toHaveProperty("credentials");
 
     // A draft typed in Settings is committed to the vault before the command leaves.
     store.getState().updateConfig({ hfToken: SECRET_HF, llmApiKey: SECRET_KEY });
     await store.getState().commitLegacySecrets();
 
-    const ref = { hf_token: { capability: "stt" as const, configId: "legacy-hf-hub", slot: "hf_token" } };
-    await forwardCommand({ type: "download_model", model_id: "tiny", model_type: "asr" }, ref);
-    await forwardCommand({ type: "search_hub", query: "whisper", task: "asr" }, ref);
+    store.getState().acceptCloudConsent({ assistant: true, summary: true });
+    store.getState().updateServiceConfig("assistant", { enabled: true });
+    await store.getState().syncAssistantService();
     store.getState().requestDeviceList();
     await flush();
 
     expect(vault.get("stt:legacy-hf-hub:hf_token")).toBe(SECRET_HF);
     expect(store.getState().config.hfToken).toBe("");
 
-    const [, download, search, devices] = calls("engine_forward_command");
-    expect(download.credentials).toEqual(ref);
-    expect(search.credentials).toEqual(ref);
+    const [configure, devices] = calls("engine_forward_command");
+    expect(configure.credentials).toEqual({
+      "assistant.api_key": { capability: "assistant", configId: "legacy-llm", slot: "api_key" },
+    });
     expect(devices).not.toHaveProperty("credentials");
-    expect(download.command).toEqual({ type: "download_model", model_id: "tiny", model_type: "asr" });
-    expect(search.command).toEqual({ type: "search_hub", query: "whisper", task: "asr" });
 
     final(ws, "e-1", "question?");
     await store.getState().requestSuggestion("e-1", "question?", ["question?"]);

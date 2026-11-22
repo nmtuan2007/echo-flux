@@ -748,3 +748,26 @@ describe("provider manifest types", () => {
     expect(custom.protocolProfiles?.["gemini-live"]).toBe("gemini_live");
   });
 });
+
+describe("Continue Recording preservation", () => {
+  it("preserves loaded entries when engine sends started for continued session", () => {
+    const { store, ws } = connectedStore();
+    store.setState({
+      history: [
+        {
+          id: "hist-keep",
+          name: "Existing Session",
+          date: 1000,
+          entries: [{ id: "m-keep", text: "Keep me", translation: null, isFinal: true, timestamp: 1 }],
+        },
+      ],
+    });
+    store.getState().loadConversation("hist-keep", { continueSession: true });
+    expect(store.getState().preserveEntriesOnStart).toBe(true);
+
+    store.getState().startPipeline();
+    ws.receive({ type: "status", status: "started", conversation_id: "hist-keep" });
+    expect(store.getState().entries.map((e) => e.id)).toEqual(["m-keep"]);
+    expect(store.getState().preserveEntriesOnStart).toBe(false);
+  });
+});

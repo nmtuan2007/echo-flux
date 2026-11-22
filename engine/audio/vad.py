@@ -104,21 +104,28 @@ class VAD:
         audio_int16 = np.frombuffer(audio_chunk, dtype=np.int16)
         audio_float32 = audio_int16.astype(np.float32) / 32768.0
 
-        # Append to internal buffer
-        self._buffer = np.concatenate((self._buffer, audio_float32))
+        buf = (
+            audio_float32
+            if self._buffer.size == 0
+            else np.concatenate((self._buffer, audio_float32))
+        )
 
         has_speech_in_chunk = False
         evaluated = False
+        offset = 0
+        total = len(buf)
 
-        while len(self._buffer) >= WINDOW_SIZE_SAMPLES:
+        while offset + WINDOW_SIZE_SAMPLES <= total:
             evaluated = True
-            window = self._buffer[:WINDOW_SIZE_SAMPLES]
-            self._buffer = self._buffer[WINDOW_SIZE_SAMPLES:]
+            window = buf[offset : offset + WINDOW_SIZE_SAMPLES]
+            offset += WINDOW_SIZE_SAMPLES
 
             prob = self._inference(window)
 
             if prob > self._threshold:
                 has_speech_in_chunk = True
+
+        self._buffer = buf[offset:].copy() if offset else buf
 
         # Preserve prior speech state when a sub-window chunk (<512 samples) has not
         # accumulated enough audio for a new Silero frame.

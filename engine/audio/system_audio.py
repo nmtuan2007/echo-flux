@@ -21,11 +21,17 @@ def is_virtual_loopback_name(name: str) -> bool:
 
 class SystemAudioInput(AudioInput):
 
-    def __init__(self, config: dict, device_id: Optional[str] = None):
+    def __init__(
+        self,
+        config: dict,
+        device_id: Optional[str] = None,
+        device_name: Optional[str] = None,
+    ):
         self._target_sample_rate = config.get("sample_rate", 16000)
         self._channels = config.get("channels", 1)
         self._chunk_ms = config.get("chunk_ms", 20)
         self._device_id = device_id
+        self._device_name = device_name
 
         self._pa = None
         self._stream = None
@@ -107,6 +113,16 @@ class SystemAudioInput(AudioInput):
         selected = None
         if self._device_id:
             selected = next((d for d in candidates if str(d["index"]) == str(self._device_id)), None)
+            if selected and self._device_name:
+                needle = self._device_name.replace(" (Loopback)", "").lower()
+                if needle and needle not in selected.get("name", "").lower():
+                    selected = None
+        if selected is None and self._device_name:
+            needle = self._device_name.replace(" (Loopback)", "").lower()
+            selected = next(
+                (d for d in candidates if needle and needle in d.get("name", "").lower()),
+                None,
+            )
         if selected is None:
             selected = next((d for d in candidates if is_virtual_loopback_name(d.get("name", ""))), None)
         if selected is None:
@@ -268,13 +284,23 @@ class SystemAudioInput(AudioInput):
             logger.error("No WASAPI loopback devices found")
             return None
 
-        # If a specific device was requested
+        # If a specific device was requested, verify index/name or fall back by name
         if device_id:
             for dev in loopback_devices:
-                if str(dev["index"]) == device_id:
+                if str(dev["index"]) == device_id and (
+                    not self._device_name
+                    or self._device_name.replace(" (Loopback)", "").lower() in dev["name"].lower()
+                ):
                     logger.info("Using requested loopback device: %s", dev["name"])
                     return dev
-            logger.warning("Requested device_id=%s not found among loopback devices", device_id)
+            logger.warning("Requested device_id=%s not found or mismatched; checking name", device_id)
+
+        if self._device_name:
+            needle = self._device_name.replace(" (Loopback)", "").lower()
+            for dev in loopback_devices:
+                if needle and needle in dev["name"].lower():
+                    logger.info("Matched shifted loopback device by name: %s", dev["name"])
+                    return dev
 
         # Try to match the default output device's loopback
         if default_output_name:

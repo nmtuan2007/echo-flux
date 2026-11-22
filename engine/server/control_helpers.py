@@ -1,11 +1,54 @@
 """Helpers extracted from control_dispatcher to keep request routing concise."""
 
+import asyncio
 import contextlib
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from engine.core.config import Config
 from engine.providers.manifests import ManifestField, ProviderManifest
+
+
+async def run_summary_stream(
+    service: Any,
+    conversation_id: str,
+    on_chunk: Callable[[str], Awaitable[None]],
+    on_failure: Callable[..., Awaitable[None]],
+    on_success: Callable[[Any, Optional[Dict[str, Any]]], Awaitable[None]],
+) -> None:
+    """Shared summary streaming runner used by both EchoFluxEngine and ControlCommandDispatcher."""
+    streamed = False
+
+    async def _chunk_wrapper(text: str) -> None:
+        nonlocal streamed
+        streamed = True
+        await on_chunk(text)
+
+    try:
+        outcome = await service.request_summary(conversation_id, on_chunk=_chunk_wrapper)
+    except asyncio.CancelledError:
+        await asyncio.shield(on_failure("cancelled", after_chunks=streamed))
+        raise
+    except Exception:
+        await asyncio.shield(on_failure("internal_error", after_chunks=streamed))
+        return
+
+    w_payload = warning_dict(outcome.warning)
+    if not outcome.ok:
+        err = outcome.error
+        await asyncio.shield(
+            on_failure(
+                err.code.value,
+                after_chunks=streamed,
+                message=err.message,
+                retryable=err.retryable,
+                provider_code=err.provider_code,
+                warning=w_payload,
+            )
+        )
+        return
+
+    await asyncio.shield(on_success(outcome, w_payload))
 
 
 def warning_dict(warning: Any) -> Optional[Dict[str, Any]]:

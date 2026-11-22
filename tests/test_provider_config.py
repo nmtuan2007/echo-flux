@@ -672,7 +672,12 @@ def test_language_defaults_to_auto_with_advanced_hints():
                 assert target.advanced is False
 
     stt = registry.validate_options(STT, "local", {"device": "cpu"})
-    assert stt == {"language": "auto", "device": "cpu", "compute_type": "float16"}
+    assert stt == {
+        "language": "auto",
+        "quality_preset": "balanced",
+        "device": "cpu",
+        "compute_type": "float16",
+    }
     translation = registry.validate_options(TRANSLATION, "local", {})
     assert translation == {"source_lang": "auto", "target_lang": "vi"}
 

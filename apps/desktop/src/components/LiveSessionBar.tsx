@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime } from "../lib/engineBridge";
 import { EngineConfig, useEngineStore } from "../store/engineStore";
-import { findProvider, PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
+import { PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
+import { derivePipelineReadiness } from "../store/settingsSlice";
 import { isAssistantConfigured } from "../store/transcriptSlice";
 import type { ExportEntry } from "../utils/export";
 import { ExportMenu } from "./ExportMenu";
@@ -100,47 +101,13 @@ export function LiveSessionBar() {
   const summaryLoading = useEngineStore((s) => s.summaryLoading);
   const activeStreams = Object.keys(partials);
 
-  const sttSvc = services?.stt;
-  const sttManifest = sttSvc ? findProvider("stt", sttSvc.providerId) : undefined;
-  const sttIsCloud = Boolean(sttManifest && sttManifest.protocolFamily !== "local");
-  const sttMissingCred =
-    sttIsCloud && (!consent?.stt || Object.keys(sttSvc?.credentialRefs || {}).length === 0);
-  const sttMissingLocal = !sttIsCloud && packStatus.stt && !packStatus.stt.isReady;
-
-  const transSvc = services?.translation;
-  const transManifest = transSvc ? findProvider("translation", transSvc.providerId) : undefined;
-  const transIsCloud = Boolean(transManifest && transManifest.protocolFamily !== "local");
-  const transMissingCred =
-    translationEnabled &&
-    transIsCloud &&
-    (!consent?.translation || Object.keys(transSvc?.credentialRefs || {}).length === 0);
-  const transMissingLocal =
-    translationEnabled && !transIsCloud && packStatus.translation && !packStatus.translation.isReady;
-  const transUnsupportedLocal =
-    translationEnabled &&
-    !transIsCloud &&
-    packStatus.translation?.languageSupported === false;
-
-  const setupReason = !connected
-    ? "Engine offline"
-    : sttMissingCred
-      ? "STT key/consent needed"
-      : sttMissingLocal
-        ? "Offline STT model needed"
-        : transUnsupportedLocal
-          ? `Offline Marian unsupported (→ ${targetLang})`
-          : transMissingCred
-            ? "Translation key/consent needed"
-            : transMissingLocal
-              ? "Offline Translation model needed"
-              : null;
-
-  const setupTargetService =
-    sttMissingCred || sttMissingLocal
-      ? "stt"
-      : transUnsupportedLocal || transMissingCred || transMissingLocal
-        ? "translation"
-        : undefined;
+  const { reason: setupReason, targetService: setupTargetService } = derivePipelineReadiness({
+    connected,
+    services,
+    config,
+    consent,
+    packStatus,
+  });
 
   const buildExportEntries = (): ExportEntry[] =>
     entries.map((e) => ({

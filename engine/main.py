@@ -6,11 +6,8 @@ import os
 import sys
 import threading
 import time
-from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Dict, Optional, Set
-
-from dotenv import load_dotenv
 
 from engine.conversation.context_profiles import ContextProfileService
 from engine.conversation.models import (
@@ -19,11 +16,21 @@ from engine.conversation.models import (
     SessionRecord,
     TranscriptMessage,
 )
-from engine.conversation.repository import (
-    ConversationRepository,
-    new_record_id,
-)
+from engine.conversation.repository import ConversationRepository, new_record_id
 from engine.core.progress import install_progress_hijack
+from engine.core.runtime_setup import (
+    apply_cli_config_env as _apply_cli_config_env,
+)
+from engine.core.runtime_setup import (
+    load_dotenv_file as _load_dotenv,
+)
+from engine.core.runtime_setup import (
+    setup_cuda_paths as _setup_cuda_paths,
+)
+from engine.core.runtime_setup import (
+    setup_engine_logging as _setup_logging,
+)
+from engine.server.control_helpers import run_summary_stream as _run_summary_stream
 from engine.server.protocol import (
     ASSISTANT_ERROR_MESSAGES,
     ERROR_ASSISTANT_UNAVAILABLE,
@@ -58,78 +65,11 @@ from engine.session.translation_orchestrator import (
     resolve_translation_session_config,
 )
 
+_setup_cuda_paths()
+
 logger = logging.getLogger("echoflux.engine")
 
 SILENCE_FINALIZE_DELAY = 0.8
-
-
-def _setup_cuda_paths():
-    if sys.platform != "win32":
-        return
-
-    # Use sys.prefix to find the current venv root dynamically
-    venv_base = Path(sys.prefix)
-    nvidia_path = venv_base / "Lib" / "site-packages" / "nvidia"
-
-    # Standard locations for pip-installed nvidia binaries
-    targets = [
-        nvidia_path / "cublas" / "bin",
-        nvidia_path / "cudnn" / "bin",
-        nvidia_path / "cuda_runtime" / "bin",
-    ]
-
-    for target in targets:
-        if target.exists():
-            # Windows requires absolute paths for DLL loading
-            abs_path = str(target.resolve())
-
-            with contextlib.suppress(Exception):
-                os.add_dll_directory(abs_path)
-
-            # Prepend to PATH so CTranslate2 finds these first
-            os.environ["PATH"] = abs_path + os.pathsep + os.environ["PATH"]
-
-    # Check for the manual dependency zlibwapi.dll
-    # It's not in pip packages, usually in System32 or project root
-    zlib_found = False
-    for p in os.environ["PATH"].split(os.pathsep):
-        if p and (Path(p) / "zlibwapi.dll").exists():
-            zlib_found = True
-            break
-
-    if not zlib_found and (Path.cwd() / "zlibwapi.dll").exists():
-        zlib_found = True
-
-    if not zlib_found:
-        logger.warning("zlibwapi.dll not found. CUDA might fail. Check System32.")
-
-
-def _load_dotenv():
-    env_path = Path.cwd() / ".env"
-    if env_path.exists():
-        load_dotenv(env_path)
-    else:
-        load_dotenv()
-
-
-def _setup_logging():
-    log_dir = Path.home() / ".echoflux" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"session_{ts}.log"
-
-    level_str = os.getenv("ECHOFLUX_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_str, logging.INFO)
-
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-    )
-    logger.info("Logging initialized - file: %s", log_file)
 
 
 def _assist_failure(message_id: str, code: str, conversation_id: Optional[str] = None) -> dict:
@@ -356,6 +296,9 @@ class EchoFluxEngine:
         self._running = False
 
         self._result_queue = Queue()
+        self._result_ready: Optional[asyncio.Event] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_translation_config = None
 
         self._capture_threads = []
         self._process_threads = []
@@ -389,6 +332,7 @@ class EchoFluxEngine:
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
+        self._result_ready = asyncio.Event()
 
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
@@ -531,17 +475,26 @@ class EchoFluxEngine:
         # Prefer settings dict (sent by the UI), fall back to env for CLI usage.
         audio_source = settings.get("audio.source", os.getenv("ECHOFLUX_AUDIO_SOURCE", "microphone"))
         mic_id_str = settings.get("audio.mic_device_id") or os.getenv("ECHOFLUX_MIC_DEVICE_ID")
+        mic_name_str = settings.get("audio.mic_device_name")
         spk_id_str = settings.get("audio.speaker_device_id") or os.getenv("ECHOFLUX_SPEAKER_DEVICE_ID")
+        spk_name_str = settings.get("audio.speaker_device_name")
         # Legacy single-device env var (still supported for backwards-compat)
         legacy_device_id = os.getenv("ECHOFLUX_AUDIO_DEVICE_ID")
+
+        mic_kwargs = {"device_name": mic_name_str} if mic_name_str else {}
+        spk_kwargs = {"device_name": spk_name_str} if spk_name_str else {}
 
         self._inputs.clear()
         if audio_source == "both":
             from engine.audio.microphone import MicrophoneInput
             from engine.audio.system_audio import SystemAudioInput
             mic_dev = int(mic_id_str) if mic_id_str else None
-            self._inputs["mic"] = MicrophoneInput(audio_config, device_id=mic_dev)
-            self._inputs["system"] = SystemAudioInput(audio_config, device_id=spk_id_str)
+            self._inputs["mic"] = MicrophoneInput(
+                audio_config, device_id=mic_dev, **mic_kwargs
+            )
+            self._inputs["system"] = SystemAudioInput(
+                audio_config, device_id=spk_id_str, **spk_kwargs
+            )
             logger.info(
                 "Audio source: True Dual Stream (mic_device=%s, speaker_device=%s)",
                 mic_id_str or "default",
@@ -550,12 +503,16 @@ class EchoFluxEngine:
         elif audio_source == "system":
             from engine.audio.system_audio import SystemAudioInput
             device_id = spk_id_str or legacy_device_id
-            self._inputs["system"] = SystemAudioInput(audio_config, device_id=device_id)
+            self._inputs["system"] = SystemAudioInput(
+                audio_config, device_id=device_id, **spk_kwargs
+            )
         else:
             from engine.audio.microphone import MicrophoneInput
             raw_id = mic_id_str or legacy_device_id
             dev_id = int(raw_id) if raw_id else None
-            self._inputs["mic"] = MicrophoneInput(audio_config, device_id=dev_id)
+            self._inputs["mic"] = MicrophoneInput(
+                audio_config, device_id=dev_id, **mic_kwargs
+            )
 
         # 2. VAD & Queues
         from engine.audio.vad import VAD
@@ -580,6 +537,8 @@ class EchoFluxEngine:
 
         # 4. Translation.
         self._translation_config = resolve_translation_session_config(settings)
+        if self._translation_config is not None:
+            self._last_translation_config = self._translation_config
 
         # 5. Conversation and Session Tracking
         repo = self._conversation_repo
@@ -699,7 +658,7 @@ class EchoFluxEngine:
 
         self._result_task = asyncio.create_task(self._broadcast_loop())
         if any(getattr(v, "init_error", None) for v in self._vads.values()):
-            self._result_queue.put(
+            self._enqueue_result(
                 {
                     "type": "error",
                     "message": "Voice Activity Detection could not initialize; running without silence filtering.",
@@ -712,6 +671,8 @@ class EchoFluxEngine:
 
         logger.info("Stopping pipeline...")
         self._running = False
+        if getattr(self, "_result_ready", None) is not None:
+            self._result_ready.set()
         self._ws_server.is_capturing = False
 
         for inp in self._inputs.values():
@@ -787,7 +748,7 @@ class EchoFluxEngine:
                             level = round(min(1.0, rms * 5.0), 3)
                             if level >= 0.01 or last_nonzero:
                                 last_nonzero = level >= 0.01
-                                self._result_queue.put(
+                                self._enqueue_result(
                                     {"type": "audio_level", "source": stream_id, "level": level}
                                 )
 
@@ -799,7 +760,7 @@ class EchoFluxEngine:
                     time.sleep(0.005)
         except Exception as e:
             logger.error("Capture thread [%s] error: %s", stream_id, e, exc_info=True)
-            self._result_queue.put(
+            self._enqueue_result(
                 {
                     "type": "error",
                     "message": f"Audio capture stopped for {stream_id}. Check your audio device.",
@@ -1018,9 +979,9 @@ class EchoFluxEngine:
     def _on_stt_event(self, event):
         """Session events arrive on the event loop; only non-blocking queue handoffs here."""
         if isinstance(event, STTStatusEvent):
-            self._result_queue.put(_stt_status_message(event))
+            self._enqueue_result(_stt_status_message(event))
             if event.status is STTStatusKind.FAILED:
-                self._result_queue.put(
+                self._enqueue_result(
                     {
                         "type": "error",
                         "message": "Speech recognition stopped for one audio source.",
@@ -1058,7 +1019,7 @@ class EchoFluxEngine:
             conversation_id=self._active_conversation_id,
             message_id=entry_id if event.is_final else None,
         )
-        self._result_queue.put(msg)
+        self._enqueue_result(msg)
         session = self._translation_session
         if session is not None:
             if event.is_final:
@@ -1071,17 +1032,17 @@ class EchoFluxEngine:
     def _on_translation_event(self, event):
         """Translation session events arrive on the event loop; only queue handoffs here."""
         if isinstance(event, TranslationStatusEvent):
-            self._result_queue.put(_translation_status_message(event))
+            self._enqueue_result(_translation_status_message(event))
             if event.status is TranslationStatusKind.FAILED:
-                self._result_queue.put(
+                self._enqueue_result(
                     {"type": "error", "message": "Translation stopped for this session."}
                 )
             return
         if isinstance(event, TranslationErrorEvent):
-            self._result_queue.put(_translation_error_message(event))
+            self._enqueue_result(_translation_error_message(event))
             return
         if event.is_final:
-            self._result_queue.put(_translation_update_message(event))
+            self._enqueue_result(_translation_update_message(event))
             if self._conversation_repo and self._active_conversation_id and event.entry_id:
                 try:
                     provider_meta = ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None
@@ -1101,7 +1062,7 @@ class EchoFluxEngine:
             return
         if (caption.get("text") or "").strip() != event.source_text:
             return
-        self._result_queue.put(
+        self._enqueue_result(
             {
                 **caption,
                 "translation": event.translation,
@@ -1110,9 +1071,20 @@ class EchoFluxEngine:
             }
         )
 
+    def _enqueue_result(self, msg: dict) -> None:
+        self._result_queue.put(msg)
+        loop = getattr(self, "_loop", None)
+        ready = getattr(self, "_result_ready", None)
+        if loop is not None and ready is not None:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(ready.set)
+
     async def _broadcast_loop(self):
+        ready = getattr(self, "_result_ready", None)
         while self._running:
             try:
+                if ready is not None:
+                    ready.clear()
                 count = 0
                 while not self._result_queue.empty() and count < 10:
                     msg_dict = self._result_queue.get_nowait()
@@ -1120,8 +1092,12 @@ class EchoFluxEngine:
                         await self._ws_server.broadcast(msg_dict)
                     count += 1
 
-                if count == 0:
-                    await asyncio.sleep(0.02)
+                if count == 0 and self._result_queue.empty():
+                    if ready is not None:
+                        with contextlib.suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(ready.wait(), timeout=0.5)
+                    else:
+                        await asyncio.sleep(0.02)
             except Exception as e:
                 logger.error("Broadcast error: %s", e)
                 await asyncio.sleep(1)
@@ -1310,66 +1286,94 @@ class EchoFluxEngine:
 
     async def _run_summary(self, service, command, websocket):
         conversation_id = command.conversation_id
-        streamed = []
 
         async def _on_chunk(text: str) -> None:
-            streamed.append(len(text))
             chunk_msg = summary_chunk_message(text, conversation_id)
             await self._send_reply(websocket, chunk_msg)
             await self.broadcast_event(chunk_msg)
 
-        try:
-            outcome = await service.request_summary(conversation_id, on_chunk=_on_chunk)
-        except asyncio.CancelledError:
-            failure = self._send_summary_failure(
-                websocket, ERROR_CANCELLED, conversation_id, after_chunks=bool(streamed)
-            )
-            await asyncio.shield(failure)
-            raise
-        except Exception as e:
-            logger.error("Summary request failed unexpectedly (%s)", type(e).__name__)
-            failure = self._send_summary_failure(
-                websocket, ERROR_INTERNAL, conversation_id, after_chunks=bool(streamed)
-            )
-            await asyncio.shield(failure)
-            return
-
-        warning = _warning_payload(outcome.warning)
-        if not outcome.ok:
-            error = outcome.error
-            failure = self._send_summary_failure(
+        async def _on_failure(
+            code: str,
+            *,
+            after_chunks: bool = False,
+            message: Optional[str] = None,
+            retryable: bool = False,
+            provider_code: Optional[str] = None,
+            warning: Optional[dict] = None,
+        ) -> None:
+            await self._send_summary_failure(
                 websocket,
-                error.code.value,
+                code,
                 conversation_id,
-                after_chunks=bool(streamed),
-                message=error.message,
-                retryable=error.retryable,
-                provider_code=error.provider_code,
+                after_chunks=after_chunks,
+                message=message,
+                retryable=retryable,
+                provider_code=provider_code,
                 warning=warning,
             )
-            await asyncio.shield(failure)
-            return
 
-        done = summary_done_message(
-            conversation_id=conversation_id,
-            summary_id=outcome.stored.summary_id,
-            warning=warning,
-            provider=outcome.provider.to_dict() if outcome.provider is not None else None,
-            included_message_count=outcome.included_message_count,
-            omitted_message_count=outcome.omitted_message_count,
-        )
-        await asyncio.shield(self._send_reply(websocket, done))
+        async def _on_success(outcome: Any, warning: Optional[dict]) -> None:
+            done = summary_done_message(
+                conversation_id=conversation_id,
+                summary_id=outcome.stored.summary_id,
+                warning=warning,
+                provider=outcome.provider.to_dict() if outcome.provider is not None else None,
+                included_message_count=outcome.included_message_count,
+                omitted_message_count=outcome.omitted_message_count,
+            )
+            await self._send_reply(websocket, done)
+
+        await _run_summary_stream(service, conversation_id, _on_chunk, _on_failure, _on_success)
 
     async def retranslate_message(
         self, conversation_id: str, message_id: str, text: str
     ) -> Optional[str]:
-        """Re-translate an edited final segment when a live translation session is running."""
+        """Re-translate an edited final segment during a live session or via local offline MT after Stop."""
         session = self._translation_session
-        if session is None:
-            return None
-        translated = await session.translate_text_now(text, entry_id=message_id)
-        if translated and self._conversation_repo is not None:
+        translated: Optional[str] = None
+        provider_id: Optional[str] = None
+
+        if session is not None:
+            translated = await session.translate_text_now(text, entry_id=message_id)
             provider_id = session.active_provider_id
+        else:
+            cfg = getattr(self, "_last_translation_config", None)
+            local_svc = (
+                cfg.fallback
+                if (cfg is not None and cfg.fallback is not None)
+                else (
+                    cfg.primary
+                    if (cfg is not None and cfg.primary and cfg.primary.provider_id == "local")
+                    else None
+                )
+            )
+            if cfg is not None and cfg.enabled and local_svc is not None:
+                from engine.providers.translation.local import (
+                    LocalTranslationProvider,
+                    LocalTranslationSettings,
+                )
+                from engine.providers.types import TranslationRequest
+
+                settings = LocalTranslationSettings.from_options(dict(local_svc.options))
+                local_provider = LocalTranslationProvider(settings, provider_id=local_svc.provider_id)
+                try:
+                    await local_provider.start()
+                    res = await local_provider.translate(
+                        TranslationRequest(
+                            text=text,
+                            source_lang=cfg.source_lang,
+                            target_lang=cfg.target_lang,
+                        )
+                    )
+                    translated = (res.translated_text or "").strip() or None
+                    provider_id = local_svc.provider_id
+                except Exception as exc:
+                    logger.debug("Post-stop local retranslation skipped (%s)", type(exc).__name__)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await local_provider.stop()
+
+        if translated and self._conversation_repo is not None:
             meta = ProviderMetadata(provider_id=provider_id) if provider_id else None
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(
@@ -1380,28 +1384,6 @@ class EchoFluxEngine:
                     provider=meta,
                 )
         return translated
-
-
-def _apply_cli_config_env(cli_config: Any) -> None:
-    """Propagate Config/CLI overrides into ECHOFLUX_* env defaults before engine startup."""
-    if cli_config is None:
-        return
-    mapping = {
-        "engine.host": "ECHOFLUX_HOST",
-        "engine.port": "ECHOFLUX_PORT",
-        "asr.model_size": "ECHOFLUX_MODEL_SIZE",
-        "asr.language": "ECHOFLUX_LANGUAGE",
-        "asr.device": "ECHOFLUX_DEVICE",
-        "translation.enabled": "ECHOFLUX_TRANSLATION_ENABLED",
-        "translation.source_lang": "ECHOFLUX_SOURCE_LANG",
-        "translation.target_lang": "ECHOFLUX_TARGET_LANG",
-        "vad.enabled": "ECHOFLUX_VAD_ENABLED",
-        "logging.level": "ECHOFLUX_LOG_LEVEL",
-    }
-    for cfg_key, env_key in mapping.items():
-        val = cli_config.get(cfg_key)
-        if val is not None:
-            os.environ[env_key] = str(val)
 
 
 def run_engine(config_path=None, insecure_dev: bool = False):

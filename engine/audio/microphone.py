@@ -1,27 +1,52 @@
-import threading
+import contextlib
+from queue import Empty, Queue
 from typing import List, Optional
-from queue import Queue, Empty
 
-from engine.audio.input_manager import AudioInput, AudioDevice, AudioSourceType
-from engine.core.logging import get_logger
+from engine.audio.input_manager import AudioDevice, AudioInput, AudioSourceType
 from engine.core.exceptions import AudioError
+from engine.core.logging import get_logger
 
 logger = get_logger("audio.microphone")
 
 
 class MicrophoneInput(AudioInput):
 
-    def __init__(self, config: dict, device_id: Optional[int] = None):
+    def __init__(
+        self,
+        config: dict,
+        device_id: Optional[int] = None,
+        device_name: Optional[str] = None,
+    ):
         self._sample_rate = config.get("sample_rate", 16000)
         self._channels = config.get("channels", 1)
         self._chunk_ms = config.get("chunk_ms", 20)
         self._format_width = 2  # int16
         self._device_id = device_id
+        self._device_name = device_name
 
         self._pa = None
         self._stream = None
         self._active = False
         self._queue: Queue = Queue(maxsize=200)
+
+    def _resolve_device_index(self, pa) -> Optional[int]:
+        """Resolve PyAudio input index, falling back to device_name if index shifted."""
+        count = pa.get_device_count()
+        if self._device_id is not None and 0 <= self._device_id < count:
+            info = pa.get_device_info_by_index(self._device_id)
+            if info.get("maxInputChannels", 0) > 0 and (
+                not self._device_name
+                or self._device_name.lower() in info.get("name", "").lower()
+            ):
+                return self._device_id
+        if self._device_name:
+            target = self._device_name.lower()
+            for i in range(count):
+                info = pa.get_device_info_by_index(i)
+                if info.get("maxInputChannels", 0) > 0 and target in info.get("name", "").lower():
+                    logger.info("Resolved shifted microphone '%s' to index %d", self._device_name, i)
+                    return i
+        return self._device_id
 
     def start(self) -> None:
         if self._active:
@@ -30,11 +55,12 @@ class MicrophoneInput(AudioInput):
         try:
             import pyaudio
         except ImportError:
-            raise AudioError("pyaudio is not installed")
+            raise AudioError("pyaudio is not installed") from None
 
         self._pa = pyaudio.PyAudio()
 
         frames_per_chunk = int(self._sample_rate * self._chunk_ms / 1000)
+        resolved_id = self._resolve_device_index(self._pa)
 
         kwargs = {
             "format": pyaudio.paInt16,
@@ -45,8 +71,8 @@ class MicrophoneInput(AudioInput):
             "stream_callback": self._audio_callback,
         }
 
-        if self._device_id is not None:
-            kwargs["input_device_index"] = self._device_id
+        if resolved_id is not None:
+            kwargs["input_device_index"] = resolved_id
 
         try:
             self._stream = self._pa.open(**kwargs)
@@ -90,7 +116,7 @@ class MicrophoneInput(AudioInput):
         try:
             import pyaudio
         except ImportError:
-            raise AudioError("pyaudio is not installed")
+            raise AudioError("pyaudio is not installed") from None
 
         pa = pyaudio.PyAudio()
         devices = []
@@ -118,10 +144,8 @@ class MicrophoneInput(AudioInput):
             logger.debug("Audio callback status: %s", status)
 
         if self._active and in_data:
-            try:
+            with contextlib.suppress(Exception):
                 self._queue.put_nowait(in_data)
-            except Exception:
-                pass  # Drop frame if queue is full
 
         return (None, pyaudio.paContinue)
 

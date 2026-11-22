@@ -22,7 +22,11 @@ import {
 } from "../lib/engineBridge";
 import { LEGACY_CREDENTIALS, LEGACY_SECRET_FIELDS } from "../lib/secureStore";
 import type { EngineSliceCreator, EngineState } from "./engineStore";
-import { findProvider, isSecretKeyName, publicConfigSnapshot } from "./settingsSlice";
+import {
+  derivePipelineReadiness,
+  isSecretKeyName,
+  publicConfigSnapshot,
+} from "./settingsSlice";
 import type {
   AudioDeviceInfo,
   EngineConfig,
@@ -82,12 +86,16 @@ export function connectionResetState(): Partial<EngineState> {
   };
 }
 
-export function sessionStartedState(existingConversationId?: string | null): Partial<EngineState> {
+export function sessionStartedState(
+  existingConversationId?: string | null,
+  preserveEntries = false,
+): Partial<EngineState> {
   return {
     running: true,
     isToggling: false,
     preparedConversationId: null,
-    entries: [],
+    preserveEntriesOnStart: false,
+    ...(!preserveEntries ? { entries: [] } : {}),
     partials: {},
     suggestionLoading: {},
     summaryText: "",
@@ -157,14 +165,9 @@ export function stripCommandSecrets(value: unknown): unknown {
   return out;
 }
 
-// Reply type that completes each forwarded command; download_model completes on the event
-// socket instead.
+// Reply type that completes each forwarded command.
 const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   list_devices: "devices_list",
-  request_models_list: "models_list",
-  download_model: null,
-  delete_model: "model_action_result",
-  search_hub: "hub_search_results",
   request_suggestion: "suggestion_result",
   request_assist: null,
   configure_assistant: null,
@@ -198,10 +201,6 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
 
 const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   list_devices: "Device list",
-  request_models_list: "Model list",
-  download_model: "Model download",
-  delete_model: "Model delete",
-  search_hub: "Hub search",
   request_suggestion: "Suggestion",
   request_assist: "Assist",
   configure_assistant: "Configure assistant",
@@ -267,6 +266,7 @@ export interface SessionSlice {
   running: boolean;
   isToggling: boolean;
   preparedConversationId: string | null;
+  preserveEntriesOnStart: boolean;
 
   // Downloads
   downloading: boolean;
@@ -372,9 +372,6 @@ export const createSessionSlice =
 
       const command = { ...(stripCommandSecrets(parsed) as ForwardedCommand), type };
       const credentials: Record<string, StartCredentialRef> = {};
-      if ((type === "download_model" || type === "search_hub") && get().secretStatus.hfToken) {
-        credentials.hf_token = { ...LEGACY_CREDENTIALS.hfToken };
-      }
 
       let result: ControlForwardResult;
       try {
@@ -575,19 +572,16 @@ export const createSessionSlice =
     };
 
     const startSecure = async () => {
-      const { connected, isToggling, services: currentServices, consent } = get();
+      const stateSnapshot = get();
+      const { connected, isToggling } = stateSnapshot;
       if (!connected || isToggling) return;
 
-      for (const cap of ["stt", "translation"] as const) {
-        const svc = currentServices?.[cap];
-        const active = cap === "stt" || Boolean(svc?.enabled);
-        const manifest = svc ? findProvider(cap, svc.providerId) : undefined;
-        if (active && manifest && manifest.protocolFamily !== "local" && !consent?.[cap]) {
-          set({
-            appError: `Cloud consent is required for ${cap === "stt" ? "Speech-to-Text" : "Translation"} (${manifest.displayName}). Grant permission in Settings before starting.`,
-          });
-          return;
-        }
+      const readiness = derivePipelineReadiness(stateSnapshot);
+      if (!readiness.ready && readiness.reason) {
+        set({
+          appError: `${readiness.reason}. Configure or download in Settings before starting.`,
+        });
+        return;
       }
 
       const gen = generation;
@@ -610,6 +604,7 @@ export const createSessionSlice =
               activeConversationId: null,
               engineConversationId: null,
               isViewingHistory: false,
+              preserveEntriesOnStart: false,
               ...(isViewingHistory ? { pendingTitle: "" } : {}),
             }
           : {}),
@@ -647,6 +642,14 @@ export const createSessionSlice =
         }
       }
       const publicConfig = publicStartConfig(deps.commands, config);
+      if (config.micDeviceId) {
+        const micMatch = get().availableMics.find((d) => d.id === config.micDeviceId);
+        if (micMatch?.name) publicConfig["audio.mic_device_name"] = micMatch.name;
+      }
+      if (config.speakerDeviceId) {
+        const spkMatch = get().availableSpeakers.find((d) => d.id === config.speakerDeviceId);
+        if (spkMatch?.name) publicConfig["audio.speaker_device_name"] = spkMatch.name;
+      }
       if (services) {
         publicConfig.services = services;
       }
@@ -677,6 +680,7 @@ export const createSessionSlice =
       running: false,
       isToggling: false,
       preparedConversationId: null,
+      preserveEntriesOnStart: false,
       downloading: false,
       downloadModel: "",
       downloadPercent: 0,
@@ -754,6 +758,7 @@ export const createSessionSlice =
                 activeConversationId: null,
                 engineConversationId: null,
                 isViewingHistory: false,
+                preserveEntriesOnStart: false,
                 ...(isViewingHistory ? { pendingTitle: "" } : {}),
               }
             : {}),

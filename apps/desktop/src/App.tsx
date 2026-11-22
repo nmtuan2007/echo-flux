@@ -109,8 +109,6 @@ export default function App() {
     let lastSyncedConfig: unknown = null;
     let lastSyncedLabels: unknown = null;
     let lastSyncedEntries: unknown = null;
-    let lastSyncedAssistRequests: unknown = null;
-
     const getSyncPayload = (full: boolean) => {
       const state = useEngineStore.getState();
       const payload: Record<string, unknown> = {
@@ -123,15 +121,12 @@ export default function App() {
         engineConversationId: state.engineConversationId,
         sttStreams: state.sttStreams,
         audioLevels: state.audioLevels,
+        shortcutsEnabled: state.shortcutsEnabled,
       };
       if (full || state.entries !== lastSyncedEntries) {
         lastSyncedEntries = state.entries;
         // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
         payload.entries = state.entries.slice(-20);
-      }
-      if (full || state.assistRequests !== lastSyncedAssistRequests) {
-        lastSyncedAssistRequests = state.assistRequests;
-        payload.assistRequests = state.assistRequests;
       }
       if (full || state.sourceLabels !== lastSyncedLabels) {
         lastSyncedLabels = state.sourceLabels;
@@ -206,13 +201,13 @@ export default function App() {
           state.isToggling !== prev.isToggling ||
           state.appError !== prev.appError ||
           state.suggestionLoading !== prev.suggestionLoading ||
-          state.assistRequests !== prev.assistRequests ||
           state.engineConversationId !== prev.engineConversationId ||
           state.sourceLabels !== prev.sourceLabels ||
           state.sttStreams !== prev.sttStreams ||
           state.services !== prev.services ||
           state.config !== prev.config ||
-          state.audioLevels !== prev.audioLevels
+          state.audioLevels !== prev.audioLevels ||
+          state.shortcutsEnabled !== prev.shortcutsEnabled
         ) {
           scheduleSync();
         }

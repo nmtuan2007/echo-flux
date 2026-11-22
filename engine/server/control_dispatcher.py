@@ -47,6 +47,7 @@ from engine.local_models import (
     PackCatalog,
     PackInstallError,
     PackKind,
+    PackSource,
     SystemHardwareProbe,
     builtin_catalog,
     compatibility_issues,
@@ -65,6 +66,9 @@ from engine.server.control_helpers import (
 )
 from engine.server.control_helpers import (
     probe_hardware_with_gpu as _probe_hardware_with_gpu,
+)
+from engine.server.control_helpers import (
+    run_summary_stream as _run_summary_stream,
 )
 from engine.server.control_helpers import (
     serialize_manifest as _serialize_manifest,
@@ -1140,6 +1144,7 @@ class ControlCommandDispatcher:
     async def _handle_pack_check_readiness(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         capability = payload.get("capability", "stt")
         pack_id = payload.get("pack_id")
+        quality_preset = payload.get("quality_preset")
         source_lang = payload.get("source_lang")
         target_lang = payload.get("target_lang")
         installer = self._get_installer()
@@ -1203,25 +1208,40 @@ class ControlCommandDispatcher:
                 "reason": selection.reason,
             }
 
+        preset_packs = {
+            "fast": ("legacy-faster-whisper-tiny", 75_000_000),
+            "balanced": ("legacy-faster-whisper-small", 500_000_000),
+            "accurate": ("legacy-faster-whisper-medium", 1_500_000_000),
+        }
+        effective_pack_id = pack.pack_id
+        default_size = 500_000_000 if kind is PackKind.STT else 300_000_000
+        effective_size = pack.size_bytes or default_size
+        if (
+            kind is PackKind.STT
+            and pack.source is PackSource.LEGACY_RUNTIME
+            and isinstance(quality_preset, str)
+            and quality_preset in preset_packs
+        ):
+            effective_pack_id, effective_size = preset_packs[quality_preset]
+
         is_local = _is_local_model_ready(
             capability,
             source_lang=src_lang,
             target_lang=tgt_lang,
-            pack_id=pack.pack_id,
+            pack_id=effective_pack_id,
         )
         active = await asyncio.to_thread(installer.active, pack.pack_id)
         ready = (active is not None) or is_local
         installed = (active is not None) or is_local
         tier_val = selection.tier.value if selection.tier else "minimal"
-        size_bytes = pack.size_bytes or (500_000_000 if kind is PackKind.STT else 300_000_000)
         return {
             "capability": capability,
-            "pack_id": pack.pack_id,
+            "pack_id": effective_pack_id,
             "ready": ready,
             "issues": [],
             "installed": installed,
             "tier": tier_val,
-            "size_bytes": size_bytes,
+            "size_bytes": effective_size,
             "language_supported": language_supported,
             "reason": selection.reason,
         }
@@ -1395,53 +1415,56 @@ class ControlCommandDispatcher:
                     {"type": "llm_chunk", "text": text, "conversation_id": cid}
                 )
 
+        async def _on_failure(
+            code: str,
+            *,
+            after_chunks: bool = False,
+            message: Optional[str] = None,
+            retryable: bool = False,
+            provider_code: Optional[str] = None,
+            warning: Optional[dict] = None,
+        ) -> None:
+            msg = (
+                "Summary request cancelled"
+                if code == "cancelled"
+                else (message or "Summary failed unexpectedly")
+            )
+            await self._send_error(websocket, request_id, code, msg, tokens)
+
+        async def _on_success(outcome: Any, w_payload: Optional[dict]) -> None:
+            summary_id = outcome.stored.summary_id if outcome.stored else None
+            summary_md = outcome.stored.summary_markdown if outcome.stored else ""
+            provider_dict = outcome.provider.to_dict() if outcome.provider else None
+            done_frame = {
+                "op": "response",
+                "id": request_id,
+                "data": {
+                    "done": True,
+                    "conversation_id": cid,
+                    "summary_id": summary_id,
+                    "summary_markdown": summary_md,
+                    "warning": w_payload,
+                    "provider": provider_dict,
+                    "included_message_count": outcome.included_message_count,
+                    "omitted_message_count": outcome.omitted_message_count,
+                },
+                "message": {
+                    "type": "llm_done",
+                    "conversation_id": cid,
+                    "summary_id": summary_id,
+                    "warning": w_payload,
+                    "provider": provider_dict,
+                    "included_message_count": outcome.included_message_count,
+                    "omitted_message_count": outcome.omitted_message_count,
+                },
+            }
+            await websocket.send(encode_frame(done_frame, tokens))
+            await websocket.send(encode_frame(complete_frame(request_id), tokens))
+
         try:
-            outcome = await service.request_summary(cid, on_chunk=_on_chunk)
-        except asyncio.CancelledError:
-            await self._send_error(websocket, request_id, "cancelled", "Summary request cancelled", tokens)
-            raise
-        except Exception as e:
-            logger.exception("Summary streaming unexpected error: %s", e)
-            await self._send_error(websocket, request_id, "internal_error", "Summary failed unexpectedly", tokens)
-            return
+            await _run_summary_stream(service, cid, _on_chunk, _on_failure, _on_success)
         finally:
             self._active_tasks.pop(request_id, None)
-
-        if not outcome.ok:
-            err = outcome.error
-            await self._send_error(websocket, request_id, err.code.value, err.message, tokens)
-            return
-
-        w_payload = _warning_dict(outcome.warning)
-        summary_id = outcome.stored.summary_id if outcome.stored else None
-        summary_md = outcome.stored.summary_markdown if outcome.stored else ""
-        provider_dict = outcome.provider.to_dict() if outcome.provider else None
-
-        done_frame = {
-            "op": "response",
-            "id": request_id,
-            "data": {
-                "done": True,
-                "conversation_id": cid,
-                "summary_id": summary_id,
-                "summary_markdown": summary_md,
-                "warning": w_payload,
-                "provider": provider_dict,
-                "included_message_count": outcome.included_message_count,
-                "omitted_message_count": outcome.omitted_message_count,
-            },
-            "message": {
-                "type": "llm_done",
-                "conversation_id": cid,
-                "summary_id": summary_id,
-                "warning": w_payload,
-                "provider": provider_dict,
-                "included_message_count": outcome.included_message_count,
-                "omitted_message_count": outcome.omitted_message_count,
-            },
-        }
-        await websocket.send(encode_frame(done_frame, tokens))
-        await websocket.send(encode_frame(complete_frame(request_id), tokens))
 
     async def _handle_request_summary(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Non-streaming fallback if invoked directly via handler map."""

@@ -467,6 +467,19 @@ BUILTIN_MANIFESTS: Tuple[ProviderManifest, ...] = (
         fields=(
             _LANGUAGE_HINT,
             ManifestField(
+                key="quality_preset",
+                label="Speed / Accuracy",
+                field_type=FieldType.CHOICE,
+                default="balanced",
+                advanced=True,
+                choices=("fast", "balanced", "accurate"),
+                description=(
+                    "Fast uses tiny (~75 MB), balanced uses small (~500 MB), "
+                    "accurate uses medium (~1.5 GB)."
+                ),
+                applies_to=frozenset({_STT}),
+            ),
+            ManifestField(
                 key="device",
                 label="Device",
                 field_type=FieldType.CHOICE,

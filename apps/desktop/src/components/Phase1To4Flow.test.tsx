@@ -6,6 +6,7 @@ import { transcriptResetState } from "../store/transcriptSlice";
 import { LiveSessionBar } from "./LiveSessionBar";
 import { OverlayPanel } from "./OverlayPanel";
 import { ServiceSettingsCard } from "./ServiceSettingsCard";
+import { SummaryModal } from "./SummaryModal";
 import { TranscriptPanel } from "./TranscriptPanel";
 import { CloudConsent } from "./CloudConsent";
 import { ConversationSetupPanel } from "./ConversationSetupPanel";
@@ -527,5 +528,50 @@ describe("Phase 1-4 UI enhancements", () => {
     useEngineStore.getState().startPipeline();
     expect(useEngineStore.getState().activeConversationId).toBe("hist-cont");
     expect(sent).toHaveLength(1);
+  });
+
+  it("disables Overlay Lock button when global shortcuts are disabled", () => {
+    useEngineStore.setState({ shortcutsEnabled: false });
+    render(<OverlayPanel />);
+    const lockBtn = screen.getByRole("button", { name: /^Lock$/i }) as HTMLButtonElement;
+    expect(lockBtn.disabled).toBe(true);
+  });
+
+  it("renders translation fallback and translation error notices in TranscriptPanel", () => {
+    useEngineStore.setState({
+      config: { ...DEFAULT_CONFIG, translationEnabled: true },
+      entries: [
+        {
+          id: "e-tr-err",
+          text: "Bonjour tout le monde",
+          translation: null,
+          isFinal: true,
+          timestamp: 1000,
+          source: "system",
+          translationFallback: true,
+          translationError: { code: "rate_limit", message: "Translation quota exceeded." },
+        },
+      ],
+    });
+    render(<TranscriptPanel />);
+    expect(screen.getByText(/Translation switched to Local fallback/i)).toBeTruthy();
+    expect(screen.getByText(/Translation quota exceeded/i)).toBeTruthy();
+  });
+
+  it("supports multi-turn Quick Ask history in SummaryModal", async () => {
+    useEngineStore.getState().updateServiceConfig("assistant", { enabled: true });
+    useEngineStore.setState({
+      summaryVisible: true,
+      engineConversationId: "conv-ask",
+      askHistory: [
+        { id: "t1", question: "What was decided?", answer: "Ship v2 on Friday." },
+        { id: "t2", question: "Who owns QA?", answer: "Linh." },
+      ],
+    });
+    render(<SummaryModal />);
+    expect(screen.getByText("What was decided?")).toBeTruthy();
+    expect(screen.getByText("Ship v2 on Friday.")).toBeTruthy();
+    expect(screen.getByText("Who owns QA?")).toBeTruthy();
+    expect(screen.getByText("Linh.")).toBeTruthy();
   });
 });

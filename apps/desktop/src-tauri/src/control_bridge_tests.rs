@@ -811,8 +811,8 @@
         bridge
     }
 
-    fn hf_ref() -> Value {
-        json!({"hf_token": {"capability": "stt", "configId": "huggingface", "slot": "hf_token"}})
+    fn assistant_ref() -> Value {
+        json!({"assistant.api_key": {"capability": "assistant", "configId": "openai", "slot": "api_key"}})
     }
 
     async fn forward_json(
@@ -835,54 +835,60 @@
     #[test]
     fn forward_allowlist_maps_each_command_to_its_terminal_and_timeout() {
         let table = [
-            ("list_devices", Some("devices_list"), 10, false, false),
-            ("request_models_list", Some("models_list"), 10, false, false),
-            ("download_model", None, 20, true, false),
-            ("delete_model", Some("model_action_result"), 30, false, false),
-            ("search_hub", Some("hub_search_results"), 30, true, false),
-            ("request_suggestion", Some("suggestion_result"), 120, false, false),
-            ("request_assist", None, 120, false, false),
-            ("configure_assistant", None, 15, false, true),
-            ("request_summary", Some("llm_done"), 300, false, false),
-            ("test_connection", Some("test_connection_result"), 30, false, false),
-            ("profile_create", None, 10, false, false),
-            ("profile_list", None, 10, false, false),
-            ("profile_get", None, 10, false, false),
-            ("profile_update", None, 10, false, false),
-            ("profile_delete", None, 10, false, false),
-            ("profile_attach", None, 10, false, false),
-            ("conversation_create", None, 10, false, false),
-            ("conversation_start", None, 10, false, false),
-            ("conversation_list", None, 10, false, false),
-            ("conversation_get", None, 15, false, false),
-            ("conversation_rename", None, 10, false, false),
-            ("conversation_delete", None, 10, false, false),
-            ("conversation_export", None, 30, false, false),
-            ("conversation_import", None, 30, false, false),
-            ("message_update", None, 10, false, false),
-            ("pack_status", None, 10, false, false),
-            ("pack_install", None, 600, false, false),
-            ("pack_cancel", None, 10, false, false),
-            ("pack_retry", None, 600, false, false),
-            ("pack_check_readiness", None, 15, false, false),
-            ("get_provider_manifests", None, 10, false, false),
-            ("audio_probe", None, 10, false, false),
-            ("summary_cancel", None, 10, false, false),
-            ("assistant_ask", None, 60, false, false),
+            ("list_devices", Some("devices_list"), 10, false),
+            ("request_suggestion", Some("suggestion_result"), 120, false),
+            ("request_assist", None, 120, false),
+            ("configure_assistant", None, 15, true),
+            ("request_summary", Some("llm_done"), 300, false),
+            ("test_connection", Some("test_connection_result"), 30, false),
+            ("profile_create", None, 10, false),
+            ("profile_list", None, 10, false),
+            ("profile_get", None, 10, false),
+            ("profile_update", None, 10, false),
+            ("profile_delete", None, 10, false),
+            ("profile_attach", None, 10, false),
+            ("conversation_create", None, 10, false),
+            ("conversation_start", None, 10, false),
+            ("conversation_list", None, 10, false),
+            ("conversation_get", None, 15, false),
+            ("conversation_rename", None, 10, false),
+            ("conversation_delete", None, 10, false),
+            ("conversation_export", None, 30, false),
+            ("conversation_import", None, 30, false),
+            ("message_update", None, 10, false),
+            ("pack_status", None, 10, false),
+            ("pack_install", None, 600, false),
+            ("pack_cancel", None, 10, false),
+            ("pack_retry", None, 600, false),
+            ("pack_check_readiness", None, 15, false),
+            ("get_provider_manifests", None, 10, false),
+            ("audio_probe", None, 10, false),
+            ("summary_cancel", None, 10, false),
+            ("assistant_ask", None, 60, false),
         ];
-        for (kind, terminal, seconds, accepts_hf_token, accepts_assistant_credentials) in table {
+        for (kind, terminal, seconds, accepts_assistant_credentials) in table {
             let checked = check_forward_command(json!({"type": kind}), None).unwrap();
             let expected = ForwardPolicy {
                 terminal,
                 timeout: Duration::from_secs(seconds),
-                accepts_hf_token,
                 accepts_assistant_credentials,
             };
             assert_eq!(checked.policy, expected, "{kind}");
-            assert!(checked.hf_token.is_none());
+            assert!(checked.assistant_credentials.is_empty());
         }
 
-        for kind in ["start", "stop", "Start", "unknown", "", "partial"] {
+        for kind in [
+            "start",
+            "stop",
+            "Start",
+            "unknown",
+            "",
+            "partial",
+            "request_models_list",
+            "download_model",
+            "delete_model",
+            "search_hub",
+        ] {
             let err = check_forward_command(json!({"type": kind, "config": {}}), None).unwrap_err();
             assert_safe_error(&err, ErrorCode::CommandNotAllowed);
         }
@@ -906,37 +912,35 @@
     #[test]
     fn forward_rejects_secret_named_keys_at_any_depth_without_echo() {
         let commands = [
-            json!({"type": "download_model", "model_id": "tiny", "model_type": "asr", "hf_token": SECRET}),
-            json!({"type": "search_hub", "query": "whisper", "HF-Token": SECRET}),
+            json!({"type": "pack_install", "pack_id": "stt", "hf_token": SECRET}),
+            json!({"type": "conversation_list", "HF-Token": SECRET}),
             json!({"type": "request_suggestion", "entry_id": "e-1", "llm_config": {"api_key": SECRET}}),
             json!({"type": "request_summary", "entries": [{"source": "mic", "text": "hi", "meta": {"apiKey": SECRET}}]}),
             json!({"type": "list_devices", "headers": [{"Authorization": format!("Bearer {SECRET}")}]}),
-            json!({"type": "delete_model", "nested": {"deep": [{"clientSecret": SECRET}]}}),
-            json!({"type": "request_models_list", "PASSWORD": SECRET}),
-            json!({"type": "request_models_list", "credentials": {"x": SECRET}}),
-            json!({"type": "request_models_list", "BEARER": SECRET}),
+            json!({"type": "profile_delete", "nested": {"deep": [{"clientSecret": SECRET}]}}),
+            json!({"type": "list_devices", "PASSWORD": SECRET}),
+            json!({"type": "list_devices", "credentials": {"x": SECRET}}),
+            json!({"type": "list_devices", "BEARER": SECRET}),
         ];
         for command in commands {
             let err = check_forward_command(command, None).unwrap_err();
             assert_safe_error(&err, ErrorCode::SecretInCommand);
         }
 
-        let reference = || json!({"capability": "stt", "configId": "huggingface", "slot": "hf_token"});
-        let download = || json!({"type": "download_model", "model_id": "tiny", "model_type": "asr"});
+        let configure = || json!({"type": "configure_assistant", "service": {"enabled": true}});
         let bad_credentials = [
-            (json!({"type": "list_devices"}), json!({"hf_token": reference()})),
-            (json!({"type": "request_summary", "entries": []}), json!({"hf_token": reference()})),
-            (download(), json!({"api_key": reference()})),
-            (download(), json!({"hf_token": reference(), "extra": reference()})),
-            (download(), json!({"hf_token": SECRET})),
-            (download(), json!([SECRET])),
+            (json!({"type": "list_devices"}), assistant_ref()),
+            (json!({"type": "request_summary", "entries": []}), assistant_ref()),
+            (configure(), json!({"api_key": {"capability": "stt", "configId": "openai", "slot": "api_key"}})),
+            (configure(), json!({"assistant.api_key": SECRET})),
+            (configure(), json!([SECRET])),
             (
-                download(),
-                json!({"hf_token": {"capability": "stt", "configId": "huggingface", "slot": "hf_token", "value": SECRET}}),
+                configure(),
+                json!({"assistant.api_key": {"capability": "assistant", "configId": "openai", "slot": "api_key", "value": SECRET}}),
             ),
             (
-                download(),
-                json!({"hf_token": {"capability": "vault", "configId": "huggingface", "slot": "hf_token"}}),
+                configure(),
+                json!({"assistant.api_key": {"capability": "vault", "configId": "openai", "slot": "api_key"}}),
             ),
         ];
         for (command, credentials) in bad_credentials {
@@ -946,15 +950,15 @@
 
         for credentials in [json!({}), json!(null)] {
             let checked = check_forward_command(json!({"type": "list_devices"}), Some(credentials)).unwrap();
-            assert!(checked.hf_token.is_none());
+            assert!(checked.assistant_credentials.is_empty());
         }
     }
 
     #[test]
-    fn forward_injects_hf_token_from_the_vault_and_redacts_it() {
+    fn forward_injects_assistant_secret_from_the_vault_and_redacts_it() {
         runtime().block_on(async {
             let store = empty_store();
-            let id = CredentialId::parse("stt", "huggingface", "hf_token").unwrap();
+            let id = CredentialId::parse("assistant", "openai", "api_key").unwrap();
             store.save(&id, SECRET).unwrap();
             let (port, server) = scripted_engine(|id| {
                 vec![
@@ -967,8 +971,8 @@
             .await;
             let bridge = forward_bridge(Duration::from_secs(5));
             let checked = check_forward_command(
-                json!({"type": "download_model", "model_id": "tiny", "model_type": "asr"}),
-                Some(hf_ref()),
+                json!({"type": "configure_assistant", "service": {"enabled": true, "providerId": "openai"}}),
+                Some(assistant_ref()),
             )
             .unwrap();
             let policy = checked.policy;
@@ -984,19 +988,23 @@
             assert_eq!(
                 log.frames[1],
                 json!({"op": "request", "id": request_id, "command": {
-                    "type": "download_model", "model_id": "tiny", "model_type": "asr", "hf_token": SECRET
+                    "type": "configure_assistant",
+                    "service": {"enabled": true, "providerId": "openai"},
+                    "secrets": {"api_key": SECRET}
                 }})
             );
-            // download_model returns at `complete`; its progress arrives as events.
             assert_eq!(message_types(&result), ["status"]);
             let rendered = format!("{} {result:?}", serde_json::to_string(&result).unwrap());
             assert!(!rendered.contains(SECRET) && !rendered.contains(TOKEN), "{rendered}");
             assert!(rendered.contains(REDACTED));
             assert!(log.client_closed);
 
-            let checked =
-                check_forward_command(json!({"type": "search_hub", "query": "whisper"}), Some(hf_ref())).unwrap();
-            assert!(checked.hf_token.is_some());
+            let checked = check_forward_command(
+                json!({"type": "configure_assistant", "service": {"enabled": true}}),
+                Some(assistant_ref()),
+            )
+            .unwrap();
+            assert!(!checked.assistant_credentials.is_empty());
             let err = bridge.prepare_forward(&empty_store(), checked).unwrap_err();
             assert_safe_error(&err, ErrorCode::VaultError);
         });
@@ -1094,11 +1102,11 @@
     #[test]
     fn forward_times_out_per_command_and_closes_the_socket() {
         runtime().block_on(async {
-            // `complete` without the terminal `models_list`.
+            // `complete` without the terminal `devices_list`.
             let (port, server) = scripted_engine(|id| vec![Step::Send(json!({"op": "complete", "id": id}))]).await;
             let bridge = forward_bridge(Duration::from_millis(200));
             let started = Instant::now();
-            let command = json!({"type": "request_models_list"});
+            let command = json!({"type": "list_devices"});
             let err = forward_json(&bridge, &empty_store(), port, command, None).await.unwrap_err();
             assert_safe_error(&err, ErrorCode::Timeout);
             assert!(started.elapsed() >= Duration::from_millis(200));
@@ -1124,7 +1132,7 @@
             ];
             for script in scripts {
                 let (port, server) = scripted_engine(script).await;
-                let command = json!({"type": "delete_model", "model_id": "tiny", "model_type": "asr"});
+                let command = json!({"type": "pack_install", "pack_id": "stt"});
                 let err = forward_json(&bridge, &empty_store(), port, command, None).await.unwrap_err();
                 assert_safe_error(&err, ErrorCode::CommandRejected);
                 assert!(server.await.unwrap().client_closed);

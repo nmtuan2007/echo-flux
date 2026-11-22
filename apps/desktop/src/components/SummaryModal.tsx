@@ -14,6 +14,7 @@ export function SummaryModal() {
     cancelSummary,
     closeSummary,
     askAnswer,
+    askHistory,
     askLoading,
     askError,
     askMeeting,
@@ -26,6 +27,7 @@ export function SummaryModal() {
   const isAssistantEnabled = useEngineStore(isAssistantConfigured);
   const contentRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null);
   const [questionDraft, setQuestionDraft] = useState("");
   const canAsk = Boolean(
     isAssistantEnabled && connected && (engineConversationId || activeConversationId),
@@ -161,7 +163,7 @@ export function SummaryModal() {
             <div className="summary-ask-box" aria-label="Quick Ask">
               <div className="summary-ask-header">
                 <span className="summary-ask-title">💬 Quick Ask</span>
-                {askAnswer && (
+                {(askHistory.length > 0 || askAnswer) && (
                   <button type="button" className="btn-text" onClick={clearAsk}>
                     Clear
                   </button>
@@ -172,7 +174,11 @@ export function SummaryModal() {
                 onSubmit={(e) => {
                   e.preventDefault();
                   if (!questionDraft.trim() || askLoading) return;
-                  void askMeeting(questionDraft);
+                  void askMeeting(questionDraft).then(() => {
+                    if (!useEngineStore.getState().askError) {
+                      setQuestionDraft("");
+                    }
+                  });
                 }}
               >
                 <input
@@ -193,10 +199,40 @@ export function SummaryModal() {
                 </button>
               </form>
               {askError && <p className="summary-ask-error">{askError}</p>}
-              {askAnswer && (
-                <div className="summary-ask-answer">
-                  <MarkdownRenderer text={askAnswer} />
+              {askHistory.length > 0 ? (
+                <div className="summary-ask-history">
+                  {askHistory.map((turn) => (
+                    <div key={turn.id} className="summary-ask-turn">
+                      <div className="summary-ask-question-row">
+                        <span className="summary-ask-question">{turn.question}</span>
+                        <button
+                          type="button"
+                          className="btn-text summary-ask-copy"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(turn.answer);
+                              setCopiedTurnId(turn.id);
+                              setTimeout(() => setCopiedTurnId((cur) => (cur === turn.id ? null : cur)), 2000);
+                            } catch {
+                              // Clipboard API unavailable
+                            }
+                          }}
+                        >
+                          {copiedTurnId === turn.id ? "✓ Copied" : "Copy"}
+                        </button>
+                      </div>
+                      <div className="summary-ask-answer">
+                        <MarkdownRenderer text={turn.answer} />
+                      </div>
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                askAnswer && (
+                  <div className="summary-ask-answer">
+                    <MarkdownRenderer text={askAnswer} />
+                  </div>
+                )
               )}
             </div>
           )}

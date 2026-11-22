@@ -54,6 +54,12 @@ AUTO_LANGUAGE = "auto"
 SAMPLE_RATE = 16000
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("float16", "int8_float16", "int8", "float32")
+QUALITY_PRESETS = ("fast", "balanced", "accurate")
+_QUALITY_MODEL_MAP: Dict[str, str] = {
+    "fast": "tiny",
+    "balanced": "small",
+    "accurate": "medium",
+}
 # Mirrors the engine's per-stream capture queue bound.
 DEFAULT_MAX_PENDING_FRAMES = 500
 
@@ -105,6 +111,7 @@ class LocalSTTSettings:
     language: str = AUTO_LANGUAGE
     device: str = "auto"
     compute_type: str = "float16"
+    quality_preset: str = "balanced"
 
     @classmethod
     def from_options(cls, options: Dict[str, Any]) -> "LocalSTTSettings":
@@ -114,6 +121,7 @@ class LocalSTTSettings:
             language=options.get("language", defaults.language),
             device=options.get("device", defaults.device),
             compute_type=options.get("compute_type", defaults.compute_type),
+            quality_preset=options.get("quality_preset", defaults.quality_preset),
         )
 
 
@@ -127,6 +135,8 @@ def validate_settings(settings: LocalSTTSettings) -> None:
         raise _invalid("device")
     if settings.compute_type not in COMPUTE_TYPES:
         raise _invalid("compute_type")
+    if settings.quality_preset not in QUALITY_PRESETS:
+        raise _invalid("quality_preset")
 
 
 # ── Pack resolution ──────────────────────────────────────────────────────────
@@ -158,6 +168,7 @@ def resolve_stt_pack(
     probe: HardwareProbe,
     language: Optional[str],
     installer_factory: InstallerFactory = _default_installer,
+    quality_preset: str = "balanced",
 ) -> ResolvedSTTPack:
     """Pick the STT pack for this machine. Blocking (hardware probe, filesystem)."""
     profile = probe.probe()
@@ -186,7 +197,13 @@ def resolve_stt_pack(
             )
         )
     if pack.source is PackSource.LEGACY_RUNTIME:
-        return ResolvedSTTPack(pack.pack_id, pack.version, selection.reason, pack.legacy_model_id)
+        model_size = _QUALITY_MODEL_MAP.get(quality_preset, pack.legacy_model_id)
+        pack_id = (
+            f"legacy-faster-whisper-{model_size}"
+            if model_size in ("tiny", "small", "medium")
+            else pack.pack_id
+        )
+        return ResolvedSTTPack(pack_id, pack.version, selection.reason, model_size)
     installed = installer_factory(catalog, probe).active(pack.pack_id)
     if pack.runtime != "ctranslate2" or installed is None:
         raise ProviderRuntimeError(
@@ -433,7 +450,11 @@ class LocalSTTProvider(StreamingSTTProvider):
         from engine.core.config import TranscriptionConfig
 
         pack = resolve_stt_pack(
-            self._catalog, self._probe, self._settings.language, self._installer_factory
+            self._catalog,
+            self._probe,
+            self._settings.language,
+            self._installer_factory,
+            quality_preset=self._settings.quality_preset,
         )
         backend = None
         try:
@@ -471,7 +492,11 @@ class LocalSTTProvider(StreamingSTTProvider):
                 )
             )
         return resolve_stt_pack(
-            self._catalog, self._probe, self._settings.language, self._installer_factory
+            self._catalog,
+            self._probe,
+            self._settings.language,
+            self._installer_factory,
+            quality_preset=self._settings.quality_preset,
         )
 
     @staticmethod

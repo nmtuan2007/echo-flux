@@ -78,6 +78,74 @@ export type {
   TestConnectionPhase,
 } from "./providerCatalog";
 
+export interface PipelineReadiness {
+  ready: boolean;
+  reason: string | null;
+  targetService?: ServiceName;
+}
+
+export function derivePipelineReadiness(state: {
+  connected: boolean;
+  services: ReturnType<typeof defaultServices>;
+  config: EngineConfig;
+  consent: CloudConsentState;
+  packStatus: Record<string, PackStatusItem>;
+}): PipelineReadiness {
+  if (!state.connected) {
+    return { ready: false, reason: "Engine offline" };
+  }
+
+  const sttSvc = state.services?.stt;
+  const sttManifest = sttSvc ? findProvider("stt", sttSvc.providerId) : undefined;
+  const sttIsCloud = Boolean(sttManifest && sttManifest.protocolFamily !== "local");
+  const sttMissingCred =
+    sttIsCloud && (!state.consent?.stt || Object.keys(sttSvc?.credentialRefs || {}).length === 0);
+  const sttMissingLocal = !sttIsCloud && Boolean(state.packStatus.stt && !state.packStatus.stt.isReady);
+
+  if (sttMissingCred) {
+    return { ready: false, reason: "STT key/consent needed", targetService: "stt" };
+  }
+  if (sttMissingLocal) {
+    return { ready: false, reason: "Offline STT model needed", targetService: "stt" };
+  }
+
+  const translationEnabled = state.services?.translation?.enabled ?? state.config.translationEnabled;
+  if (translationEnabled) {
+    const transSvc = state.services?.translation;
+    const transManifest = transSvc ? findProvider("translation", transSvc.providerId) : undefined;
+    const transIsCloud = Boolean(transManifest && transManifest.protocolFamily !== "local");
+    const targetLang =
+      (transSvc?.options?.target_lang as string) || state.config.targetLang || "vi";
+
+    if (!transIsCloud && state.packStatus.translation?.languageSupported === false) {
+      return {
+        ready: false,
+        reason: `Offline Marian unsupported (→ ${targetLang})`,
+        targetService: "translation",
+      };
+    }
+    if (
+      transIsCloud &&
+      (!state.consent?.translation || Object.keys(transSvc?.credentialRefs || {}).length === 0)
+    ) {
+      return {
+        ready: false,
+        reason: "Translation key/consent needed",
+        targetService: "translation",
+      };
+    }
+    if (!transIsCloud && state.packStatus.translation && !state.packStatus.translation.isReady) {
+      return {
+        ready: false,
+        reason: "Offline Translation model needed",
+        targetService: "translation",
+      };
+    }
+  }
+
+  return { ready: true, reason: null };
+}
+
 export const DEFAULT_CONFIG: EngineConfig = {
   host: "127.0.0.1",
   port: 8765,
@@ -729,6 +797,10 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
         for (const cap of caps) {
           try {
             const cmd: Record<string, unknown> = { type: "pack_check_readiness", capability: cap };
+            if (cap === "stt") {
+              const qp = services?.stt?.options?.quality_preset;
+              if (typeof qp === "string" && qp) cmd.quality_preset = qp;
+            }
             if (cap === "translation") {
               cmd.source_lang =
                 (services?.translation?.options?.source_lang as string) || config.sourceLang || "en";

@@ -4,10 +4,18 @@ import { CloudConsent } from "./CloudConsent";
 import { LocalPackStatus } from "./LocalPackStatus";
 
 export function OnboardingDialog() {
-  const { onboardingCompleted, hasConsentedToCloud, setOnboardingCompleted } = useEngineStore();
+  const {
+    onboardingCompleted,
+    hasConsentedToCloud,
+    setOnboardingCompleted,
+    services,
+    updateServiceConfig,
+    updateConfig,
+  } = useEngineStore();
   const [step, setStep] = useState<number>(1);
   const [sttReady, setSttReady] = useState<boolean>(false);
   const [transReady, setTransReady] = useState<boolean>(false);
+  const translationEnabled = services.translation.enabled;
 
   if (onboardingCompleted) return null;
 
@@ -43,7 +51,22 @@ export function OnboardingDialog() {
 
             <div className="onboarding-packs-container">
               <LocalPackStatus capability="stt" onStatusChange={setSttReady} />
-              <LocalPackStatus capability="translation" onStatusChange={setTransReady} />
+              <label className="onboarding-toggle-row">
+                <input
+                  type="checkbox"
+                  checked={translationEnabled}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    updateServiceConfig("translation", { enabled });
+                    updateConfig({ translationEnabled: enabled });
+                    if (!enabled) setTransReady(false);
+                  }}
+                />
+                <span>Enable Live Translation (downloads ~300 MB offline pack)</span>
+              </label>
+              {translationEnabled && (
+                <LocalPackStatus capability="translation" onStatusChange={setTransReady} />
+              )}
             </div>
 
             <div className="onboarding-footer">
@@ -51,7 +74,7 @@ export function OnboardingDialog() {
                 Skip Setup
               </button>
               <button type="button" className="btn btn-primary" onClick={() => setStep(2)}>
-                {sttReady && transReady ? "Next →" : "Continue →"}
+                {sttReady && (!translationEnabled || transReady) ? "Next →" : "Continue →"}
               </button>
             </div>
           </div>

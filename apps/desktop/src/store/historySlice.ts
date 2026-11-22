@@ -435,9 +435,13 @@ export function createHistoryActions(
           summaryText: target.summary || "",
           summaryVisible: false,
           summaryLoading: false,
+          askAnswer: "",
+          askHistory: [],
+          askError: null,
           activeConversationId: id,
           pendingTitle: target.name || "",
           isViewingHistory: !continueSession,
+          preserveEntriesOnStart: continueSession,
           ...(continueSession ? { preparedConversationId: id, engineConversationId: id } : {}),
         });
         return;
@@ -456,10 +460,14 @@ export function createHistoryActions(
           summaryText: hydrated.summaryText,
           summaryVisible: false,
           summaryLoading: false,
+          askAnswer: "",
+          askHistory: [],
+          askError: null,
           activeConversationId: id,
           engineConversationId: id,
           isViewingHistory: !continueSession,
           preparedConversationId: continueSession ? id : null,
+          preserveEntriesOnStart: continueSession,
           pendingTitle: hydrated.title,
           ...(hydrated.sourceLabels ? { sourceLabels: hydrated.sourceLabels } : {}),
         });

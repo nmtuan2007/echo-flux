@@ -40,10 +40,12 @@ export function LocalPackStatus({
     (services?.translation?.options?.source_lang as string) || config.sourceLang || "en";
   const targetLang =
     (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
+  const qualityPreset =
+    (services?.stt?.options?.quality_preset as string) || "balanced";
 
   useEffect(() => {
     void checkPackReadiness(capability);
-  }, [capability, connected, checkPackReadiness, sourceLang, targetLang]);
+  }, [capability, connected, checkPackReadiness, sourceLang, targetLang, qualityPreset]);
 
   const item = packStatus[capability];
   const isReady = Boolean(item?.isReady);

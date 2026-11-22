@@ -21,6 +21,7 @@ export const OverlayPanel: React.FC = () => {
     engineConversationId,
     suggestionLoading,
     audioLevels,
+    shortcutsEnabled,
     requestAssist,
   } = useEngineStore();
   const assistantEnabled = useEngineStore(isAssistantConfigured);
@@ -89,7 +90,15 @@ export const OverlayPanel: React.FC = () => {
     }
   }, [entries, partials]);
 
+  useEffect(() => {
+    if (!shortcutsEnabled && isLocked) {
+      void invoke("set_ignore_cursor_events", { ignore: false }).catch(() => {});
+      setIsLocked(false);
+    }
+  }, [shortcutsEnabled, isLocked]);
+
   const toggleLock = async () => {
+    if (!shortcutsEnabled) return;
     try {
       const newLocked = !isLocked;
       await invoke("set_ignore_cursor_events", { ignore: newLocked });
@@ -246,7 +255,12 @@ export const OverlayPanel: React.FC = () => {
               type="button"
               className="overlay-btn"
               onClick={toggleLock}
-              title="Lock to click through to apps behind it. Unlock anytime with Ctrl+Shift+U"
+              disabled={!shortcutsEnabled}
+              title={
+                shortcutsEnabled
+                  ? "Lock to click through to apps behind it. Unlock anytime with Ctrl+Shift+U"
+                  : "Enable Global Keyboard Shortcuts in Settings to use click-through Lock"
+              }
             >
               Lock
             </button>

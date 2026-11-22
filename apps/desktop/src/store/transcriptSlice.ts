@@ -340,8 +340,9 @@ export function applyTranslationUpdate(
   const translation = message.translation as string;
   const entryId = message.entry_id as string | undefined;
   const sourceText = message.source_text as string;
+  const rawError = isRecord(message.translation_error) ? message.translation_error : null;
 
-  if (!translation) return {};
+  if (!translation && !rawError) return {};
 
   const newEntries = [...state.entries];
   let foundIndex = -1;
@@ -383,7 +384,22 @@ export function applyTranslationUpdate(
     return {};
   }
 
-  const next: TranscriptEntry = { ...target, translation, translationFinal: isFinal };
+  if (!translation && rawError) {
+    const code = nonEmptyString(rawError.code) ?? "failed";
+    const errMsg = nonEmptyString(rawError.message) ?? "Translation failed for this segment.";
+    newEntries[foundIndex] = {
+      ...target,
+      translationError: { code, message: errMsg },
+    };
+    return { entries: newEntries };
+  }
+
+  const next: TranscriptEntry = {
+    ...target,
+    translation,
+    translationFinal: isFinal,
+    translationError: null,
+  };
   if (revision !== undefined) next.translationRevision = revision;
   const provider =
     nonEmptyString(message.translation_provider) ?? nonEmptyString(message.translation_backend);
@@ -658,6 +674,8 @@ export interface SttNotice {
   fallbacks: { source: string; from: string }[];
   continuityCount: number;
   latestContinuity: ContinuityInterval | null;
+  translationFallback: boolean;
+  translationErrorCount: number;
 }
 
 // Fallback and continuity warnings for the visible conversation. Entries carry them, so they
@@ -669,9 +687,13 @@ export function deriveSttNotice(
 ): SttNotice {
   const fallbacks = new Map<string, string>();
   const intervals = new Map<string, ContinuityInterval>();
+  let translationFallback = false;
+  let translationErrorCount = 0;
   for (const entry of entries) {
     if (entry.sttFallbackFrom && entry.source) fallbacks.set(entry.source, entry.sttFallbackFrom);
     if (entry.continuity) intervals.set(continuityKey(entry.continuity), entry.continuity);
+    if (entry.translationFallback) translationFallback = true;
+    if (entry.translationError) translationErrorCount += 1;
   }
   if (running) {
     for (const stream of Object.values(sttStreams)) {
@@ -689,6 +711,8 @@ export function deriveSttNotice(
       .sort((a, b) => streamRank(a.source) - streamRank(b.source)),
     continuityCount: intervals.size,
     latestContinuity: latest,
+    translationFallback,
+    translationErrorCount,
   };
 }
 
@@ -752,8 +776,12 @@ export const createTranscriptSlice =
           ...transcriptResetState(),
           summaryText: "",
           summaryVisible: false,
+          askAnswer: "",
+          askHistory: [],
+          askError: null,
           activeConversationId: null,
           isViewingHistory: false,
+          preserveEntriesOnStart: false,
           pendingTitle: "",
         });
       },

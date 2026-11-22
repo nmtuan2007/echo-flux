@@ -239,6 +239,7 @@ def test_legacy_flat_start_config_resolves_once_to_an_immutable_local_session():
     assert config.primary.provider_id == config.fallback.provider_id == "local"
     assert dict(config.primary.options) == {
         "language": "vi",
+        "quality_preset": "balanced",
         "device": "cpu",
         "compute_type": "int8",
     }

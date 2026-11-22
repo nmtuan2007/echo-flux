@@ -165,10 +165,6 @@ export async function forwardStop(): Promise<ControlForwardResult> {
 // dedicated commands above.
 export const FORWARDED_COMMAND_TYPES = [
   "list_devices",
-  "request_models_list",
-  "download_model",
-  "delete_model",
-  "search_hub",
   "request_suggestion",
   "request_assist",
   "configure_assistant",

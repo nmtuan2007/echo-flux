@@ -215,6 +215,19 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
           data-translation-state={entry.translationFinal === false ? "draft" : "final"}
         >
           {entry.translation}
+          {entry.translationFallback && (
+            <span
+              className="transcript-translation-fallback"
+              title="Translated using Local fallback provider"
+            >
+              Local fallback
+            </span>
+          )}
+        </div>
+      )}
+      {translationEnabled && !entry.translation && entry.translationError && (
+        <div className="transcript-translation-error" role="status">
+          ⚠ {entry.translationError.message}
         </div>
       )}
       <AssistPanel entry={entry} />
@@ -269,7 +282,14 @@ function SttNoticeBar() {
     [entries, sttStreams, running],
   );
 
-  if (notice.fallbacks.length === 0 && notice.continuityCount === 0) return null;
+  if (
+    notice.fallbacks.length === 0 &&
+    notice.continuityCount === 0 &&
+    !notice.translationFallback &&
+    notice.translationErrorCount === 0
+  ) {
+    return null;
+  }
 
   return (
     <div className="stt-notice" role="status">
@@ -278,6 +298,17 @@ function SttNoticeBar() {
           {resolveSourceLabel(f.source, sourceLabels)}: switched to Local from {sttProviderLabel(f.from)}
         </span>
       ))}
+      {notice.translationFallback && (
+        <span className="stt-notice-item stt-notice-fallback">
+          Translation switched to Local fallback
+        </span>
+      )}
+      {notice.translationErrorCount > 0 && (
+        <span className="stt-notice-item stt-notice-continuity">
+          Translation failed on {notice.translationErrorCount} segment
+          {notice.translationErrorCount !== 1 ? "s" : ""}
+        </span>
+      )}
       {notice.latestContinuity && (
         <span className="stt-notice-item stt-notice-continuity">
           Continuity uncertain in {notice.continuityCount} interval
