@@ -7,12 +7,26 @@ logger = logging.getLogger("echoflux.core.progress")
 
 # Global callback to receive progress updates: callback(model_name: str, percent: int)
 _progress_callback: Optional[Callable[[str, int], None]] = None
+_progress_stage: str = "downloading"
 _lock = threading.Lock()
 
+
 def set_progress_callback(callback: Optional[Callable[[str, int], None]]):
-    global _progress_callback
+    global _progress_callback, _progress_stage
     with _lock:
         _progress_callback = callback
+        _progress_stage = "downloading"
+
+
+def set_progress_stage(stage: str) -> None:
+    global _progress_stage
+    with _lock:
+        _progress_stage = stage
+
+
+def get_progress_stage() -> str:
+    with _lock:
+        return _progress_stage
 
 
 class HijackedTqdm(std_tqdm):

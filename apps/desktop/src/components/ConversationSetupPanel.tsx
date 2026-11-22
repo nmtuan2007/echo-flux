@@ -156,9 +156,9 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
                 />
               </div>
             </div>
-            <div className="setup-disclaimer" role="note">
-              ℹ <strong>Stream Identification:</strong> Labels represent physical audio input devices (Microphone vs System Audio Loopback). EchoFlux does not perform algorithmic voice diarization.
-            </div>
+            <p className="setup-note-inline">
+              Labels match physical devices (Mic vs System audio); voice diarization is not performed.
+            </p>
           </div>
 
           {/* Context Profiles Attachment */}
@@ -207,9 +207,9 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
               </div>
             )}
 
-            <div className="setup-snapshot-notice" role="note">
-              🔒 <strong>Snapshot Notice:</strong> When this session begins, an immutable copy of all attached profiles is captured. Future edits or deletions to these profiles will never alter this session's history.
-            </div>
+            <p className="setup-note-inline">
+              Attached profiles are snapshotted when the session starts so future edits never alter history.
+            </p>
           </div>
 
           {/* Actions */}

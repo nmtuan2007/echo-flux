@@ -142,6 +142,9 @@ class MarianBackend(TranslationBackend):
     def _convert_model(self, model_name: str, output_path: Path):
         import ctranslate2.converters
 
+        from engine.core.progress import set_progress_stage
+
+        set_progress_stage("converting")
         logger.info("Converting '%s' to CTranslate2 INT8 format...", model_name)
         try:
             converter = ctranslate2.converters.TransformersConverter(model_name)

@@ -82,7 +82,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   host: "127.0.0.1",
   port: 8765,
   modelSize: "small",
-  language: "en",
+  language: "auto",
   device: "auto",
   translationEnabled: true,
   translationBackend: "online",
@@ -169,6 +169,18 @@ export type SecretStatus = Record<LegacySecretField, boolean>;
 export interface PackDownloadProgress {
   percent: number;
   model: string;
+  stage?: string;
+}
+
+const SHORTCUTS_ENABLED_KEY = "echoflux:shortcuts_enabled";
+
+function loadShortcutsEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    return window.localStorage?.getItem(SHORTCUTS_ENABLED_KEY) !== "false";
+  } catch {
+    return true;
+  }
 }
 
 const CONSENT_STATE_KEY = "echoflux:cloud_consent_state";
@@ -250,9 +262,15 @@ export interface SettingsSlice {
   consent: CloudConsentState;
   packStatus: Record<string, PackStatusItem>;
   packDownloads: Record<string, PackDownloadProgress>;
+  packInstallErrors: Record<string, string>;
   hardwareInfo: HardwareInfo | null;
   isPackChecking: boolean;
+  shortcutsEnabled: boolean;
+  settingsFocusService: ServiceName | null;
 
+  setShortcutsEnabled: (enabled: boolean) => void;
+  openSettingsFor: (service?: ServiceName) => void;
+  clearSettingsFocus: () => void;
   setOnboardingCompleted: (completed: boolean) => void;
   setHasConsentedToCloud: (consented: boolean) => void;
   acceptCloudConsent: (consents?: Partial<CloudConsentState>) => void;
@@ -363,9 +381,30 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
     consent: initialConsent,
     packStatus: {},
     packDownloads: {},
+    packInstallErrors: {},
     hardwareInfo: null,
     isPackChecking: false,
+    shortcutsEnabled: loadShortcutsEnabled(),
+    settingsFocusService: null,
     manifestsLoaded: false,
+
+    setShortcutsEnabled: (enabled) => {
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage?.setItem(SHORTCUTS_ENABLED_KEY, String(enabled));
+        }
+      } catch {}
+      set({ shortcutsEnabled: enabled });
+    },
+
+    openSettingsFor: (service) => {
+      set({ settingsFocusService: service ?? null });
+      get().setActiveView("settings");
+    },
+
+    clearSettingsFocus: () => {
+      set({ settingsFocusService: null });
+    },
 
     setActiveView: (view) => {
       const { activeView, transport, config } = get();
@@ -758,9 +797,17 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       packId: string,
       options?: { sourceLang?: string; targetLang?: string },
     ) => {
-      set((state) => ({
-        packDownloads: { ...state.packDownloads, [packId]: { percent: 0, model: packId } },
-      }));
+      set((state) => {
+        const nextErrors = { ...state.packInstallErrors };
+        delete nextErrors[packId];
+        return {
+          packInstallErrors: nextErrors,
+          packDownloads: {
+            ...state.packDownloads,
+            [packId]: { percent: 0, model: packId, stage: "downloading" },
+          },
+        };
+      });
       const pollTimer = setInterval(async () => {
         try {
           const res = await forwardCommand({ type: "pack_status", pack_id: packId });
@@ -773,6 +820,7 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
                 [packId]: {
                   percent: prog.percent,
                   model: typeof prog.model === "string" && prog.model ? prog.model : packId,
+                  stage: typeof prog.stage === "string" ? prog.stage : "downloading",
                 },
               },
             }));
@@ -787,10 +835,23 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
           ...(options?.targetLang ? { target_lang: options.targetLang } : {}),
         });
         set((state) => ({
-          packDownloads: { ...state.packDownloads, [packId]: { percent: 100, model: packId } },
+          packDownloads: {
+            ...state.packDownloads,
+            [packId]: { percent: 100, model: packId, stage: "ready" },
+          },
         }));
         return true;
-      } catch {
+      } catch (err) {
+        const code = errorCodeOf(err);
+        const msg =
+          code === "timeout"
+            ? "Download timed out. Check your connection and retry."
+            : code === "command_rejected"
+              ? "Download cancelled or another installation is already running."
+              : `Download failed (${code}).`;
+        set((state) => ({
+          packInstallErrors: { ...state.packInstallErrors, [packId]: msg },
+        }));
         return false;
       } finally {
         clearInterval(pollTimer);

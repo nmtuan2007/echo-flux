@@ -50,6 +50,8 @@ export function SettingsPanel() {
     audioProbeResult,
     refreshServiceCredentials,
     loadProviderManifests,
+    shortcutsEnabled,
+    setShortcutsEnabled,
   } = useEngineStore();
 
   // Auto-fetch device and model lists when connected.
@@ -159,6 +161,11 @@ export function SettingsPanel() {
             </button>
           </div>
         </div>
+        {!connected && (
+          <p className="settings-note">
+            Engine is offline or starting up — device list and audio checks become available once connected.
+          </p>
+        )}
 
         {audioProbeResult && (
           <div className="audio-probe-panel" role="status" aria-label="Audio signal check">
@@ -216,11 +223,11 @@ export function SettingsPanel() {
         </div>
       </details>
 
-      {/* ── Invisible/Pro UI ──────────────────────────────────────────────── */}
+      {/* ── Invisible/Pro UI & Shortcuts ─────────────────────────────── */}
       <section className="settings-section">
-         <h3 className="settings-section-title">✨ Pro UX Experience</h3>
+         <h3 className="settings-section-title">✨ Overlay &amp; Shortcuts</h3>
          <div className="settings-field settings-field-row">
-            <label htmlFor="stealth-mode">Hide from Screen Share (Stealth Mode)</label>
+            <label htmlFor="stealth-mode">Hide Overlay from Screen Share (Stealth Mode)</label>
             <input
                id="stealth-mode"
                type="checkbox"
@@ -231,6 +238,24 @@ export function SettingsPanel() {
          <p className="settings-note">
             When enabled, the Overlay Window will be invisible to OBS, Zoom, and Teams screen captures.
          </p>
+
+         <div className="settings-field settings-field-row" style={{ marginTop: "14px" }}>
+            <label htmlFor="shortcuts-enabled">Enable Global Keyboard Shortcuts</label>
+            <input
+               id="shortcuts-enabled"
+               type="checkbox"
+               checked={shortcutsEnabled}
+               onChange={(e) => setShortcutsEnabled(e.target.checked)}
+            />
+         </div>
+         {shortcutsEnabled && (
+           <ul className="settings-shortcuts-list">
+             <li><kbd>Ctrl+Shift+M</kbd> Start / Stop live session</li>
+             <li><kbd>Ctrl+Shift+O</kbd> Toggle Floating PiP Overlay</li>
+             <li><kbd>Ctrl+Shift+S</kbd> Request AI Assist on latest remote segment</li>
+             <li><kbd>Ctrl+Shift+U</kbd> Unlock click-through Overlay</li>
+           </ul>
+         )}
       </section>
     </div>
   );

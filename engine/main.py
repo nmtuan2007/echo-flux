@@ -698,6 +698,13 @@ class EchoFluxEngine:
             self._process_threads.append(pt)
 
         self._result_task = asyncio.create_task(self._broadcast_loop())
+        if any(getattr(v, "init_error", None) for v in self._vads.values()):
+            self._result_queue.put(
+                {
+                    "type": "error",
+                    "message": "Voice Activity Detection could not initialize; running without silence filtering.",
+                }
+            )
 
     async def _stop_pipeline(self):
         if not self._running:
@@ -1296,6 +1303,11 @@ class EchoFluxEngine:
 
         task.add_done_callback(_cleanup_summary)
 
+    async def broadcast_event(self, message: dict) -> None:
+        """Broadcast an event to authenticated event-plane subscribers only."""
+        if self._ws_server and self._ws_server.is_authenticated:
+            await self._ws_server.broadcast(message)
+
     async def _run_summary(self, service, command, websocket):
         conversation_id = command.conversation_id
         streamed = []
@@ -1304,6 +1316,7 @@ class EchoFluxEngine:
             streamed.append(len(text))
             chunk_msg = summary_chunk_message(text, conversation_id)
             await self._send_reply(websocket, chunk_msg)
+            await self.broadcast_event(chunk_msg)
 
         try:
             outcome = await service.request_summary(conversation_id, on_chunk=_on_chunk)

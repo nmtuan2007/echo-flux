@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useEngineStore } from "../store/engineStore";
 import {
   deriveTestPhase,
@@ -64,6 +65,17 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const testServiceConnection = useEngineStore((s) => s.testServiceConnection);
   const consent = useEngineStore((s) => s.consent);
   const acceptCloudConsent = useEngineStore((s) => s.acceptCloudConsent);
+  const settingsFocusService = useEngineStore((s) => s.settingsFocusService);
+  const clearSettingsFocus = useEngineStore((s) => s.clearSettingsFocus);
+  const cardRef = useRef<HTMLElement>(null);
+  const isFocused = settingsFocusService === service;
+
+  useEffect(() => {
+    if (!isFocused) return;
+    cardRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+    const timer = setTimeout(() => clearSettingsFocus(), 2500);
+    return () => clearTimeout(timer);
+  }, [isFocused, clearSettingsFocus]);
 
   const id = `service-${service}`;
   const copy = SERVICE_COPY[service];
@@ -145,7 +157,8 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
 
   return (
     <section
-      className={`service-card${locked ? " is-locked" : ""}`}
+      ref={cardRef}
+      className={`service-card${locked ? " is-locked" : ""}${isFocused ? " is-focused" : ""}`}
       aria-labelledby={`${id}-title`}
       data-service={service}
     >

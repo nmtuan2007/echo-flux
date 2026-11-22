@@ -127,6 +127,41 @@ def is_local_model_ready(
         return False
 
 
+def probe_hardware_with_gpu(probe: Any) -> Any:
+    """Run ``probe.probe()`` and lazily enrich GPU info via ctranslate2 when using SystemHardwareProbe."""
+    from engine.local_models.selector import GpuInfo, HardwareProfile, SystemHardwareProbe
+
+    profile: HardwareProfile = probe.probe()
+    if profile.gpu is not None or type(probe) is not SystemHardwareProbe:
+        return profile
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() <= 0:
+            return profile
+        vram_gb = 4.0
+        with contextlib.suppress(Exception):
+            import subprocess
+
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                timeout=1.5,
+                text=True,
+            )
+            first_mb = float(out.strip().splitlines()[0])
+            if first_mb > 0:
+                vram_gb = round(first_mb / 1024.0, 2)
+        return HardwareProfile(
+            cpu_cores=profile.cpu_cores,
+            ram_gb=profile.ram_gb,
+            platform=profile.platform,
+            architecture=profile.architecture,
+            gpu=GpuInfo(backend="cuda", vram_gb=vram_gb),
+        )
+    except Exception:
+        return profile
+
+
 def probe_audio_stream(kind: str, device_id: Optional[str], duration_ms: int) -> Dict[str, Any]:
     """Sample a single audio stream briefly to measure input RMS level."""
     import math

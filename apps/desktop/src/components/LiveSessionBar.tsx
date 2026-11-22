@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime } from "../lib/engineBridge";
 import { EngineConfig, useEngineStore } from "../store/engineStore";
 import { findProvider, PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
@@ -31,14 +31,16 @@ export function LiveSessionBar() {
     summaryText,
     packStatus,
     consent,
+    availableMics,
+    availableSpeakers,
+    requestDeviceList,
     checkPackReadiness,
-    setActiveView,
+    openSettingsFor,
     updateConfig,
     updateServiceConfig,
     setServiceOptionInput,
     openSetup,
     clearTranscript,
-    requestSummary,
     openSummary,
     renameConversation,
     setPendingTitle,
@@ -48,6 +50,22 @@ export function LiveSessionBar() {
   const [elapsedSec, setElapsedSec] = useState(0);
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
+  const [audioPopoverOpen, setAudioPopoverOpen] = useState(false);
+  const audioPopoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!audioPopoverOpen) return;
+    if (connected && availableMics.length === 0 && availableSpeakers.length === 0) {
+      requestDeviceList();
+    }
+    const onDocClick = (e: MouseEvent) => {
+      if (audioPopoverRef.current && !audioPopoverRef.current.contains(e.target as Node)) {
+        setAudioPopoverOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [audioPopoverOpen, connected, availableMics.length, availableSpeakers.length, requestDeviceList]);
 
   useEffect(() => {
     if (connected && isTauriRuntime() && !packStatus.stt) {
@@ -116,6 +134,13 @@ export function LiveSessionBar() {
             : transMissingLocal
               ? "Offline Translation model needed"
               : null;
+
+  const setupTargetService =
+    sttMissingCred || sttMissingLocal
+      ? "stt"
+      : transUnsupportedLocal || transMissingCred || transMissingLocal
+        ? "translation"
+        : undefined;
 
   const buildExportEntries = (): ExportEntry[] =>
     entries.map((e) => ({
@@ -271,6 +296,74 @@ export function LiveSessionBar() {
             <option value="both">🔄 Mic + System</option>
           </select>
 
+          <div className="quick-audio-popover-wrap" ref={audioPopoverRef}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => setAudioPopoverOpen((v) => !v)}
+              disabled={isToggling || !connected}
+              title="Select microphone or speaker device"
+              aria-expanded={audioPopoverOpen}
+            >
+              Devices ▾
+            </button>
+            {audioPopoverOpen && (
+              <div className="quick-audio-popover" role="dialog" aria-label="Quick audio devices">
+                {(config.audioSource === "microphone" || config.audioSource === "both") && (
+                  <label className="quick-audio-field">
+                    <span>Microphone</span>
+                    <select
+                      value={config.micDeviceId}
+                      onChange={(e) => updateConfig({ micDeviceId: e.target.value })}
+                    >
+                      <option value="">Default microphone</option>
+                      {availableMics.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {(config.audioSource === "system" || config.audioSource === "both") && (
+                  <label className="quick-audio-field">
+                    <span>Speaker (Loopback)</span>
+                    <select
+                      value={config.speakerDeviceId}
+                      onChange={(e) => updateConfig({ speakerDeviceId: e.target.value })}
+                    >
+                      <option value="">Default speaker loopback</option>
+                      {availableSpeakers.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <div className="quick-audio-actions">
+                  <button
+                    type="button"
+                    className="btn-text"
+                    onClick={requestDeviceList}
+                  >
+                    ↻ Refresh
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-text"
+                    onClick={() => {
+                      setAudioPopoverOpen(false);
+                      openSettingsFor();
+                    }}
+                  >
+                    Audio Settings →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <select
             className="quick-select"
             aria-label="Spoken language"
@@ -336,7 +429,7 @@ export function LiveSessionBar() {
             type="button"
             className={`readiness-pill ${setupReason ? "readiness-warn" : "readiness-ok"}`}
             onClick={() => {
-              if (setupReason && connected) setActiveView("settings");
+              if (setupReason && connected) openSettingsFor(setupTargetService);
             }}
             title={
               setupReason
@@ -348,37 +441,27 @@ export function LiveSessionBar() {
           </button>
         )}
 
-        {isAssistantEnabled && (
+        {(isAssistantEnabled || hasSummary || summaryLoading) && (
           <button
             type="button"
-            className={`btn btn-sm btn-summarize ${!canSummarize ? "btn-summarize-disabled" : ""}`}
-            onClick={requestSummary}
-            disabled={!canSummarize}
-            title={!hasActiveConversation ? "Start a meeting to summarize" : "Summarize this meeting with AI"}
-          >
-            📝 Summarize
-          </button>
-        )}
-
-        {isAssistantEnabled && hasActiveConversation && connected && (
-          <button
-            type="button"
-            className="btn btn-sm btn-secondary"
+            className={`btn btn-sm ${
+              hasSummary || summaryLoading ? "btn-view-summary" : "btn-summarize"
+            } ${!canSummarize && !hasSummary && !summaryLoading ? "btn-summarize-disabled" : ""}`}
             onClick={openSummary}
-            title="Ask AI a question about this meeting"
+            disabled={!canSummarize && !hasSummary && !summaryLoading}
+            title={
+              summaryLoading
+                ? "View streaming meeting summary"
+                : !hasActiveConversation && !hasSummary
+                  ? "Start a meeting to summarize or ask AI"
+                  : "Open AI Summary & Quick Ask"
+            }
           >
-            💬 Ask AI
-          </button>
-        )}
-
-        {(hasSummary || summaryLoading) && (
-          <button
-            type="button"
-            className="btn btn-sm btn-view-summary"
-            onClick={openSummary}
-            title={summaryLoading ? "View streaming meeting summary" : "View saved meeting summary"}
-          >
-            {summaryLoading ? "⏳ Summarizing..." : "📋 Summary"}
+            {summaryLoading
+              ? "⏳ Summarizing..."
+              : hasSummary
+                ? "📋 Summary & Ask"
+                : "✨ Summary & Ask"}
           </button>
         )}
 

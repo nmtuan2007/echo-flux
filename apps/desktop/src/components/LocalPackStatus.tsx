@@ -22,6 +22,7 @@ export function LocalPackStatus({
     connected,
     packStatus,
     packDownloads,
+    packInstallErrors,
     hardwareInfo,
     services,
     config,
@@ -51,9 +52,14 @@ export function LocalPackStatus({
     item?.packId ||
     (capability === "stt" ? "legacy-faster-whisper-small" : "legacy-marian-opus-mt");
   const activeProgress = packDownloads[packId];
+  const anotherDownloadActive =
+    !activeProgress && Object.keys(packDownloads).length > 0;
   const isDownloadingThis = installing || Boolean(activeProgress);
   const percent = activeProgress?.percent ?? 0;
   const activeModelName = activeProgress?.model;
+  const activeStage = activeProgress?.stage;
+  const storeErrorMsg = packInstallErrors[packId];
+  const displayError = errorMsg || storeErrorMsg || null;
 
   useEffect(() => {
     onStatusChange?.(isReady);
@@ -70,7 +76,7 @@ export function LocalPackStatus({
     const ok = await installLocalPack(packId, langOptions);
     if (ok) {
       await checkPackReadiness(capability);
-    } else {
+    } else if (!useEngineStore.getState().packInstallErrors[packId]) {
       setErrorMsg("Download failed or cancelled.");
     }
     setInstalling(false);
@@ -87,7 +93,7 @@ export function LocalPackStatus({
     const ok = await retryLocalPack(packId, langOptions);
     if (ok) {
       await checkPackReadiness(capability);
-    } else {
+    } else if (!useEngineStore.getState().packInstallErrors[packId]) {
       setErrorMsg("Retry failed. Check network connection.");
     }
     setInstalling(false);
@@ -96,13 +102,7 @@ export function LocalPackStatus({
   const cpuCores = hardwareInfo?.cpuCores ?? 8;
   const ramGb = hardwareInfo?.ramGb ?? 16;
   const hasGpu = hardwareInfo?.hasGpu ?? false;
-
-  let recommendedTier = "Standard Tier (Balanced)";
-  if (hasGpu || (cpuCores >= 8 && ramGb >= 16)) {
-    recommendedTier = "Advanced Tier (High Accuracy)";
-  } else if (cpuCores <= 4 || ramGb <= 8) {
-    recommendedTier = "Minimal Tier (Lightweight)";
-  }
+  const isLegacyPack = packId.startsWith("legacy-");
 
   const title =
     capability === "stt" ? "Offline Speech Model (Whisper)" : "Offline Translation Model (Marian)";
@@ -138,16 +138,22 @@ export function LocalPackStatus({
         {hardwareInfo && (
           <div className="hardware-info-box">
             <span className="hardware-spec">
-              System: {cpuCores} Cores · {ramGb} GB RAM {hasGpu ? "· GPU Available" : ""}
+              System: {cpuCores} Cores · {ramGb} GB RAM {hasGpu ? "· GPU Available" : "· CPU Mode"}
             </span>
-            <span className="hardware-tier-recommendation">Recommended: {recommendedTier}</span>
+            {!isLegacyPack && (
+              <span className="hardware-tier-recommendation">Tier: {item?.tier || "standard"}</span>
+            )}
           </div>
         )}
 
         {isDownloadingThis && (
           <div className="pack-progress-area">
             <div className="pack-progress-meta">
-              <span>Downloading ({activeModelName || title})...</span>
+              <span>
+                {activeStage === "converting"
+                  ? "Converting model (CTranslate2)..."
+                  : `Downloading (${activeModelName || title})...`}
+              </span>
               <span>{percent}%</span>
             </div>
             <div className="pack-progress-bar">
@@ -166,14 +172,14 @@ export function LocalPackStatus({
           </div>
         )}
 
-        {errorMsg && (
+        {displayError && (
           <div className="pack-error-alert" role="alert">
-            <span>⚠️ {errorMsg}</span>
+            <span>⚠️ {displayError}</span>
             <button
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={handleRetry}
-              disabled={disabled}
+              disabled={disabled || anotherDownloadActive}
             >
               Retry Download
             </button>
@@ -191,15 +197,18 @@ export function LocalPackStatus({
           </div>
         )}
 
-        {!isReady && !isDownloadingThis && !errorMsg && languageSupported && (
+        {!isReady && !isDownloadingThis && !displayError && languageSupported && (
           <div className="pack-action-row">
             <button
               type="button"
               className="btn btn-primary pack-download-btn"
               onClick={handleDownload}
-              disabled={disabled}
+              disabled={disabled || anotherDownloadActive}
+              title={anotherDownloadActive ? "Wait for the current model download to finish" : undefined}
             >
-              Download Model Pack (~{sizeLabel})
+              {anotherDownloadActive
+                ? "Waiting for other download..."
+                : `Download Model Pack (~${sizeLabel})`}
             </button>
           </div>
         )}

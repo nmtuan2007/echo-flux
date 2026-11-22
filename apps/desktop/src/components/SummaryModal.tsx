@@ -10,6 +10,7 @@ export function SummaryModal() {
     summaryText,
     summaryWarning,
     summaryError,
+    requestSummary,
     cancelSummary,
     closeSummary,
     askAnswer,
@@ -18,6 +19,7 @@ export function SummaryModal() {
     askMeeting,
     clearAsk,
     connected,
+    entries,
     activeConversationId,
     engineConversationId,
   } = useEngineStore();
@@ -27,6 +29,9 @@ export function SummaryModal() {
   const [questionDraft, setQuestionDraft] = useState("");
   const canAsk = Boolean(
     isAssistantEnabled && connected && (engineConversationId || activeConversationId),
+  );
+  const canGenerateSummary = Boolean(
+    isAssistantEnabled && connected && (engineConversationId || activeConversationId || entries.length > 0),
   );
 
   // Auto-scroll as content streams in
@@ -74,6 +79,16 @@ export function SummaryModal() {
             )}
           </div>
           <div className="summary-header-actions">
+            {canGenerateSummary && !summaryLoading && (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                onClick={requestSummary}
+                title={summaryText ? "Regenerate meeting summary" : "Generate meeting summary"}
+              >
+                {summaryText ? "↻ Regenerate" : "✨ Generate Summary"}
+              </button>
+            )}
             {summaryLoading && (
               <button
                 className="btn btn-secondary summary-cancel-btn"

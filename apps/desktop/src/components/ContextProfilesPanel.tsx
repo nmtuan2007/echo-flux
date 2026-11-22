@@ -184,32 +184,6 @@ export function ContextProfilesPanel({ onClose }: ContextProfilesPanelProps) {
           </div>
 
           <div className="profile-form-group">
-            <label className="profile-label">Content Format</label>
-            <div className="profile-format-toggle">
-              <label>
-                <input
-                  type="radio"
-                  name="format"
-                  value="markdown"
-                  checked={draftFormat === "markdown"}
-                  onChange={() => setDraftFormat("markdown")}
-                />{" "}
-                Markdown
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="format"
-                  value="text"
-                  checked={draftFormat === "text"}
-                  onChange={() => setDraftFormat("text")}
-                />{" "}
-                Plain Text
-              </label>
-            </div>
-          </div>
-
-          <div className="profile-form-group">
             <label className="profile-label">
               Profile Content
               <span

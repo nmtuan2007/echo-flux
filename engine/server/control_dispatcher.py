@@ -64,6 +64,9 @@ from engine.server.control_helpers import (
     probe_audio_stream as _probe_audio_stream,
 )
 from engine.server.control_helpers import (
+    probe_hardware_with_gpu as _probe_hardware_with_gpu,
+)
+from engine.server.control_helpers import (
     serialize_manifest as _serialize_manifest,
 )
 from engine.server.control_helpers import (
@@ -116,8 +119,10 @@ class ControlCommandDispatcher:
         self._summary_service = summary_service
 
         self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._summary_tasks_by_conv: Dict[str, asyncio.Task] = {}
         self._pack_cancels: Dict[str, threading.Event] = {}
         self._pack_progress: Dict[str, Dict[str, Any]] = {}
+        self._pack_install_active: Optional[str] = None
 
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {
             # Context Profiles
@@ -253,7 +258,16 @@ class ControlCommandDispatcher:
                 self._dispatch_summary_streaming(request_id, payload, websocket, tokens)
             )
             self._active_tasks[request_id] = task
-            task.add_done_callback(lambda _t: self._active_tasks.pop(request_id, None))
+            cid = payload.get("conversation_id")
+            if isinstance(cid, str) and cid:
+                self._summary_tasks_by_conv[cid] = task
+
+            def _cleanup_summary_task(done_task: asyncio.Task) -> None:
+                self._active_tasks.pop(request_id, None)
+                if isinstance(cid, str) and self._summary_tasks_by_conv.get(cid) is done_task:
+                    self._summary_tasks_by_conv.pop(cid, None)
+
+            task.add_done_callback(_cleanup_summary_task)
             return
 
         try:
@@ -909,7 +923,7 @@ class ControlCommandDispatcher:
         catalog = self._get_catalog()
         installer = self._get_installer()
         probe = self._get_probe()
-        profile: HardwareProfile = await asyncio.to_thread(probe.probe)
+        profile: HardwareProfile = await asyncio.to_thread(_probe_hardware_with_gpu, probe)
 
         hw_info = {
             "cpu_cores": profile.cpu_cores,
@@ -992,11 +1006,22 @@ class ControlCommandDispatcher:
 
         lowered = pack_id.lower()
         models_dir = Config().models_dir
+        if self._pack_install_active is not None:
+            raise DispatcherError(
+                "install_in_progress",
+                f"Another model installation ({self._pack_install_active}) is already running.",
+            )
+        self._pack_install_active = pack_id
         cancel_event = threading.Event()
         self._pack_cancels[pack_id] = cancel_event
-        self._pack_progress[pack_id] = {"active": True, "percent": 0, "model": pack_id}
+        self._pack_progress[pack_id] = {
+            "active": True,
+            "percent": 0,
+            "model": pack_id,
+            "stage": "downloading",
+        }
 
-        from engine.core.progress import set_progress_callback
+        from engine.core.progress import get_progress_stage, set_progress_callback
 
         def _on_progress(model_name: str, percent: int) -> None:
             if cancel_event.is_set():
@@ -1005,93 +1030,98 @@ class ControlCommandDispatcher:
                 "active": True,
                 "percent": max(0, min(100, int(percent))),
                 "model": model_name or pack_id,
+                "stage": get_progress_stage(),
             }
-
-        if "whisper" in lowered or lowered in ("base", "tiny", "small", "medium", "large"):
-            size = "base"
-            if "tiny" in lowered:
-                size = "tiny"
-            elif "small" in lowered:
-                size = "small"
-            elif "medium" in lowered:
-                size = "medium"
-            elif "large" in lowered:
-                size = "large-v3"
-
-            from faster_whisper.utils import download_model
-
-            set_progress_callback(_on_progress)
-            try:
-                # Use cache_dir so HuggingFace layout matches WhisperModel(..., download_root=models_dir).
-                out_path = await asyncio.to_thread(download_model, size, cache_dir=str(models_dir))
-                if cancel_event.is_set():
-                    raise InstallCancelledError("cancelled")
-                return {
-                    "installed": True,
-                    "pack_id": pack_id,
-                    "version": "1.0.0",
-                    "path": str(out_path),
-                    "active": True,
-                }
-            except InstallCancelledError:
-                raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
-            finally:
-                set_progress_callback(None)
-                self._pack_cancels.pop(pack_id, None)
-                self._pack_progress.pop(pack_id, None)
-
-        if "marian" in lowered or "opus" in lowered:
-            from engine.translation.marian_backend import MarianBackend
-
-            backend = MarianBackend()
-            set_progress_callback(_on_progress)
-            try:
-                await asyncio.to_thread(
-                    backend.load_model,
-                    {"translation.source_lang": src_lang, "translation.target_lang": tgt_lang},
-                )
-                if cancel_event.is_set():
-                    raise InstallCancelledError("cancelled")
-                out_path = str(backend._ct2_model_path or models_dir)
-                return {
-                    "installed": True,
-                    "pack_id": pack_id,
-                    "version": "1.0.0",
-                    "path": out_path,
-                    "active": True,
-                }
-            except InstallCancelledError:
-                raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
-            finally:
-                set_progress_callback(None)
-                with contextlib.suppress(Exception):
-                    backend.unload_model()
-                self._pack_cancels.pop(pack_id, None)
-                self._pack_progress.pop(pack_id, None)
-
-        installer = self._get_installer()
 
         try:
-            installed = await asyncio.to_thread(
-                installer.install,
-                pack_id=pack_id,
-                version=version,
-                cancel=cancel_event,
-            )
-            return {
-                "installed": True,
-                "pack_id": installed.pack_id,
-                "version": installed.version,
-                "path": str(installed.path),
-                "active": True,
-            }
-        except InstallCancelledError:
-            raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
-        except PackInstallError as err:
-            raise DispatcherError(err.code, err.detail or err.code) from None
+            if "whisper" in lowered or lowered in ("base", "tiny", "small", "medium", "large"):
+                size = "base"
+                if "tiny" in lowered:
+                    size = "tiny"
+                elif "small" in lowered:
+                    size = "small"
+                elif "medium" in lowered:
+                    size = "medium"
+                elif "large" in lowered:
+                    size = "large-v3"
+
+                from faster_whisper.utils import download_model
+
+                set_progress_callback(_on_progress)
+                try:
+                    # Use cache_dir so HuggingFace layout matches WhisperModel(..., download_root=models_dir).
+                    out_path = await asyncio.to_thread(download_model, size, cache_dir=str(models_dir))
+                    if cancel_event.is_set():
+                        raise InstallCancelledError("cancelled")
+                    return {
+                        "installed": True,
+                        "pack_id": pack_id,
+                        "version": "1.0.0",
+                        "path": str(out_path),
+                        "active": True,
+                    }
+                except InstallCancelledError:
+                    raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
+                finally:
+                    set_progress_callback(None)
+                    self._pack_cancels.pop(pack_id, None)
+                    self._pack_progress.pop(pack_id, None)
+
+            if "marian" in lowered or "opus" in lowered:
+                from engine.translation.marian_backend import MarianBackend
+
+                backend = MarianBackend()
+                set_progress_callback(_on_progress)
+                try:
+                    await asyncio.to_thread(
+                        backend.load_model,
+                        {"translation.source_lang": src_lang, "translation.target_lang": tgt_lang},
+                    )
+                    if cancel_event.is_set():
+                        raise InstallCancelledError("cancelled")
+                    out_path = str(backend._ct2_model_path or models_dir)
+                    return {
+                        "installed": True,
+                        "pack_id": pack_id,
+                        "version": "1.0.0",
+                        "path": out_path,
+                        "active": True,
+                    }
+                except InstallCancelledError:
+                    raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
+                finally:
+                    set_progress_callback(None)
+                    with contextlib.suppress(Exception):
+                        backend.unload_model()
+                    self._pack_cancels.pop(pack_id, None)
+                    self._pack_progress.pop(pack_id, None)
+
+            installer = self._get_installer()
+
+            try:
+                installed = await asyncio.to_thread(
+                    installer.install,
+                    pack_id=pack_id,
+                    version=version,
+                    cancel=cancel_event,
+                )
+                return {
+                    "installed": True,
+                    "pack_id": installed.pack_id,
+                    "version": installed.version,
+                    "path": str(installed.path),
+                    "active": True,
+                }
+            except InstallCancelledError:
+                raise DispatcherError("cancelled", f"Install of pack '{pack_id}' cancelled") from None
+            except PackInstallError as err:
+                raise DispatcherError(err.code, err.detail or err.code) from None
+            finally:
+                self._pack_cancels.pop(pack_id, None)
+                self._pack_progress.pop(pack_id, None)
         finally:
-            self._pack_cancels.pop(pack_id, None)
-            self._pack_progress.pop(pack_id, None)
+            if self._pack_install_active == pack_id:
+                self._pack_install_active = None
 
     async def _handle_pack_cancel(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         pack_id = payload.get("pack_id")
@@ -1115,7 +1145,7 @@ class ControlCommandDispatcher:
         installer = self._get_installer()
         catalog = self._get_catalog()
         probe = self._get_probe()
-        profile: HardwareProfile = await asyncio.to_thread(probe.probe)
+        profile: HardwareProfile = await asyncio.to_thread(_probe_hardware_with_gpu, probe)
 
         kind = PackKind.STT if capability.lower() == "stt" else PackKind.TRANSLATION
         src_lang = source_lang if isinstance(source_lang, str) else None
@@ -1360,6 +1390,10 @@ class ControlCommandDispatcher:
                 },
             }
             await websocket.send(encode_frame(frame, tokens))
+            if self._engine is not None and hasattr(self._engine, "broadcast_event"):
+                await self._engine.broadcast_event(
+                    {"type": "llm_chunk", "text": text, "conversation_id": cid}
+                )
 
         try:
             outcome = await service.request_summary(cid, on_chunk=_on_chunk)
@@ -1443,10 +1477,19 @@ class ControlCommandDispatcher:
                 task.cancel()
                 return {"cancelled": True, "request_id": target_id}
 
-        if self._engine is not None and hasattr(self._engine, "cancel_summary"):
-            cid = conversation_id if isinstance(conversation_id, str) and conversation_id else None
-            if self._engine.cancel_summary(cid):
+        cid = conversation_id if isinstance(conversation_id, str) and conversation_id else None
+        if cid and cid in self._summary_tasks_by_conv:
+            task = self._summary_tasks_by_conv.get(cid)
+            if task is not None and not task.done():
+                task.cancel()
                 return {"cancelled": True, "request_id": target_id}
+
+        if (
+            self._engine is not None
+            and hasattr(self._engine, "cancel_summary")
+            and self._engine.cancel_summary(cid)
+        ):
+            return {"cancelled": True, "request_id": target_id}
 
         return {"cancelled": False, "request_id": target_id}
 

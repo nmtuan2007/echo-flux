@@ -382,6 +382,7 @@ export const createSessionSlice =
       } catch (error) {
         if (gen !== generation) return;
         clearCommandLoading(type, entryId);
+        if (type === "request_summary" && get().summaryCancelledByUser) return;
         const code = errorCodeOf(error);
         set({ appError: `${COMMAND_LABEL[type]}: ${describeCommandError(code)} (${code})` });
         return;

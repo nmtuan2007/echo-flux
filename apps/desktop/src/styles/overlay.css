@@ -340,3 +340,13 @@
 .overlay-assist-question .overlay-assist-strategy {
   color: #93c5fd;
 }
+
+.overlay-silence-hint {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  background: rgba(245, 166, 35, 0.18);
+  border: 1px solid rgba(245, 166, 35, 0.45);
+  color: #fde68a;
+  font-size: 11px;
+}

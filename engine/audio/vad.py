@@ -36,6 +36,7 @@ class VAD:
 
         # State tracking
         self._is_speech = False
+        self._init_error: Optional[str] = None
 
         self._models_dir = Config().models_dir
         self._model_path = self._models_dir / "silero_vad.onnx"
@@ -76,11 +77,16 @@ class VAD:
             logger.error("Failed to initialize Silero VAD: %s", e)
             # We explicitly disable VAD if init fails to prevent crashes,
             # but log clearly so user knows performance will degrade.
+            self._init_error = type(e).__name__
             self._enabled = False
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def init_error(self) -> Optional[str]:
+        return self._init_error
 
     @property
     def is_speech(self) -> bool:
@@ -102,8 +108,10 @@ class VAD:
         self._buffer = np.concatenate((self._buffer, audio_float32))
 
         has_speech_in_chunk = False
+        evaluated = False
 
         while len(self._buffer) >= WINDOW_SIZE_SAMPLES:
+            evaluated = True
             window = self._buffer[:WINDOW_SIZE_SAMPLES]
             self._buffer = self._buffer[WINDOW_SIZE_SAMPLES:]
 
@@ -112,7 +120,10 @@ class VAD:
             if prob > self._threshold:
                 has_speech_in_chunk = True
 
-        self._is_speech = has_speech_in_chunk
+        # Preserve prior speech state when a sub-window chunk (<512 samples) has not
+        # accumulated enough audio for a new Silero frame.
+        if evaluated:
+            self._is_speech = has_speech_in_chunk
         return self._is_speech
 
     def _inference(self, window: np.ndarray) -> float:

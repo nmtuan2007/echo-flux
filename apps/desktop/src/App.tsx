@@ -83,6 +83,7 @@ export default function App() {
     bootstrapEngine,
     disconnect,
     theme,
+    shortcutsEnabled,
     onboardingCompleted,
     isSetupOpen,
     closeSetup,
@@ -178,8 +179,10 @@ export default function App() {
       }).then((f) => (unlistenClosed = f));
 
       listen("relay_request_suggestion", (event: any) => {
-        const { entryId, targetText, context } = event.payload;
-        useEngineStore.getState().requestSuggestion(entryId, targetText, context);
+        const { entryId } = event.payload || {};
+        if (entryId) {
+          useEngineStore.getState().requestAssist(entryId);
+        }
       }).then((f) => (unlistenRelay = f));
 
       listen("relay_request_assist", (event: any) => {
@@ -208,40 +211,12 @@ export default function App() {
           state.sourceLabels !== prev.sourceLabels ||
           state.sttStreams !== prev.sttStreams ||
           state.services !== prev.services ||
-          state.config !== prev.config
+          state.config !== prev.config ||
+          state.audioLevels !== prev.audioLevels
         ) {
           scheduleSync();
         }
       });
-
-      const setupShortcuts = async () => {
-        try {
-          await unregisterAll();
-          await register("CommandOrControl+Shift+O", async () => {
-            await invoke("toggle_overlay_window");
-          });
-          await register("CommandOrControl+Shift+M", () => {
-            useEngineStore.getState().togglePipeline();
-          });
-          await register("CommandOrControl+Shift+S", () => {
-            const state = useEngineStore.getState();
-            // Find target finalized entry: prioritize remote source, fallback to any finalized entry
-            const finalEntries = state.entries.filter((e) => e.isFinal && e.text.trim());
-            const target =
-              [...finalEntries].reverse().find((e) => e.source !== "mic") ||
-              [...finalEntries].reverse()[0];
-            if (target) {
-              state.requestAssist(target.id);
-            }
-          });
-          await register("CommandOrControl+Shift+U", () => {
-            void emit("overlay_unlock");
-          });
-        } catch (e) {
-          console.error("Failed to setup global shortcuts:", e);
-        }
-      };
-      setupShortcuts();
     }
 
     return () => {
@@ -254,13 +229,49 @@ export default function App() {
       if (unlistenToggleRelay) unlistenToggleRelay();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
-        unregisterAll().catch(console.error);
         disconnect();
       } else {
         void emit("overlay_closed");
       }
     };
   }, [bootstrapEngine, disconnect, isOverlay]);
+
+  useEffect(() => {
+    if (isOverlay) return;
+    let cancelled = false;
+    const syncShortcuts = async () => {
+      try {
+        await unregisterAll();
+        if (!shortcutsEnabled || cancelled) return;
+        await register("CommandOrControl+Shift+O", async () => {
+          await invoke("toggle_overlay_window");
+        });
+        await register("CommandOrControl+Shift+M", () => {
+          useEngineStore.getState().togglePipeline();
+        });
+        await register("CommandOrControl+Shift+S", () => {
+          const state = useEngineStore.getState();
+          const finalEntries = state.entries.filter((e) => e.isFinal && e.text.trim());
+          const target =
+            [...finalEntries].reverse().find((e) => e.source !== "mic") ||
+            [...finalEntries].reverse()[0];
+          if (target) {
+            state.requestAssist(target.id);
+          }
+        });
+        await register("CommandOrControl+Shift+U", () => {
+          void emit("overlay_unlock");
+        });
+      } catch (e) {
+        console.error("Failed to setup global shortcuts:", e);
+      }
+    };
+    void syncShortcuts();
+    return () => {
+      cancelled = true;
+      unregisterAll().catch(() => {});
+    };
+  }, [isOverlay, shortcutsEnabled]);
 
   if (isOverlay) {
     return <OverlayPanel />;

@@ -167,6 +167,7 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
           >
             {copied ? "Copied" : "Copy"}
           </button>
+          <span className="transcript-time">{formatTime(entry.timestamp)}</span>
         </div>
       </div>
       {editing ? (
@@ -216,7 +217,6 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
           {entry.translation}
         </div>
       )}
-      <span className="transcript-time">{formatTime(entry.timestamp)}</span>
       <AssistPanel entry={entry} />
     </div>
   );
@@ -292,7 +292,11 @@ export function TranscriptPanel() {
   const entries = useEngineStore((s) => s.entries);
   const partials = useEngineStore((s) => s.partials);
   const running = useEngineStore((s) => s.running);
+  const connected = useEngineStore((s) => s.connected);
+  const audioLevels = useEngineStore((s) => s.audioLevels);
+  const audioSource = useEngineStore((s) => s.config.audioSource);
   const sourceLabels = useEngineStore((s) => s.sourceLabels);
+  const openSettingsFor = useEngineStore((s) => s.openSettingsFor);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
@@ -300,6 +304,29 @@ export function TranscriptPanel() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<"all" | "mic" | "system">("all");
   const [visibleLimit, setVisibleLimit] = useState(200);
+  const [silenceWarning, setSilenceWarning] = useState(false);
+  const [silenceDismissed, setSilenceDismissed] = useState(false);
+
+  const hasLiveSignal =
+    (audioSource !== "system" && (audioLevels.mic ?? 0) >= 0.01) ||
+    (audioSource !== "microphone" && (audioLevels.system ?? 0) >= 0.01) ||
+    Object.keys(partials).length > 0;
+
+  useEffect(() => {
+    if (!running || !connected) {
+      setSilenceWarning(false);
+      setSilenceDismissed(false);
+      return;
+    }
+    if (hasLiveSignal) {
+      setSilenceWarning(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setSilenceWarning(true);
+    }, 15000);
+    return () => clearTimeout(timer);
+  }, [running, connected, hasLiveSignal, entries.length]);
 
   const checkNearBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -342,11 +369,8 @@ export function TranscriptPanel() {
   }, [entries, normalizedQuery, sourceFilter]);
 
   const hasContent = entries.length > 0 || partialStreams.length > 0;
-  const isFiltered = Boolean(normalizedQuery || sourceFilter !== "all");
   const hiddenCount =
-    !isFiltered && filteredEntries.length > visibleLimit
-      ? filteredEntries.length - visibleLimit
-      : 0;
+    filteredEntries.length > visibleLimit ? filteredEntries.length - visibleLimit : 0;
   const renderedEntries =
     hiddenCount > 0 ? filteredEntries.slice(-visibleLimit) : filteredEntries;
 
@@ -390,6 +414,37 @@ export function TranscriptPanel() {
 
       <div className="transcript-panel" ref={scrollRef} onScroll={checkNearBottom}>
         <SttNoticeBar />
+        {running && silenceWarning && !silenceDismissed && (
+          <div className="transcript-silence-hint" role="status">
+            <span>
+              No audio signal detected yet on{" "}
+              {audioSource === "both"
+                ? "Mic or System audio"
+                : audioSource === "system"
+                  ? "System audio"
+                  : "Microphone"}
+              . Check if your device is muted or switch devices in Settings.
+            </span>
+            <div className="transcript-silence-actions">
+              <button
+                type="button"
+                className="btn-text"
+                onClick={() => openSettingsFor()}
+              >
+                Audio Settings
+              </button>
+              <button
+                type="button"
+                className="btn-icon-sm"
+                onClick={() => setSilenceDismissed(true)}
+                aria-label="Dismiss audio signal hint"
+                title="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
 
         {!hasContent && (
           <div className="transcript-empty">

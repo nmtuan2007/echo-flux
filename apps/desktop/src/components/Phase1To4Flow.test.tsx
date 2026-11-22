@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createEngineStore, useEngineStore } from "../store/engineStore";
 import { DEFAULT_CONFIG, defaultServices } from "../store/settingsSlice";
@@ -34,6 +34,9 @@ describe("Phase 1-4 UI enhancements", () => {
       pendingTitle: "Roadmap Sync",
       attachedProfileIds: ["p1"],
       hasConsentedToCloud: false,
+      summaryLoading: false,
+      summaryText: "",
+      summaryVisible: false,
     });
   });
 
@@ -441,5 +444,88 @@ describe("Phase 1-4 UI enhancements", () => {
     expect(ok).toBe(true);
     expect(useEngineStore.getState().entries[0].translation).toBe("Tiếng Việt mới");
     delete (window as unknown as { __TAURI_IPC__?: unknown }).__TAURI_IPC__;
+  });
+
+  it("persists sourceLabels and attachedProfileIds across store reloads", () => {
+    useEngineStore.getState().setSourceLabels({ mic: "Alice", system: "Client" });
+    useEngineStore.getState().setAttachedProfileIds(["prof-a", "prof-b"]);
+
+    const reloaded = createEngineStore();
+    expect(reloaded.getState().sourceLabels).toEqual({ mic: "Alice", system: "Client" });
+    expect(reloaded.getState().attachedProfileIds).toEqual(["prof-a", "prof-b"]);
+  });
+
+  it("renders consolidated Summary & Ask button and places entry timestamp inside actions", () => {
+    useEngineStore.getState().updateServiceConfig("assistant", { enabled: true });
+    useEngineStore.setState({
+      engineConversationId: "conv-ui",
+      entries: [
+        {
+          id: "e-time",
+          text: "Segment with non-overlapping timestamp",
+          translation: null,
+          isFinal: true,
+          timestamp: 1000,
+          source: "mic",
+        },
+      ],
+    });
+
+    const { container } = render(
+      <>
+        <LiveSessionBar />
+        <TranscriptPanel />
+      </>,
+    );
+
+    expect(screen.getByRole("button", { name: /Summary & Ask/i })).toBeTruthy();
+    const actionsEl = container.querySelector(".transcript-entry-actions");
+    expect(actionsEl?.querySelector(".transcript-time")).toBeTruthy();
+  });
+
+  it("shows silence warning hint in TranscriptPanel after 15s without audio signal", () => {
+    vi.useFakeTimers();
+    try {
+      useEngineStore.setState({
+        connected: true,
+        running: true,
+        entries: [],
+        partials: {},
+        audioLevels: {},
+      });
+      render(<TranscriptPanel />);
+      expect(screen.queryByText(/No audio signal detected yet/i)).toBeNull();
+      act(() => {
+        vi.advanceTimersByTime(15100);
+      });
+      expect(screen.getByText(/No audio signal detected yet/i)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("supports continueSession mode when loading a conversation from History", () => {
+    useEngineStore.setState({
+      history: [
+        {
+          id: "hist-cont",
+          name: "Part 1",
+          date: 1000,
+          entries: [{ id: "m1", text: "Old text", translation: null, isFinal: true, timestamp: 1 }],
+        },
+      ],
+    });
+    useEngineStore.getState().loadConversation("hist-cont", { continueSession: true });
+    expect(useEngineStore.getState().isViewingHistory).toBe(false);
+    expect(useEngineStore.getState().preparedConversationId).toBe("hist-cont");
+
+    const sent: string[] = [];
+    useEngineStore.setState({
+      connected: true,
+      socket: { readyState: 1, send: (d: string) => sent.push(d) } as unknown as WebSocket,
+    });
+    useEngineStore.getState().startPipeline();
+    expect(useEngineStore.getState().activeConversationId).toBe("hist-cont");
+    expect(sent).toHaveLength(1);
   });
 });

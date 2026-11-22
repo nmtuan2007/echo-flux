@@ -20,6 +20,7 @@ export function HistoryPanel() {
     history,
     savedConversations,
     historyLoading,
+    detailLoading,
     historySearchQuery,
     selectedConversationDetail,
     running,
@@ -185,7 +186,9 @@ export function HistoryPanel() {
   return (
     <div className="history-panel">
       {/* Detail View */}
-      {selectedConversationDetail ? (
+      {detailLoading ? (
+        <div className="history-loading">Loading conversation details...</div>
+      ) : selectedConversationDetail ? (
         <ConversationDetailView
           detail={selectedConversationDetail}
           onBack={clearSelectedConversationDetail}
@@ -195,6 +198,15 @@ export function HistoryPanel() {
               selectedConversationDetail.conversation_id;
             if (convId && !running) {
               loadConversation(convId);
+              clearSelectedConversationDetail();
+            }
+          }}
+          onContinueSession={() => {
+            const convId =
+              selectedConversationDetail.conversation?.conversation_id ||
+              selectedConversationDetail.conversation_id;
+            if (convId && !running) {
+              loadConversation(convId, { continueSession: true });
               clearSelectedConversationDetail();
             }
           }}
@@ -400,12 +412,14 @@ function ConversationDetailView({
   detail,
   onBack,
   onLoadToActive,
+  onContinueSession,
   onExportBackup,
   disabled,
 }: {
   detail: any;
   onBack: () => void;
   onLoadToActive: () => void;
+  onContinueSession: () => void;
   onExportBackup: () => void;
   disabled: boolean;
 }) {
@@ -452,12 +466,20 @@ function ConversationDetailView({
             onExportBackup={onExportBackup}
           />
           <button
-            className="btn btn-primary"
+            className="btn btn-secondary"
             onClick={onLoadToActive}
             disabled={disabled}
-            title={disabled ? "Stop recording to load" : "Load into active transcript"}
+            title={disabled ? "Stop recording to load" : "View in transcript workspace (read-only)"}
           >
             Load Into Session
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={onContinueSession}
+            disabled={disabled}
+            title={disabled ? "Stop recording to continue" : "Append new recording to this conversation"}
+          >
+            Continue Recording
           </button>
         </div>
       </div>

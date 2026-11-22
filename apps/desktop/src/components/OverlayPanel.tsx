@@ -29,7 +29,22 @@ export const OverlayPanel: React.FC = () => {
   const [highOpacity, setHighOpacity] = useState(false);
   const [dismissedAssistKey, setDismissedAssistKey] = useState<string | null>(null);
   const [copiedReplyIdx, setCopiedReplyIdx] = useState<number | null>(null);
+  const [silenceHint, setSilenceHint] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const hasLiveSignal =
+    (config.audioSource !== "system" && (audioLevels?.mic ?? 0) >= 0.01) ||
+    (config.audioSource !== "microphone" && (audioLevels?.system ?? 0) >= 0.01) ||
+    Object.keys(partials).length > 0;
+
+  useEffect(() => {
+    if (!running || !connected || hasLiveSignal) {
+      setSilenceHint(false);
+      return;
+    }
+    const timer = setTimeout(() => setSilenceHint(true), 15000);
+    return () => clearTimeout(timer);
+  }, [running, connected, hasLiveSignal, entries.length]);
 
   useEffect(() => {
     document.documentElement.style.backgroundColor = "transparent";
@@ -260,6 +275,11 @@ export const OverlayPanel: React.FC = () => {
       )}
 
       <div className="overlay-captions" ref={scrollRef}>
+        {running && silenceHint && !isLocked && (
+          <div className="overlay-silence-hint" role="status">
+            No audio signal detected yet — check Mic/System device or mute state.
+          </div>
+        )}
         {recentEntries.length === 0 && partialStreams.length === 0 && (
           <div className="overlay-empty">
             {running ? "Listening for speech..." : "Waiting to start session..."}
