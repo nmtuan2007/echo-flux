@@ -20,6 +20,7 @@ export const OverlayPanel: React.FC = () => {
     sourceLabels,
     engineConversationId,
     suggestionLoading,
+    audioLevels,
     requestAssist,
   } = useEngineStore();
   const assistantEnabled = useEngineStore(isAssistantConfigured);
@@ -168,6 +169,18 @@ export const OverlayPanel: React.FC = () => {
               <path d="M5 9h14M5 15h14" />
             </svg>
             <span>Drag</span>
+            {running && (
+              <span className="overlay-live-dots" title="Live audio activity">
+                <span
+                  className={`overlay-live-dot ${(audioLevels?.mic ?? 0) >= 0.02 ? "active" : ""}`}
+                  title="Microphone"
+                />
+                <span
+                  className={`overlay-live-dot system ${(audioLevels?.system ?? 0) >= 0.02 ? "active" : ""}`}
+                  title="System audio"
+                />
+              </span>
+            )}
           </div>
 
           <div className="overlay-btn-group">
@@ -308,7 +321,18 @@ export const OverlayPanel: React.FC = () => {
           {activeAssistLoading ? (
             <div className="overlay-assist-status">Thinking...</div>
           ) : activeAssistEntry.assist?.error ? (
-            <div className="overlay-assist-error">{activeAssistEntry.assist.error.message}</div>
+            <div className="overlay-assist-error-row">
+              <span className="overlay-assist-error">{activeAssistEntry.assist.error.message}</span>
+              {activeAssistEntry.assist.error.retryable && (
+                <button
+                  type="button"
+                  className="overlay-btn"
+                  onClick={() => requestAssist(activeAssistEntry.id)}
+                >
+                  Retry
+                </button>
+              )}
+            </div>
           ) : (
             <div className="overlay-assist-items">
               {activeAssistEntry.assist?.suggestedReplies.slice(0, 3).map((reply, idx) => (
@@ -323,6 +347,20 @@ export const OverlayPanel: React.FC = () => {
                     {copiedReplyIdx === idx ? "✓ Copied" : reply.strategy || "Reply"}
                   </span>
                   <span className="overlay-assist-text">{reply.text}</span>
+                </button>
+              ))}
+              {activeAssistEntry.assist?.clarifyingQuestions.slice(0, 2).map((q, idx) => (
+                <button
+                  key={`q-${idx}`}
+                  type="button"
+                  className="overlay-assist-chip overlay-assist-question"
+                  onClick={() => void handleCopyOverlayReply(q.question, 100 + idx)}
+                  title="Click to copy clarifying question"
+                >
+                  <span className="overlay-assist-strategy">
+                    {copiedReplyIdx === 100 + idx ? "✓ Copied" : "Ask"}
+                  </span>
+                  <span className="overlay-assist-text">{q.question}</span>
                 </button>
               ))}
             </div>

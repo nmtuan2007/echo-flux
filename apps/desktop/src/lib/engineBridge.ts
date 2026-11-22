@@ -197,6 +197,7 @@ export const FORWARDED_COMMAND_TYPES = [
   "get_provider_manifests",
   "audio_probe",
   "test_connection",
+  "assistant_ask",
 ] as const;
 
 export type ForwardedCommandType = (typeof FORWARDED_COMMAND_TYPES)[number];

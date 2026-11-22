@@ -1,9 +1,8 @@
 import argparse
 import sys
-from typing import Optional
 
 from engine.core.config import Config
-from engine.main import run_engine
+from engine.main import _apply_cli_config_env, run_engine
 
 
 def parse_args() -> argparse.Namespace:
@@ -108,6 +107,7 @@ def main():
                      config.get("asr.language"),
                      config.get("asr.device"))
 
+        _apply_cli_config_env(config)
         run_engine(args.config, insecure_dev=args.insecure_dev)
     except KeyboardInterrupt:
         pass

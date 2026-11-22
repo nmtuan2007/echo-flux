@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
+import { isAssistantConfigured } from "../store/transcriptSlice";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 export function SummaryModal() {
@@ -11,9 +12,22 @@ export function SummaryModal() {
     summaryError,
     cancelSummary,
     closeSummary,
+    askAnswer,
+    askLoading,
+    askError,
+    askMeeting,
+    clearAsk,
+    connected,
+    activeConversationId,
+    engineConversationId,
   } = useEngineStore();
+  const isAssistantEnabled = useEngineStore(isAssistantConfigured);
   const contentRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
+  const [questionDraft, setQuestionDraft] = useState("");
+  const canAsk = Boolean(
+    isAssistantEnabled && connected && (engineConversationId || activeConversationId),
+  );
 
   // Auto-scroll as content streams in
   useEffect(() => {
@@ -118,10 +132,58 @@ export function SummaryModal() {
             <div className="summary-placeholder">
               <span>Failed to generate summary.</span>
             </div>
-          ) : null}
+          ) : (
+            <div className="summary-placeholder">
+              <span>No summary generated yet. Ask a quick question below or run Summarize.</span>
+            </div>
+          )}
           {/* Typewriter cursor while loading */}
           {summaryLoading && summaryText && (
             <span className="typing-cursor" style={{ display: "inline-block", marginLeft: 2 }} />
+          )}
+
+          {canAsk && (
+            <div className="summary-ask-box" aria-label="Quick Ask">
+              <div className="summary-ask-header">
+                <span className="summary-ask-title">💬 Quick Ask</span>
+                {askAnswer && (
+                  <button type="button" className="btn-text" onClick={clearAsk}>
+                    Clear
+                  </button>
+                )}
+              </div>
+              <form
+                className="summary-ask-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!questionDraft.trim() || askLoading) return;
+                  void askMeeting(questionDraft);
+                }}
+              >
+                <input
+                  type="text"
+                  className="summary-ask-input"
+                  value={questionDraft}
+                  onChange={(e) => setQuestionDraft(e.target.value)}
+                  placeholder="Ask about decisions, deadlines, or what someone said..."
+                  disabled={askLoading}
+                  aria-label="Ask AI about this meeting"
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary btn-sm"
+                  disabled={!questionDraft.trim() || askLoading}
+                >
+                  {askLoading ? "Asking..." : "Ask"}
+                </button>
+              </form>
+              {askError && <p className="summary-ask-error">{askError}</p>}
+              {askAnswer && (
+                <div className="summary-ask-answer">
+                  <MarkdownRenderer text={askAnswer} />
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

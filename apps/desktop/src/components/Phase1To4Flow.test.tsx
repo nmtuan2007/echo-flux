@@ -335,4 +335,111 @@ describe("Phase 1-4 UI enhancements", () => {
       expect(useEngineStore.getState().entries[0].source).toBe("system");
     });
   });
+
+  it("renders clarifying questions and retry action inside OverlayPanel Quick Assist", () => {
+    useEngineStore.getState().updateServiceConfig("assistant", { enabled: true });
+    useEngineStore.setState({
+      engineConversationId: "c-overlay-q",
+      entries: [
+        {
+          id: "e-q1",
+          messageId: "e-q1",
+          conversationId: "c-overlay-q",
+          text: "Let's finalize the budget.",
+          translation: null,
+          isFinal: true,
+          timestamp: 1000,
+          source: "system",
+          assist: {
+            requestId: "r-q1",
+            assistId: "a-q1",
+            conversationId: "c-overlay-q",
+            suggestedReplies: [{ strategy: "Direct", text: "Looks good." }],
+            clarifyingQuestions: [{ question: "What is the Q4 cap?" }],
+            providerId: "openai",
+            error: null,
+          },
+        },
+      ],
+    });
+
+    const { rerender } = render(<OverlayPanel />);
+    expect(screen.getByText("What is the Q4 cap?")).toBeTruthy();
+
+    useEngineStore.setState({
+      entries: [
+        {
+          id: "e-q2",
+          messageId: "e-q2",
+          conversationId: "c-overlay-q",
+          text: "Can you confirm?",
+          translation: null,
+          isFinal: true,
+          timestamp: 1001,
+          source: "system",
+          assist: {
+            requestId: "r-q2",
+            assistId: null,
+            conversationId: "c-overlay-q",
+            suggestedReplies: [],
+            clarifyingQuestions: [],
+            providerId: "openai",
+            error: {
+              kind: "provider",
+              code: "provider_error",
+              providerCode: "timeout",
+              message: "Timed out.",
+              retryable: true,
+            },
+          },
+        },
+      ],
+    });
+    rerender(<OverlayPanel />);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("hides SummaryModal without cancelling an active streaming summary", () => {
+    const cancelSpy = vi.fn(async () => undefined);
+    useEngineStore.setState({
+      summaryVisible: true,
+      summaryLoading: true,
+      summaryText: "Partial summary...",
+      cancelSummary: cancelSpy,
+    });
+
+    useEngineStore.getState().closeSummary();
+    expect(useEngineStore.getState().summaryVisible).toBe(false);
+    expect(useEngineStore.getState().summaryLoading).toBe(true);
+    expect(cancelSpy).not.toHaveBeenCalled();
+  });
+
+  it("updates translation immediately when message_update returns a retranslation", async () => {
+    (window as unknown as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ = () => undefined;
+    const tauri = await import("@tauri-apps/api/tauri");
+    vi.mocked(tauri.invoke).mockResolvedValueOnce({
+      messages: [{ text: "Edited English", translation: "Tiếng Việt mới" }],
+    });
+
+    useEngineStore.setState({
+      engineConversationId: "conv-retrans",
+      entries: [
+        {
+          id: "m-1",
+          messageId: "m-1",
+          conversationId: "conv-retrans",
+          text: "Old English",
+          translation: "Bản dịch cũ",
+          isFinal: true,
+          timestamp: 1000,
+          source: "system",
+        },
+      ],
+    });
+
+    const ok = await useEngineStore.getState().updateEntry("m-1", { text: "Edited English" });
+    expect(ok).toBe(true);
+    expect(useEngineStore.getState().entries[0].translation).toBe("Tiếng Việt mới");
+    delete (window as unknown as { __TAURI_IPC__?: unknown }).__TAURI_IPC__;
+  });
 });

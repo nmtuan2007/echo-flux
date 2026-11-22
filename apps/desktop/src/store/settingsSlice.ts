@@ -703,10 +703,13 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
             if (statusMsg) {
               const data = ((statusMsg as any).data as any) || statusMsg;
               const packId =
-                (data.pack_id as string) || (cap === "stt" ? "whisper-base" : "marian-en-vi");
+                (data.pack_id as string) ||
+                (cap === "stt" ? "legacy-faster-whisper-small" : "legacy-marian-opus-mt");
               const ready = Boolean(data.ready);
               const sizeBytes =
                 (data.size_bytes as number) || (cap === "stt" ? 500_000_000 : 300_000_000);
+              const languageSupported =
+                typeof data.language_supported === "boolean" ? data.language_supported : true;
               set((state) => ({
                 packStatus: {
                   ...state.packStatus,
@@ -724,6 +727,7 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
                     totalBytes: sizeBytes,
                     issues: Array.isArray(data.issues) ? data.issues : [],
                     tier: (data.tier as string) || "standard",
+                    languageSupported,
                   },
                 },
               }));

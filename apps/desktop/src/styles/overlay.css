@@ -301,3 +301,42 @@
 .overlay-assist-text {
   line-height: 1.3;
 }
+
+.overlay-live-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+}
+
+.overlay-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.45);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.overlay-live-dot.active {
+  background: #4ade80;
+  transform: scale(1.25);
+}
+
+.overlay-live-dot.system.active {
+  background: #c084fc;
+}
+
+.overlay-assist-error-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.overlay-assist-question {
+  border-color: rgba(96, 165, 250, 0.25);
+}
+
+.overlay-assist-question .overlay-assist-strategy {
+  color: #93c5fd;
+}

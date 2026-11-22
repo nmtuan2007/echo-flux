@@ -107,22 +107,31 @@ export default function App() {
     let lastSyncedServices: unknown = null;
     let lastSyncedConfig: unknown = null;
     let lastSyncedLabels: unknown = null;
+    let lastSyncedEntries: unknown = null;
+    let lastSyncedAssistRequests: unknown = null;
 
     const getSyncPayload = (full: boolean) => {
       const state = useEngineStore.getState();
       const payload: Record<string, unknown> = {
-        // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
-        entries: state.entries.slice(-20),
         partials: state.partials,
         running: state.running,
         connected: state.connected,
         isToggling: state.isToggling,
         appError: state.appError,
         suggestionLoading: state.suggestionLoading,
-        assistRequests: state.assistRequests,
         engineConversationId: state.engineConversationId,
         sttStreams: state.sttStreams,
+        audioLevels: state.audioLevels,
       };
+      if (full || state.entries !== lastSyncedEntries) {
+        lastSyncedEntries = state.entries;
+        // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
+        payload.entries = state.entries.slice(-20);
+      }
+      if (full || state.assistRequests !== lastSyncedAssistRequests) {
+        lastSyncedAssistRequests = state.assistRequests;
+        payload.assistRequests = state.assistRequests;
+      }
       if (full || state.sourceLabels !== lastSyncedLabels) {
         lastSyncedLabels = state.sourceLabels;
         payload.sourceLabels = state.sourceLabels;

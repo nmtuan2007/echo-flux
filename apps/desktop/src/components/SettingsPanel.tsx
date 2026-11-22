@@ -207,10 +207,14 @@ export function SettingsPanel() {
       </section>
 
       {/* ── Privacy & Cloud Consent ──────────────────────────────────── */}
-      <section className="settings-section">
-        <h3 className="settings-section-title">Privacy &amp; Cloud Consent</h3>
-        <CloudConsent mode="settings" />
-      </section>
+      <details className="settings-section settings-collapsible">
+        <summary className="settings-section-title settings-summary-toggle">
+          Privacy &amp; Cloud Consent
+        </summary>
+        <div style={{ marginTop: "12px" }}>
+          <CloudConsent mode="settings" />
+        </div>
+      </details>
 
       {/* ── Invisible/Pro UI ──────────────────────────────────────────────── */}
       <section className="settings-section">

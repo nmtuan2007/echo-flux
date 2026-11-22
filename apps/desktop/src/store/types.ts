@@ -468,6 +468,7 @@ export interface PackStatusItem {
   totalBytes: number;
   issues: string[];
   tier: string;
+  languageSupported?: boolean;
 }
 
 export interface HardwareInfo {

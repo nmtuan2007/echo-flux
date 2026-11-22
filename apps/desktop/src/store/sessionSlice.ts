@@ -193,6 +193,7 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   get_provider_manifests: null,
   audio_probe: null,
   test_connection: "test_connection_result",
+  assistant_ask: null,
 };
 
 const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
@@ -229,6 +230,7 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   get_provider_manifests: "Get provider manifests",
   audio_probe: "Audio probe",
   test_connection: "Test connection",
+  assistant_ask: "Ask Assistant",
 };
 
 // What components and the other slices see as `socket` in secure mode. Legacy call sites

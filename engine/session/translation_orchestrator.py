@@ -36,11 +36,9 @@ Prompt policy. Cloud text adapters own no prompts. ``build_translation_messages`
 fixed trusted instructions in the system message, and the transcript text as untrusted data in
 an escaped JSON block of the user message.
 
-Credentials gap. No transport delivers cloud Translation credential values to the engine yet:
-the desktop bridge injects only ``llm.api_key`` into the forwarded start config, and the text
-adapters have no ``from_resolved`` hook. The engine therefore sets no secrets resolver, and a
-selected cloud Translation provider with credential refs fails Start with
-``missing_credential`` before anything is built. It never runs as cloud without a key.
+Credentials. Cloud Translation credentials travel through ``services.translation``
+``credentialRefs`` resolved by the desktop bridge into ``_service_secrets["translation"]``
+at session start; missing credentials fail Start closed with ``missing_credential``.
 
 Nothing here knows the UI. It emits ``TranslationUpdateEvent``, ``TranslationErrorEvent``, and
 ``TranslationStatusEvent``; the engine maps them onto the WebSocket contract. Logs carry ids,
@@ -577,6 +575,35 @@ class TranslationSessionOrchestrator:
 
     def owned_providers(self) -> Set[TranslationProvider]:
         return set(self._providers)
+
+    async def translate_text_now(
+        self, text: str, entry_id: Optional[str] = None
+    ) -> Optional[str]:
+        """One-shot translation using the live active provider (e.g. after editing a segment)."""
+        cleaned = text.strip() if isinstance(text, str) else ""
+        if (
+            not cleaned
+            or self._state is not _State.RUNNING
+            or not self._config.enabled
+            or self._active is None
+        ):
+            return None
+        request = TranslationRequest(
+            source_text=cleaned,
+            source_lang=self._config.source_lang,
+            target_lang=self._config.target_lang,
+            is_final=True,
+            entry_id=entry_id,
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._active.translate(request), self._config.cloud_request_timeout_s
+            )
+            translated = result.translated_text.strip()
+            return translated or None
+        except Exception as exc:
+            logger.warning("On-demand retranslation failed (%s)", type(exc).__name__)
+            return None
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 

@@ -53,10 +53,43 @@ def serialize_manifest(m: ProviderManifest) -> Dict[str, Any]:
     }
 
 
+def _expected_whisper_size(pack_id: Optional[str]) -> Optional[str]:
+    if not pack_id:
+        return None
+    lowered = pack_id.lower()
+    if "tiny" in lowered:
+        return "tiny"
+    if "base" in lowered:
+        return "base"
+    if "small" in lowered:
+        return "small"
+    if "medium" in lowered:
+        return "medium"
+    if "large" in lowered:
+        return "large-v3"
+    return None
+
+
+def is_local_translation_pair_supported(
+    source_lang: Optional[str], target_lang: Optional[str]
+) -> bool:
+    """True when offline Marian presets support translating into ``target_lang``."""
+    from engine.local_models.catalog import _LEGACY_MARIAN_PAIRS
+
+    src = (source_lang or "").strip().lower()
+    tgt = (target_lang or "").strip().lower()
+    if not tgt or tgt == "auto":
+        return False
+    if not src or src == "auto":
+        return any(pair_tgt == tgt for _, pair_tgt in _LEGACY_MARIAN_PAIRS)
+    return (src, tgt) in _LEGACY_MARIAN_PAIRS
+
+
 def is_local_model_ready(
     capability: str,
     source_lang: Optional[str] = None,
     target_lang: Optional[str] = None,
+    pack_id: Optional[str] = None,
 ) -> bool:
     """Checks whether local STT or Translation models exist on disk in models_dir."""
     try:
@@ -67,9 +100,15 @@ def is_local_model_ready(
         if cap in ("stt", "speech", "whisper"):
             if (models_dir / "model.bin").is_file():
                 return True
-            stt_dirs = list(models_dir.glob("models--Systran--faster-whisper-*")) + list(
-                models_dir.glob("models--openai--whisper-*")
-            )
+            expected_size = _expected_whisper_size(pack_id)
+            if expected_size:
+                stt_dirs = list(models_dir.glob(f"models--Systran--faster-whisper-{expected_size}*")) + list(
+                    models_dir.glob(f"models--openai--whisper-{expected_size}*")
+                )
+            else:
+                stt_dirs = list(models_dir.glob("models--Systran--faster-whisper-*")) + list(
+                    models_dir.glob("models--openai--whisper-*")
+                )
             return len(stt_dirs) > 0
         if cap in ("translation", "translate", "marian", "opus"):
             ct2_dir = models_dir / "ct2"

@@ -85,6 +85,7 @@ const VALIDATOR_TIMEOUT: Duration = Duration::from_secs(30);
 const VALIDATOR_EXIT_GRACE: Duration = Duration::from_millis(500);
 const VALIDATOR_POLL: Duration = Duration::from_millis(20);
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
+const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 const MAX_RESULT_BYTES: usize = 8 * 1024;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -885,6 +886,7 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
 
         // Phase B: Summary Streaming & Cancellation (EF-022)
         "summary_cancel" => (None, 10, false, false),
+        "assistant_ask" => (None, 60, false, false),
 
         _ => return None,
     };
@@ -1413,6 +1415,17 @@ impl ControlBridge {
         forward_prepared(endpoint, prepared, START_STOP_COLLECTION, self.control_timeout).await
     }
 
+    /// Sends a `start` request with an extended timeout so cold-loading local STT/NMT models
+    /// does not fail prematurely on CPU.
+    pub async fn forward_start(
+        &self,
+        endpoint: ControlEndpoint,
+        prepared: PreparedRequest,
+    ) -> Result<ControlForwardResult, BridgeError> {
+        let timeout = self.control_timeout.max(START_TIMEOUT);
+        forward_prepared(endpoint, prepared, START_STOP_COLLECTION, timeout).await
+    }
+
     /// `control_endpoint` with its errors collapsed onto the forwarding codes.
     pub fn forward_endpoint(&self, status: EngineStatus) -> Result<ControlEndpoint, BridgeError> {
         self.control_endpoint(status).map_err(forward_error)
@@ -1554,7 +1567,7 @@ pub async fn engine_forward_start(
         Ok((endpoint, job_bridge.prepare_start(&store, request)?))
     })
     .await?;
-    bridge.forward(endpoint, prepared).await
+    bridge.forward_start(endpoint, prepared).await
 }
 
 #[tauri::command]

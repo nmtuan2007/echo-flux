@@ -1304,8 +1304,6 @@ class EchoFluxEngine:
             streamed.append(len(text))
             chunk_msg = summary_chunk_message(text, conversation_id)
             await self._send_reply(websocket, chunk_msg)
-            if self._ws_server and self._ws_server.is_authenticated:
-                await self._ws_server.broadcast(chunk_msg)
 
         try:
             outcome = await service.request_summary(conversation_id, on_chunk=_on_chunk)
@@ -1349,9 +1347,56 @@ class EchoFluxEngine:
         )
         await asyncio.shield(self._send_reply(websocket, done))
 
+    async def retranslate_message(
+        self, conversation_id: str, message_id: str, text: str
+    ) -> Optional[str]:
+        """Re-translate an edited final segment when a live translation session is running."""
+        session = self._translation_session
+        if session is None:
+            return None
+        translated = await session.translate_text_now(text, entry_id=message_id)
+        if translated and self._conversation_repo is not None:
+            provider_id = session.active_provider_id
+            meta = ProviderMetadata(provider_id=provider_id) if provider_id else None
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    self._conversation_repo.set_translation,
+                    conversation_id,
+                    message_id,
+                    translated,
+                    provider=meta,
+                )
+        return translated
+
+
+def _apply_cli_config_env(cli_config: Any) -> None:
+    """Propagate Config/CLI overrides into ECHOFLUX_* env defaults before engine startup."""
+    if cli_config is None:
+        return
+    mapping = {
+        "engine.host": "ECHOFLUX_HOST",
+        "engine.port": "ECHOFLUX_PORT",
+        "asr.model_size": "ECHOFLUX_MODEL_SIZE",
+        "asr.language": "ECHOFLUX_LANGUAGE",
+        "asr.device": "ECHOFLUX_DEVICE",
+        "translation.enabled": "ECHOFLUX_TRANSLATION_ENABLED",
+        "translation.source_lang": "ECHOFLUX_SOURCE_LANG",
+        "translation.target_lang": "ECHOFLUX_TARGET_LANG",
+        "vad.enabled": "ECHOFLUX_VAD_ENABLED",
+        "logging.level": "ECHOFLUX_LOG_LEVEL",
+    }
+    for cfg_key, env_key in mapping.items():
+        val = cli_config.get(cfg_key)
+        if val is not None:
+            os.environ[env_key] = str(val)
+
 
 def run_engine(config_path=None, insecure_dev: bool = False):
     _load_dotenv()
+    if config_path is not None:
+        from engine.core.config import Config
+
+        _apply_cli_config_env(Config(config_path))
     _setup_logging()
 
     # Eagerly initialize PyTorch cuDNN to prevent DLL collision with CTranslate2 later on Windows

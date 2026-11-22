@@ -79,6 +79,7 @@ export function LiveSessionBar() {
   const hasActiveConversation = Boolean(convId || entries.length > 0);
   const canSummarize = isAssistantEnabled && hasActiveConversation && connected;
   const hasSummary = Boolean(summaryText);
+  const summaryLoading = useEngineStore((s) => s.summaryLoading);
   const activeStreams = Object.keys(partials);
 
   const sttSvc = services?.stt;
@@ -97,6 +98,10 @@ export function LiveSessionBar() {
     (!consent?.translation || Object.keys(transSvc?.credentialRefs || {}).length === 0);
   const transMissingLocal =
     translationEnabled && !transIsCloud && packStatus.translation && !packStatus.translation.isReady;
+  const transUnsupportedLocal =
+    translationEnabled &&
+    !transIsCloud &&
+    packStatus.translation?.languageSupported === false;
 
   const setupReason = !connected
     ? "Engine offline"
@@ -104,11 +109,13 @@ export function LiveSessionBar() {
       ? "STT key/consent needed"
       : sttMissingLocal
         ? "Offline STT model needed"
-        : transMissingCred
-          ? "Translation key/consent needed"
-          : transMissingLocal
-            ? "Offline Translation model needed"
-            : null;
+        : transUnsupportedLocal
+          ? `Offline Marian unsupported (→ ${targetLang})`
+          : transMissingCred
+            ? "Translation key/consent needed"
+            : transMissingLocal
+              ? "Offline Translation model needed"
+              : null;
 
   const buildExportEntries = (): ExportEntry[] =>
     entries.map((e) => ({
@@ -307,6 +314,7 @@ export function LiveSessionBar() {
                 const lang = e.target.value;
                 setServiceOptionInput("translation", "target_lang", lang);
                 updateConfig({ targetLang: lang });
+                if (connected && isTauriRuntime()) void checkPackReadiness("translation");
               }}
               disabled={isToggling}
               title="Translation target language"
@@ -352,14 +360,25 @@ export function LiveSessionBar() {
           </button>
         )}
 
-        {hasSummary && (
+        {isAssistantEnabled && hasActiveConversation && connected && (
+          <button
+            type="button"
+            className="btn btn-sm btn-secondary"
+            onClick={openSummary}
+            title="Ask AI a question about this meeting"
+          >
+            💬 Ask AI
+          </button>
+        )}
+
+        {(hasSummary || summaryLoading) && (
           <button
             type="button"
             className="btn btn-sm btn-view-summary"
             onClick={openSummary}
-            title="View saved meeting summary"
+            title={summaryLoading ? "View streaming meeting summary" : "View saved meeting summary"}
           >
-            📋 Summary
+            {summaryLoading ? "⏳ Summarizing..." : "📋 Summary"}
           </button>
         )}
 

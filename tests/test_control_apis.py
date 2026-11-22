@@ -1263,3 +1263,93 @@ async def test_message_update_edits_text_and_speaker_in_repository(control_serve
         assert bad["error"]["code"] == "invalid_payload"
     finally:
         await client.close()
+
+
+def test_local_stt_size_check_and_translation_pair_support(tmp_path, monkeypatch):
+    from engine.core.config import Config
+    from engine.server.control_helpers import (
+        is_local_model_ready,
+        is_local_translation_pair_supported,
+    )
+
+    (tmp_path / "models--Systran--faster-whisper-tiny").mkdir(parents=True)
+    monkeypatch.setattr(Config, "models_dir", property(lambda self: tmp_path))
+
+    assert is_local_model_ready("stt", pack_id="legacy-faster-whisper-small") is False
+    (tmp_path / "models--Systran--faster-whisper-small").mkdir(parents=True)
+    assert is_local_model_ready("stt", pack_id="legacy-faster-whisper-small") is True
+
+    assert is_local_translation_pair_supported("en", "vi") is True
+    assert is_local_translation_pair_supported("auto", "ja") is True
+    assert is_local_translation_pair_supported("en", "th") is False
+
+
+@pytest.mark.asyncio
+async def test_message_update_retranslates_and_assistant_ask_answers(control_server):
+    import types
+
+    from engine.assistant.summary_service import SummaryService
+    from engine.conversation.models import ConversationRecord, TranscriptMessage
+
+    server, dispatcher = control_server
+    dispatcher.conversation_repo.create_conversation(
+        ConversationRecord(
+            conversation_id="conv-qa-1",
+            title="QA Check",
+            created_at_ms=1000.0,
+            updated_at_ms=1000.0,
+        )
+    )
+    dispatcher.conversation_repo.upsert_message(
+        "conv-qa-1",
+        TranscriptMessage(
+            message_id="msg-qa-1",
+            source="system",
+            text="Deadline is Friday.",
+            timestamp_ms=1000.0,
+            is_final=True,
+        ),
+    )
+
+    async def fake_retranslate(cid, mid, text):
+        return f"VI:{text}"
+
+    fake_provider = FakeAssistant()
+
+    async def fake_complete_messages(messages, generation=None):
+        return TextCompletion(text="The deadline is **Friday**.")
+
+    fake_provider.complete_messages = fake_complete_messages
+    dispatcher._engine = types.SimpleNamespace(retranslate_message=fake_retranslate)
+    dispatcher._summary_service = SummaryService(dispatcher.conversation_repo, fake_provider)
+
+    client = await connect_client(server)
+    try:
+        edit_res = await client.call(
+            "message_update",
+            {
+                "conversation_id": "conv-qa-1",
+                "message_id": "msg-qa-1",
+                "text": "Deadline is Monday.",
+            },
+        )
+        assert edit_res["ok"] is True
+        assert edit_res["data"]["translation"] == "VI:Deadline is Monday."
+
+        ask_res = await client.call(
+            "assistant_ask",
+            {"conversation_id": "conv-qa-1", "question": "When is the deadline?"},
+        )
+        assert ask_res["ok"] is True
+        assert "Friday" in ask_res["data"]["answer_markdown"]
+
+        empty_ask = await client.call(
+            "assistant_ask",
+            {"conversation_id": "conv-qa-1", "question": "   "},
+        )
+        assert empty_ask["ok"] is False
+        assert empty_ask["error"]["code"] == "invalid_request"
+    finally:
+        dispatcher._engine = None
+        dispatcher._summary_service = None
+        await client.close()

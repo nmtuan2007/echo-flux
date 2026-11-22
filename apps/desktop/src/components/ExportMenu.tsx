@@ -101,9 +101,11 @@ export function ExportMenu({
           <button type="button" role="menuitem" onClick={() => handleExport("srt")}>
             Export Subtitles (.srt)
           </button>
-          <button type="button" role="menuitem" onClick={() => handleExport("json")}>
-            Export JSON (.json)
-          </button>
+          {!onExportBackup && (
+            <button type="button" role="menuitem" onClick={() => handleExport("json")}>
+              Export Transcript (.json)
+            </button>
+          )}
           {onExportBackup && (
             <button
               type="button"

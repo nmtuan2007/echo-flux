@@ -46,7 +46,10 @@ export function LocalPackStatus({
 
   const item = packStatus[capability];
   const isReady = Boolean(item?.isReady);
-  const packId = item?.packId || (capability === "stt" ? "whisper-base" : "marian-en-vi");
+  const languageSupported = item?.languageSupported !== false;
+  const packId =
+    item?.packId ||
+    (capability === "stt" ? "legacy-faster-whisper-small" : "legacy-marian-opus-mt");
   const activeProgress = packDownloads[packId];
   const isDownloadingThis = installing || Boolean(activeProgress);
   const percent = activeProgress?.percent ?? 0;
@@ -177,7 +180,18 @@ export function LocalPackStatus({
           </div>
         )}
 
-        {!isReady && !isDownloadingThis && !errorMsg && (
+        {!languageSupported && capability === "translation" && (
+          <div className="pack-error-alert" role="status">
+            <span>
+              ⚠ Offline Marian does not support{" "}
+              <code>{sourceLang === "auto" ? "auto" : sourceLang} → {targetLang}</code>. Choose
+              a supported pair (e.g. en → vi/ja/ko/zh/de/fr/es, vi → en) or switch to a Cloud
+              Translation provider.
+            </span>
+          </div>
+        )}
+
+        {!isReady && !isDownloadingThis && !errorMsg && languageSupported && (
           <div className="pack-action-row">
             <button
               type="button"

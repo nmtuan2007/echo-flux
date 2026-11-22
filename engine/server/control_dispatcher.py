@@ -58,6 +58,9 @@ from engine.server.control_helpers import (
     is_local_model_ready as _is_local_model_ready,
 )
 from engine.server.control_helpers import (
+    is_local_translation_pair_supported as _is_local_translation_pair_supported,
+)
+from engine.server.control_helpers import (
     probe_audio_stream as _probe_audio_stream,
 )
 from engine.server.control_helpers import (
@@ -148,9 +151,10 @@ class ControlCommandDispatcher:
             "configure_assistant": self._handle_configure_assistant,
             "request_assist": self._handle_request_assist,
             "request_suggestion": self._handle_request_assist,
-            # Streaming Summary & Cancel
+            # Streaming Summary, Cancel & Quick Ask
             "request_summary": self._handle_request_summary,
             "summary_cancel": self._handle_summary_cancel,
+            "assistant_ask": self._handle_assistant_ask,
         }
 
     @property
@@ -886,11 +890,16 @@ class ControlCommandDispatcher:
         except ConversationValidationError as err:
             raise DispatcherError("validation_error", str(err)) from None
 
+        new_translation = None
+        if text is not None and self._engine is not None and hasattr(self._engine, "retranslate_message"):
+            new_translation = await self._engine.retranslate_message(cid, mid, updated.text)
+
         return {
             "conversation_id": cid,
             "message_id": updated.message_id,
             "text": updated.text,
             "source": updated.source,
+            **({"translation": new_translation} if new_translation else {}),
         }
 
     # --- 3. Local Model Packs -----------------------------------------------------------------
@@ -1109,21 +1118,30 @@ class ControlCommandDispatcher:
         profile: HardwareProfile = await asyncio.to_thread(probe.probe)
 
         kind = PackKind.STT if capability.lower() == "stt" else PackKind.TRANSLATION
-        is_local = _is_local_model_ready(
-            capability,
-            source_lang=source_lang if isinstance(source_lang, str) else None,
-            target_lang=target_lang if isinstance(target_lang, str) else None,
+        src_lang = source_lang if isinstance(source_lang, str) else None
+        tgt_lang = target_lang if isinstance(target_lang, str) else None
+        language_supported = (
+            _is_local_translation_pair_supported(src_lang, tgt_lang)
+            if kind is PackKind.TRANSLATION and tgt_lang
+            else True
         )
 
         if pack_id:
             pack = catalog.get(pack_id)
             if pack is None:
                 raise DispatcherError("not_found", f"Pack '{pack_id}' not found")
+            is_local = _is_local_model_ready(
+                capability,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+                pack_id=pack.pack_id,
+            )
             issues = compatibility_issues(pack, profile)
             active = await asyncio.to_thread(installer.active, pack.pack_id)
             ready = (active is not None and len(issues) == 0) or is_local
             installed = (active is not None) or is_local
             tier_val = pack.tiers[0].value if pack.tiers else "minimal"
+            size_bytes = pack.size_bytes or (500_000_000 if kind is PackKind.STT else 300_000_000)
             return {
                 "capability": capability,
                 "pack_id": pack.pack_id,
@@ -1131,11 +1149,18 @@ class ControlCommandDispatcher:
                 "issues": [] if ready else issues,
                 "installed": installed,
                 "tier": tier_val,
+                "size_bytes": size_bytes,
+                "language_supported": language_supported,
             }
 
         selection = select_default_pack(catalog, kind, profile)
         pack = selection.pack
         if pack is None:
+            is_local = _is_local_model_ready(
+                capability,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+            )
             return {
                 "capability": capability,
                 "pack_id": None,
@@ -1143,13 +1168,22 @@ class ControlCommandDispatcher:
                 "issues": [] if is_local else ["no_compatible_pack"],
                 "installed": is_local,
                 "tier": "minimal",
+                "size_bytes": 500_000_000 if kind is PackKind.STT else 300_000_000,
+                "language_supported": language_supported,
                 "reason": selection.reason,
             }
 
+        is_local = _is_local_model_ready(
+            capability,
+            source_lang=src_lang,
+            target_lang=tgt_lang,
+            pack_id=pack.pack_id,
+        )
         active = await asyncio.to_thread(installer.active, pack.pack_id)
         ready = (active is not None) or is_local
         installed = (active is not None) or is_local
         tier_val = selection.tier.value if selection.tier else "minimal"
+        size_bytes = pack.size_bytes or (500_000_000 if kind is PackKind.STT else 300_000_000)
         return {
             "capability": capability,
             "pack_id": pack.pack_id,
@@ -1157,6 +1191,8 @@ class ControlCommandDispatcher:
             "issues": [],
             "installed": installed,
             "tier": tier_val,
+            "size_bytes": size_bytes,
+            "language_supported": language_supported,
             "reason": selection.reason,
         }
 
@@ -1413,3 +1449,29 @@ class ControlCommandDispatcher:
                 return {"cancelled": True, "request_id": target_id}
 
         return {"cancelled": False, "request_id": target_id}
+
+    async def _handle_assistant_ask(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cid = payload.get("conversation_id")
+        question = payload.get("question")
+        if not isinstance(cid, str) or not cid:
+            raise DispatcherError("invalid_request", "conversation_id is required")
+        if not isinstance(question, str) or not question.strip():
+            raise DispatcherError("invalid_request", "question is required")
+
+        service = self._get_summary_service()
+        if service is None or not hasattr(service, "ask_question"):
+            raise DispatcherError("assistant_unavailable", "Assistant service is not configured")
+
+        outcome = await service.ask_question(cid, question)
+        if not outcome.ok:
+            err = outcome.error
+            raise DispatcherError(err.code.value, err.message)
+
+        return {
+            "conversation_id": cid,
+            "answer_markdown": outcome.answer_markdown,
+            "warning": _warning_dict(outcome.warning),
+            "provider": outcome.provider.to_dict() if outcome.provider else None,
+            "included_message_count": outcome.included_message_count,
+            "omitted_message_count": outcome.omitted_message_count,
+        }

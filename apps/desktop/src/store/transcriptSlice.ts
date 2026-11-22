@@ -764,7 +764,10 @@ export const createTranscriptSlice =
         // If we don't have a direct socket connection (like in the overlay window),
         // we relay the request to the main window via Tauri events.
         if (!socket || !connected) {
-          if (typeof window !== "undefined" && window.__TAURI__) {
+          if (
+            isTauriRuntime() ||
+            (typeof window !== "undefined" && (window as unknown as { __TAURI__?: unknown }).__TAURI__)
+          ) {
             const { emit } = await import("@tauri-apps/api/event");
             await emit("relay_request_suggestion", { entryId, targetText, context });
           }
@@ -788,7 +791,10 @@ export const createTranscriptSlice =
 
         // Overlay window mirrors state without a direct socket; relay to main window first.
         if (!state.socket && state.connected) {
-          if (typeof window !== "undefined" && (window as unknown as { __TAURI__?: unknown }).__TAURI__) {
+          if (
+            isTauriRuntime() ||
+            (typeof window !== "undefined" && (window as unknown as { __TAURI__?: unknown }).__TAURI__)
+          ) {
             void import("@tauri-apps/api/event").then(({ emit }) => {
               void emit("relay_request_assist", { entryId });
             });
@@ -878,13 +884,30 @@ export const createTranscriptSlice =
         const msgId = prevEntry.messageId ?? prevEntry.id;
         if (isTauriRuntime() && convId && msgId) {
           try {
-            await forwardCommand({
+            const res = await forwardCommand({
               type: "message_update",
               conversation_id: convId,
               message_id: msgId,
               ...(patch.text !== undefined ? { text: nextText } : {}),
               ...(patch.source !== undefined && nextSource ? { source: nextSource } : {}),
             });
+            if (patch.text !== undefined) {
+              const reply = res.messages.find(
+                (item) => typeof (item as Record<string, unknown>).translation === "string",
+              ) as Record<string, unknown> | undefined;
+              const retranslated =
+                typeof reply?.translation === "string" ? reply.translation.trim() : "";
+              if (retranslated) {
+                set((s) => ({
+                  entries: s.entries.map((entry) =>
+                    entry.id === prevEntry.id ||
+                    (Boolean(prevEntry.messageId) && entry.messageId === prevEntry.messageId)
+                      ? { ...entry, translation: retranslated, translationFinal: true }
+                      : entry,
+                  ),
+                }));
+              }
+            }
           } catch (err) {
             set({
               entries: prevEntries,

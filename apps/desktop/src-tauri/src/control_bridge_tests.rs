@@ -868,6 +868,7 @@
             ("get_provider_manifests", None, 10, false, false),
             ("audio_probe", None, 10, false, false),
             ("summary_cancel", None, 10, false, false),
+            ("assistant_ask", None, 60, false, false),
         ];
         for (kind, terminal, seconds, accepts_hf_token, accepts_assistant_credentials) in table {
             let checked = check_forward_command(json!({"type": kind}), None).unwrap();

@@ -115,7 +115,7 @@ export interface ConversationSlice {
   activeConversationId: string | null;
   isViewingHistory: boolean;
 
-  // EF-029 Summary
+  // EF-029 Summary & Quick Ask
   summaryText: string;
   summaryLoading: boolean;
   summaryVisible: boolean;
@@ -124,12 +124,17 @@ export interface ConversationSlice {
   activeSummaryRequestId: string | null;
   activeSummaryConversationId: string | null;
   summaryStreamedViaEvent: boolean;
+  askAnswer: string;
+  askLoading: boolean;
+  askError: string | null;
 
   syncAssistantService: () => Promise<boolean>;
   requestSummary: () => void;
   cancelSummary: () => Promise<void>;
   openSummary: () => void;
   closeSummary: () => void;
+  askMeeting: (question: string) => Promise<void>;
+  clearAsk: () => void;
 
   // EF-029 SQLite-Backed Conversation History
   savedConversations: ConversationRecord[];
@@ -202,6 +207,9 @@ export const createConversationSlice =
     activeSummaryRequestId: null,
     activeSummaryConversationId: null,
     summaryStreamedViaEvent: false,
+    askAnswer: "",
+    askLoading: false,
+    askError: null,
 
     // History state
     savedConversations: [],
@@ -358,10 +366,69 @@ export const createConversationSlice =
     },
 
     closeSummary: () => {
-      if (get().summaryLoading) {
-        void get().cancelSummary();
+      // Hiding the modal preserves an in-flight summary; users cancel explicitly via Stop.
+      set({ summaryVisible: false });
+    },
+
+    clearAsk: () => {
+      set({ askAnswer: "", askError: null, askLoading: false });
+    },
+
+    askMeeting: async (question: string) => {
+      const trimmed = question.trim();
+      if (!trimmed) return;
+      const state = get();
+      const conversationId = state.engineConversationId || state.activeConversationId;
+      if (!conversationId || !state.connected || !isTauriRuntime()) {
+        set({ askError: "Start or load a saved conversation with a connected engine to ask AI." });
+        return;
       }
-      set({ summaryVisible: false, summaryLoading: false });
+      const assistantSvc = state.services?.assistant;
+      if (
+        assistantSvc?.enabled &&
+        assistantSvc.providerId !== "local-openai-compatible" &&
+        !state.consent?.assistant
+      ) {
+        set({
+          askError: "Cloud consent is required for AI Assistant. Grant permission in Settings.",
+        });
+        return;
+      }
+
+      set({ askLoading: true, askError: null });
+      if (assistantSvc?.enabled) {
+        const ok = await get().syncAssistantService();
+        if (!ok) {
+          set({
+            askLoading: false,
+            askError: "Assistant is not configured or credentials are missing.",
+          });
+          return;
+        }
+      }
+      try {
+        const res = await forwardCommand({
+          type: "assistant_ask",
+          conversation_id: conversationId,
+          question: trimmed,
+        });
+        const reply = res.messages.find(
+          (item) => typeof (item as Record<string, unknown>).answer_markdown === "string",
+        ) as Record<string, unknown> | undefined;
+        const answer =
+          typeof reply?.answer_markdown === "string" ? reply.answer_markdown.trim() : "";
+        if (!answer) {
+          set({ askLoading: false, askError: "Assistant returned an empty answer." });
+          return;
+        }
+        set({ askAnswer: answer, askLoading: false, askError: null });
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({
+          askLoading: false,
+          askError: `Quick Ask failed: ${describeCommandError(code)} (${code})`,
+        });
+      }
     },
 
     setHistorySearchQuery: (query: string) => {

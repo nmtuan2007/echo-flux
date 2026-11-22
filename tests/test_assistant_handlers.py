@@ -529,11 +529,8 @@ class FakeLLMAssistant:
 
 
 @pytest.fixture
-def fake_legacy_llm(monkeypatch):
-    import engine.llm.assistant as legacy
-
+def fake_legacy_llm():
     FakeLLMAssistant.instances = []
-    monkeypatch.setattr(legacy, "LLMAssistant", FakeLLMAssistant)
     return FakeLLMAssistant
 
 

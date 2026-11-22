@@ -207,6 +207,57 @@
   color: var(--accent);
 }
 
+.summary-ask-box {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.summary-ask-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.summary-ask-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.summary-ask-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.summary-ask-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.summary-ask-error {
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.summary-ask-answer {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
 
 /* ==========================================================================
    Milestone 3 UX Styles (EF-026, EF-027, EF-028, EF-029)

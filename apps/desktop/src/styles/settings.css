@@ -534,3 +534,19 @@
 .audio-probe-status.error {
   color: var(--danger);
 }
+
+.settings-collapsible > summary {
+  cursor: pointer;
+  margin-bottom: 0;
+  list-style: none;
+}
+
+.settings-collapsible > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.settings-collapsible[open] > summary::before {
+  transform: rotate(90deg);
+}

@@ -298,7 +298,13 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
                     type="button"
                     className="btn btn-secondary btn-sm"
                     disabled={locked}
-                    onClick={() => acceptCloudConsent({ [service]: true })}
+                    onClick={() =>
+                      acceptCloudConsent(
+                        service === "assistant"
+                          ? { assistant: true, summary: true }
+                          : { [service]: true },
+                      )
+                    }
                   >
                     Grant Cloud Consent
                   </button>
