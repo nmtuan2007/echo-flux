@@ -1,5 +1,4 @@
 import { useEngineStore } from "../store/engineStore";
-import { derivePipelineReadiness } from "../store/settingsSlice";
 import { invoke } from "@tauri-apps/api/tauri";
 
 export function Header() {
@@ -9,29 +8,16 @@ export function Header() {
     isToggling,
     activeView,
     theme,
-    services,
-    config,
-    consent,
-    packStatus,
     startPipeline,
     stopPipeline,
     setActiveView,
     setTheme,
-    openSettingsFor,
   } = useEngineStore();
 
   const handleStartStop = () => {
     if (isToggling) return;
     if (running) {
       stopPipeline();
-      return;
-    }
-    const readiness = derivePipelineReadiness({ connected, services, config, consent, packStatus });
-    if (!readiness.ready && connected) {
-      useEngineStore.setState({
-        appError: `${readiness.reason}. Complete setup in Settings before starting.`,
-      });
-      openSettingsFor(readiness.targetService);
       return;
     }
     startPipeline();

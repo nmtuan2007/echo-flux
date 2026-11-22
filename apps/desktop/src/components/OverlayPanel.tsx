@@ -32,6 +32,7 @@ export const OverlayPanel: React.FC = () => {
   const [copiedReplyIdx, setCopiedReplyIdx] = useState<number | null>(null);
   const [silenceHint, setSilenceHint] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
 
   const hasLiveSignal =
     (config.audioSource !== "system" && (audioLevels?.mic ?? 0) >= 0.01) ||
@@ -85,10 +86,16 @@ export const OverlayPanel: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (isNearBottomRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [entries, partials]);
+
+  const handleCaptionsScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  };
 
   useEffect(() => {
     if (!shortcutsEnabled && isLocked) {
@@ -117,12 +124,16 @@ export const OverlayPanel: React.FC = () => {
     await emit("relay_toggle_pipeline").catch(console.error);
   };
 
+  const handleToggleTranslation = async () => {
+    await emit("relay_toggle_translation").catch(console.error);
+  };
+
   const cycleFontSize = () => {
     setFontSize((prev) => (prev === "sm" ? "md" : prev === "md" ? "lg" : "sm"));
   };
 
   const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
-  const recentEntries = entries.slice(-8);
+  const recentEntries = entries.slice(-30);
   const partialStreams = useMemo(
     () => Object.keys(partials).sort((a, b) => streamRank(a) - streamRank(b)),
     [partials],
@@ -233,6 +244,22 @@ export const OverlayPanel: React.FC = () => {
             >
               {highOpacity ? "90%" : "60%"}
             </button>
+            <button
+              type="button"
+              className={`overlay-btn ${translationEnabled ? "overlay-btn-primary" : ""}`}
+              onClick={() => void handleToggleTranslation()}
+              disabled={running || isToggling}
+              title={
+                running
+                  ? "Stop session to toggle translation"
+                  : translationEnabled
+                    ? "Disable live translation"
+                    : "Enable live translation"
+              }
+              aria-label="Toggle translation"
+            >
+              {translationEnabled ? "🌐 On" : "🌐 Off"}
+            </button>
             {assistantEnabled && (
               <button
                 type="button"
@@ -288,7 +315,7 @@ export const OverlayPanel: React.FC = () => {
         </div>
       )}
 
-      <div className="overlay-captions" ref={scrollRef}>
+      <div className="overlay-captions" ref={scrollRef} onScroll={handleCaptionsScroll}>
         {running && silenceHint && !isLocked && (
           <div className="overlay-silence-hint" role="status">
             No audio signal detected yet — check Mic/System device or mute state.

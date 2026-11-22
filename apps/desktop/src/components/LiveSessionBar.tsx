@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { isTauriRuntime } from "../lib/engineBridge";
 import { EngineConfig, useEngineStore } from "../store/engineStore";
 import { PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
-import { derivePipelineReadiness } from "../store/settingsSlice";
+import { derivePipelineReadiness, fieldsFor, findProvider } from "../store/settingsSlice";
 import { isAssistantConfigured } from "../store/transcriptSlice";
 import type { ExportEntry } from "../utils/export";
 import { ExportMenu } from "./ExportMenu";
@@ -87,6 +87,10 @@ export function LiveSessionBar() {
     return () => clearInterval(timer);
   }, [running]);
 
+  const sttManifest = findProvider("stt", services?.stt?.providerId || "local");
+  const sttSupportsLanguage = sttManifest
+    ? fieldsFor(sttManifest, "stt").some((f) => f.key === "language")
+    : true;
   const spokenLang =
     (services?.stt?.options?.language as string) || config.language || "auto";
   const hasCustomSpokenLang = !PRESET_INPUT_LANGUAGES.some((o) => o.code === spokenLang);
@@ -337,11 +341,21 @@ export function LiveSessionBar() {
             value={spokenLang}
             onChange={(e) => {
               const lang = e.target.value;
-              setServiceOptionInput("stt", "language", lang);
-              updateConfig({ language: lang });
+              if (sttSupportsLanguage) {
+                setServiceOptionInput("stt", "language", lang);
+              }
+              updateConfig({ language: lang, sourceLang: lang });
+              setServiceOptionInput("translation", "source_lang", lang);
+              if (connected && isTauriRuntime() && translationEnabled) {
+                void checkPackReadiness("translation");
+              }
             }}
-            disabled={isToggling}
-            title="Spoken language for Speech-to-Text"
+            disabled={isToggling || !sttSupportsLanguage}
+            title={
+              sttSupportsLanguage
+                ? "Spoken language for Speech-to-Text (syncs translation source)"
+                : "Configured via provider-specific language settings"
+            }
           >
             {hasCustomSpokenLang && <option value={spokenLang}>{spokenLang}</option>}
             {PRESET_INPUT_LANGUAGES.map((opt) => (

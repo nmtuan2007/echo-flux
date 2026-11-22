@@ -439,6 +439,24 @@ export function TranscriptPanel() {
             >
               {sourceLabels.system || "Others"}
             </button>
+            {(normalizedQuery || sourceFilter !== "all") && (
+              <>
+                <span className="filter-match-count" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                  {filteredEntries.length}/{entries.length}
+                </span>
+                <button
+                  type="button"
+                  className="btn-text"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setSourceFilter("all");
+                  }}
+                  title="Clear transcript filter"
+                >
+                  Clear
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

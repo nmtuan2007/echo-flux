@@ -74,6 +74,7 @@ export const RECONNECT_DELAY_MS = 3000;
 export function connectionResetState(): Partial<EngineState> {
   return {
     connected: false,
+    engineStarting: false,
     socket: null,
     running: false,
     isToggling: false,
@@ -95,11 +96,25 @@ export function sessionStartedState(
     isToggling: false,
     preparedConversationId: null,
     preserveEntriesOnStart: false,
-    ...(!preserveEntries ? { entries: [] } : {}),
+    setupTitleDirty: false,
+    ...(!preserveEntries
+      ? {
+          entries: [],
+          askAnswer: "",
+          askHistory: [],
+          summaryWarning: null,
+        }
+      : {}),
     partials: {},
     suggestionLoading: {},
     summaryText: "",
     summaryVisible: false,
+    summaryError: null,
+    summaryCancelledByUser: false,
+    activeSummaryRequestId: null,
+    activeSummaryConversationId: null,
+    summaryStreamedViaEvent: false,
+    askError: null,
     activeTranslationBackend: null,
     downloading: false,
     downloadModel: "",
@@ -256,6 +271,8 @@ export interface BootstrapOptions {
 export interface SessionSlice {
   // Connection
   connected: boolean;
+  engineStarting: boolean;
+  engineStartError: string | null;
   socket: WebSocket | null;
   transport: EngineTransport;
   // Bumped whenever the owned engine run changes or the connection is torn down; timers and
@@ -463,17 +480,21 @@ export const createSessionSlice =
 
       const requested = generation;
       connectInFlight = requested;
+      set({ engineStarting: true, engineStartError: null });
       let info: EngineConnectionInfo;
       try {
         info = await startOwnedEngine();
       } catch (error) {
         if (connectInFlight === requested) connectInFlight = null;
         if (requested !== generation) return;
+        const msg =
+          error instanceof BridgeFailure
+            ? error.message
+            : "The engine could not be started (bridge_failed)";
         set({
-          appError:
-            error instanceof BridgeFailure
-              ? error.message
-              : "The engine could not be started (bridge_failed)",
+          engineStarting: false,
+          engineStartError: msg,
+          appError: msg,
         });
         scheduleSecureReconnect(requested);
         return;
@@ -515,12 +536,13 @@ export const createSessionSlice =
           if (frame.op === "auth_ok") {
             authenticated = true;
             cancelReconnect();
-            set({ connected: true });
+            set({ connected: true, engineStarting: false, engineStartError: null });
             if (get().history.length > 0) {
               void get().migrateLegacyHistory();
             }
           } else if (frame.op === "error") {
-            set({ appError: describeTransportError(frame.code) });
+            const msg = describeTransportError(frame.code);
+            set({ engineStarting: false, engineStartError: msg, appError: msg });
           }
           return;
         }
@@ -571,29 +593,15 @@ export const createSessionSlice =
       }
     };
 
-    const startSecure = async () => {
-      const stateSnapshot = get();
-      const { connected, isToggling } = stateSnapshot;
-      if (!connected || isToggling) return;
-
-      const readiness = derivePipelineReadiness(stateSnapshot);
-      if (!readiness.ready && readiness.reason) {
-        set({
-          appError: `${readiness.reason}. Configure or download in Settings before starting.`,
-        });
-        return;
-      }
-
-      const gen = generation;
-      const {
-        activeConversationId: prevActiveId,
-        engineConversationId: prevEngineId,
-        preparedConversationId,
-        isViewingHistory,
-      } = get();
+    const prepareSessionStart = (): boolean => {
+      const s = get();
       const hasPrepared = Boolean(
-        preparedConversationId &&
-          (prevActiveId === preparedConversationId || prevEngineId === preparedConversationId),
+        s.preparedConversationId &&
+          (s.activeConversationId === s.preparedConversationId ||
+            s.engineConversationId === s.preparedConversationId),
+      );
+      const hadPrevious = Boolean(
+        s.activeConversationId || s.engineConversationId || s.isViewingHistory,
       );
       set({
         isToggling: true,
@@ -605,10 +613,31 @@ export const createSessionSlice =
               engineConversationId: null,
               isViewingHistory: false,
               preserveEntriesOnStart: false,
-              ...(isViewingHistory ? { pendingTitle: "" } : {}),
+              ...(hadPrevious && !s.setupTitleDirty ? { pendingTitle: "" } : {}),
             }
           : {}),
       });
+      return hasPrepared;
+    };
+
+    const startSecure = async () => {
+      const stateSnapshot = get();
+      const { connected, isToggling } = stateSnapshot;
+      if (!connected || isToggling) return;
+
+      const readiness = derivePipelineReadiness(stateSnapshot);
+      if (!readiness.ready && readiness.reason) {
+        set({
+          appError: `${readiness.reason}. Complete setup in Settings before starting.`,
+        });
+        if (readiness.targetService) {
+          get().openSettingsFor(readiness.targetService);
+        }
+        return;
+      }
+
+      const gen = generation;
+      prepareSessionStart();
 
       if (LEGACY_SECRET_FIELDS.some((field) => get().config[field])) {
         await get().commitLegacySecrets();
@@ -674,6 +703,8 @@ export const createSessionSlice =
 
     return {
       connected: false,
+      engineStarting: false,
+      engineStartError: null,
       socket: null,
       transport: "legacy",
       engineGeneration: 0,
@@ -734,36 +765,11 @@ export const createSessionSlice =
           void startSecure();
           return;
         }
-        const {
-          config,
-          isViewingHistory,
-          activeConversationId,
-          engineConversationId,
-          preparedConversationId,
-        } = get();
         const socket = connectedSocket();
         if (!socket) return;
 
-        const hasPrepared = Boolean(
-          preparedConversationId &&
-            (activeConversationId === preparedConversationId ||
-              engineConversationId === preparedConversationId),
-        );
-        set({
-          isToggling: true,
-          activeView: "transcript",
-          preparedConversationId: null,
-          ...(!hasPrepared
-            ? {
-                activeConversationId: null,
-                engineConversationId: null,
-                isViewingHistory: false,
-                preserveEntriesOnStart: false,
-                ...(isViewingHistory ? { pendingTitle: "" } : {}),
-              }
-            : {}),
-        });
-        socket.send(deps.commands.start(config));
+        prepareSessionStart();
+        socket.send(deps.commands.start(get().config));
       },
 
       stopPipeline: () => {

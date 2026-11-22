@@ -574,4 +574,72 @@ describe("Phase 1-4 UI enhancements", () => {
     expect(screen.getByText("Who owns QA?")).toBeTruthy();
     expect(screen.getByText("Linh.")).toBeTruthy();
   });
+
+  it("clears leaked title and summary/ask state when starting a fresh session after a previous one", async () => {
+    const { routeEngineMessage } = await import("../store/engineStore");
+    const sent: string[] = [];
+    useEngineStore.setState({
+      connected: true,
+      running: false,
+      activeConversationId: "conv-prev",
+      engineConversationId: "conv-prev",
+      pendingTitle: "Previous Standup",
+      setupTitleDirty: false,
+      askAnswer: "Old answer",
+      askHistory: [{ id: "a1", question: "Old Q", answer: "Old answer" }],
+      summaryError: "Old error",
+      socket: { readyState: 1, send: (d: string) => sent.push(d) } as unknown as WebSocket,
+    });
+
+    useEngineStore.getState().startPipeline();
+    act(() => {
+      routeEngineMessage(
+        { type: "status", status: "started" },
+        useEngineStore.setState,
+        useEngineStore.getState,
+      );
+    });
+
+    expect(useEngineStore.getState().pendingTitle).toBe("");
+    expect(useEngineStore.getState().askHistory).toEqual([]);
+    expect(useEngineStore.getState().askAnswer).toBe("");
+    expect(useEngineStore.getState().summaryError).toBeNull();
+  });
+
+  it("syncs Spoken language to translation source_lang and flags unsupported offline Marian pairs", () => {
+    useEngineStore.getState().updateServiceConfig("translation", { enabled: true, providerId: "local" });
+    useEngineStore.getState().setServiceOptionInput("translation", "target_lang", "en");
+
+    render(<LiveSessionBar />);
+    const spokenSelect = screen.getByLabelText("Spoken language") as HTMLSelectElement;
+    fireEvent.change(spokenSelect, { target: { value: "ja" } });
+
+    expect(useEngineStore.getState().services.translation.options.source_lang).toBe("ja");
+    expect(screen.getByText(/Offline Marian unsupported \(ja → en\)/i)).toBeTruthy();
+  });
+
+  it("shows match counter and Clear button in TranscriptPanel filter bar", () => {
+    useEngineStore.setState({
+      entries: [
+        { id: "e1", text: "Alpha topic", translation: null, isFinal: true, timestamp: 1, source: "mic" },
+        { id: "e2", text: "Beta topic", translation: null, isFinal: true, timestamp: 2, source: "system" },
+      ],
+    });
+    render(<TranscriptPanel />);
+    const search = screen.getByRole("searchbox", { name: /Search transcript/i });
+    fireEvent.change(search, { target: { value: "Alpha" } });
+    expect(screen.getByText("1/2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.getByText("Beta topic")).toBeTruthy();
+  });
+
+  it("renders quick translation toggle in OverlayPanel", async () => {
+    const eventMod = await import("@tauri-apps/api/event");
+    vi.mocked(eventMod.emit).mockClear();
+    useEngineStore.setState({ connected: true, running: false });
+    render(<OverlayPanel />);
+    const btn = screen.getByRole("button", { name: /Toggle translation/i });
+    fireEvent.click(btn);
+    expect(eventMod.emit).toHaveBeenCalledWith("relay_toggle_translation");
+  });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
+import { resolveEffectiveTranslationSourceLang } from "../store/providerCatalog";
 
 export interface LocalPackStatusProps {
   capability: "stt" | "translation";
@@ -36,8 +37,7 @@ export function LocalPackStatus({
   const [installing, setInstalling] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const sourceLang =
-    (services?.translation?.options?.source_lang as string) || config.sourceLang || "en";
+  const sourceLang = resolveEffectiveTranslationSourceLang(services, config);
   const targetLang =
     (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
   const qualityPreset =

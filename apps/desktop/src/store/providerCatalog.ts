@@ -82,6 +82,52 @@ export const PRESET_INPUT_LANGUAGES: readonly { code: string; label: string }[] 
   ...PRESET_TARGET_LANGUAGES,
 ];
 
+// Mirrors _LEGACY_MARIAN_PAIRS in engine/local_models/catalog.py.
+const LOCAL_MARIAN_PAIRS = new Set([
+  "en->vi",
+  "en->zh",
+  "en->ja",
+  "en->ko",
+  "en->de",
+  "en->fr",
+  "en->es",
+  "vi->en",
+]);
+
+export function isLocalMarianPairSupported(
+  sourceLang: string | undefined | null,
+  targetLang: string | undefined | null,
+): boolean {
+  const src = (sourceLang ?? "").trim().toLowerCase();
+  const tgt = (targetLang ?? "").trim().toLowerCase();
+  if (!tgt || tgt === "auto") return false;
+  if (!src || src === "auto") {
+    let matches = 0;
+    for (const pair of LOCAL_MARIAN_PAIRS) {
+      if (pair.endsWith(`->${tgt}`)) matches += 1;
+    }
+    return matches === 1;
+  }
+  return LOCAL_MARIAN_PAIRS.has(`${src}->${tgt}`);
+}
+
+export function resolveEffectiveTranslationSourceLang(
+  services?: ServicesConfig | null,
+  config?: { sourceLang?: string; language?: string } | null,
+): string {
+  const explicit = services?.translation?.options?.source_lang;
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim();
+  const sttLang = services?.stt?.options?.language;
+  if (typeof sttLang === "string" && sttLang.trim() && sttLang.trim().toLowerCase() !== "auto") {
+    return sttLang.trim();
+  }
+  const cfgLang = config?.language;
+  if (typeof cfgLang === "string" && cfgLang.trim() && cfgLang.trim().toLowerCase() !== "auto") {
+    return cfgLang.trim();
+  }
+  return "auto";
+}
+
 // ---------------------------------------------------------------------------
 // Provider catalog (fallback until get_provider_manifests loads from engine)
 // ---------------------------------------------------------------------------

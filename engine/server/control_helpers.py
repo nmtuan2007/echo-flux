@@ -3,10 +3,45 @@
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from engine.core.config import Config
 from engine.providers.manifests import ManifestField, ProviderManifest
+from engine.server.protocol import suggestion_result_message
+
+
+def stored_assist_payload(
+    conversation_id: str,
+    message_id: str,
+    outcome: Any,
+    provider: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Canonical suggestion_result payload shared by engine and control_dispatcher."""
+    stored = outcome.stored
+    resolved_provider = provider
+    if resolved_provider is None and getattr(stored, "provider", None) is not None:
+        resolved_provider = stored.provider.to_dict()
+    return suggestion_result_message(
+        conversation_id=conversation_id,
+        message_id=message_id,
+        assist_id=stored.assist_id,
+        suggested_replies=[
+            {"strategy": r.strategy, "text": r.text, "reasoning": r.reasoning}
+            for r in stored.suggested_replies
+        ],
+        clarifying_questions=[
+            {"question": q.question, "purpose": q.purpose}
+            for q in stored.clarifying_questions
+        ],
+        provider=resolved_provider,
+        context_window={
+            "message_count": outcome.context_message_count,
+            "omitted_message_count": outcome.omitted_message_count,
+            "profile_count": outcome.profile_count,
+            "omitted_profile_count": outcome.omitted_profile_count,
+        },
+    )
 
 
 async def run_summary_stream(
@@ -133,28 +168,29 @@ def is_local_model_ready(
     source_lang: Optional[str] = None,
     target_lang: Optional[str] = None,
     pack_id: Optional[str] = None,
+    models_dir: Optional[Path] = None,
 ) -> bool:
     """Checks whether local STT or Translation models exist on disk in models_dir."""
     try:
-        models_dir = Config().models_dir
-        if not models_dir or not models_dir.exists():
+        resolved_dir = models_dir if models_dir is not None else Config().models_dir
+        if not resolved_dir or not resolved_dir.exists():
             return False
         cap = (capability or "").lower()
         if cap in ("stt", "speech", "whisper"):
-            if (models_dir / "model.bin").is_file():
+            if (resolved_dir / "model.bin").is_file():
                 return True
             expected_size = _expected_whisper_size(pack_id)
             if expected_size:
-                stt_dirs = list(models_dir.glob(f"models--Systran--faster-whisper-{expected_size}*")) + list(
-                    models_dir.glob(f"models--openai--whisper-{expected_size}*")
+                stt_dirs = list(resolved_dir.glob(f"models--Systran--faster-whisper-{expected_size}*")) + list(
+                    resolved_dir.glob(f"models--openai--whisper-{expected_size}*")
                 )
             else:
-                stt_dirs = list(models_dir.glob("models--Systran--faster-whisper-*")) + list(
-                    models_dir.glob("models--openai--whisper-*")
+                stt_dirs = list(resolved_dir.glob("models--Systran--faster-whisper-*")) + list(
+                    resolved_dir.glob("models--openai--whisper-*")
                 )
             return len(stt_dirs) > 0
         if cap in ("translation", "translate", "marian", "opus"):
-            ct2_dir = models_dir / "ct2"
+            ct2_dir = resolved_dir / "ct2"
             if ct2_dir.exists():
                 src = (source_lang or "").strip().lower()
                 tgt = (target_lang or "").strip().lower()

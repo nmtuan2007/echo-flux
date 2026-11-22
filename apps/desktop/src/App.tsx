@@ -102,6 +102,7 @@ export default function App() {
     let unlistenRelay: (() => void) | undefined;
     let unlistenAssistRelay: (() => void) | undefined;
     let unlistenToggleRelay: (() => void) | undefined;
+    let unlistenTransRelay: (() => void) | undefined;
     let unsubStore: (() => void) | undefined;
     let overlayActive = false;
 
@@ -109,6 +110,7 @@ export default function App() {
     let lastSyncedConfig: unknown = null;
     let lastSyncedLabels: unknown = null;
     let lastSyncedEntries: unknown = null;
+    let lastSyncedAudioLevels: unknown = null;
     const getSyncPayload = (full: boolean) => {
       const state = useEngineStore.getState();
       const payload: Record<string, unknown> = {
@@ -120,13 +122,16 @@ export default function App() {
         suggestionLoading: state.suggestionLoading,
         engineConversationId: state.engineConversationId,
         sttStreams: state.sttStreams,
-        audioLevels: state.audioLevels,
         shortcutsEnabled: state.shortcutsEnabled,
       };
+      if (full || state.audioLevels !== lastSyncedAudioLevels) {
+        lastSyncedAudioLevels = state.audioLevels;
+        payload.audioLevels = state.audioLevels;
+      }
       if (full || state.entries !== lastSyncedEntries) {
         lastSyncedEntries = state.entries;
         // Overlay only renders recent captions; slicing keeps Tauri IPC bounded during long sessions.
-        payload.entries = state.entries.slice(-20);
+        payload.entries = state.entries.slice(-30);
       }
       if (full || state.sourceLabels !== lastSyncedLabels) {
         lastSyncedLabels = state.sourceLabels;
@@ -191,6 +196,14 @@ export default function App() {
         useEngineStore.getState().togglePipeline();
       }).then((f) => (unlistenToggleRelay = f));
 
+      listen("relay_toggle_translation", () => {
+        const s = useEngineStore.getState();
+        if (s.running) return;
+        const next = !(s.services?.translation?.enabled ?? s.config.translationEnabled);
+        s.updateServiceConfig("translation", { enabled: next });
+        s.updateConfig({ translationEnabled: next });
+      }).then((f) => (unlistenTransRelay = f));
+
       unsubStore = useEngineStore.subscribe((state, prev) => {
         if (!overlayActive) return;
         if (
@@ -222,6 +235,7 @@ export default function App() {
       if (unlistenRelay) unlistenRelay();
       if (unlistenAssistRelay) unlistenAssistRelay();
       if (unlistenToggleRelay) unlistenToggleRelay();
+      if (unlistenTransRelay) unlistenTransRelay();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
         disconnect();

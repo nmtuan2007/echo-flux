@@ -74,6 +74,9 @@ from engine.server.control_helpers import (
     serialize_manifest as _serialize_manifest,
 )
 from engine.server.control_helpers import (
+    stored_assist_payload as _stored_assist_payload,
+)
+from engine.server.control_helpers import (
     warning_dict as _warning_dict,
 )
 from engine.server.protocol import (
@@ -184,12 +187,15 @@ class ControlCommandDispatcher:
     def _get_probe(self) -> Any:
         return self._probe or SystemHardwareProbe()
 
+    def _get_config(self) -> Config:
+        cfg = getattr(self._engine, "_app_config", None) if self._engine is not None else None
+        return cfg if cfg is not None else Config()
+
     def _get_installer(self) -> LocalPackInstaller:
         if self._installer is not None:
             return self._installer
-        config = Config()
         return LocalPackInstaller.from_config(
-            config, self._get_catalog(), self._get_probe()
+            self._get_config(), self._get_catalog(), self._get_probe()
         )
 
     def _get_assistant_service(self) -> Any:
@@ -955,12 +961,13 @@ class ControlCommandDispatcher:
         else:
             packs_to_check = list(catalog.packs)
 
+        models_dir = self._get_config().models_dir
         status_list = []
         for p in packs_to_check:
             active = await asyncio.to_thread(installer.active, p.pack_id)
             installed = await asyncio.to_thread(installer.installed_versions, p.pack_id)
             issues = compatibility_issues(p, profile)
-            local_ready = _is_local_model_ready(p.kind.value)
+            local_ready = _is_local_model_ready(p.kind.value, models_dir=models_dir)
             is_ready = (active is not None and len(issues) == 0) or local_ready
             is_installed = bool(installed) or (active is not None) or local_ready
             status_list.append(
@@ -1009,7 +1016,7 @@ class ControlCommandDispatcher:
         tgt_lang = raw_tgt if isinstance(raw_tgt, str) and raw_tgt.strip() and raw_tgt.lower() != "auto" else "vi"
 
         lowered = pack_id.lower()
-        models_dir = Config().models_dir
+        models_dir = self._get_config().models_dir
         if self._pack_install_active is not None:
             raise DispatcherError(
                 "install_in_progress",
@@ -1161,6 +1168,7 @@ class ControlCommandDispatcher:
             else True
         )
 
+        models_dir = self._get_config().models_dir
         if pack_id:
             pack = catalog.get(pack_id)
             if pack is None:
@@ -1170,6 +1178,7 @@ class ControlCommandDispatcher:
                 source_lang=src_lang,
                 target_lang=tgt_lang,
                 pack_id=pack.pack_id,
+                models_dir=models_dir,
             )
             issues = compatibility_issues(pack, profile)
             active = await asyncio.to_thread(installer.active, pack.pack_id)
@@ -1195,6 +1204,7 @@ class ControlCommandDispatcher:
                 capability,
                 source_lang=src_lang,
                 target_lang=tgt_lang,
+                models_dir=models_dir,
             )
             return {
                 "capability": capability,
@@ -1229,6 +1239,7 @@ class ControlCommandDispatcher:
             source_lang=src_lang,
             target_lang=tgt_lang,
             pack_id=effective_pack_id,
+            models_dir=models_dir,
         )
         active = await asyncio.to_thread(installer.active, pack.pack_id)
         ready = (active is not None) or is_local
@@ -1334,38 +1345,8 @@ class ControlCommandDispatcher:
             err = outcome.error
             raise DispatcherError(err.code.value, err.message)
 
-        stored = outcome.stored
-        replies = [
-            {"strategy": r.strategy, "text": r.text, "reasoning": r.reasoning}
-            for r in stored.suggested_replies
-        ]
-        questions = [
-            {"question": q.question, "purpose": q.purpose}
-            for q in stored.clarifying_questions
-        ]
-        options = [
-            r.get("text") if isinstance(r, dict) else getattr(r, "text", str(r))
-            for r in replies
-        ]
         provider_dict = outcome.provider.to_dict() if outcome.provider else None
-
-        return {
-            "type": "suggestion_result",
-            "conversation_id": cid,
-            "message_id": mid,
-            "entry_id": mid,
-            "assist_id": stored.assist_id,
-            "options": options,
-            "suggested_replies": replies,
-            "clarifying_questions": questions,
-            "provider": provider_dict,
-            "context_window": {
-                "message_count": outcome.context_message_count,
-                "omitted_message_count": outcome.omitted_message_count,
-                "profile_count": outcome.profile_count,
-                "omitted_profile_count": outcome.omitted_profile_count,
-            },
-        }
+        return _stored_assist_payload(cid, mid, outcome, provider=provider_dict)
 
     # --- 6. Transcript Summary Streaming ------------------------------------------------------
 

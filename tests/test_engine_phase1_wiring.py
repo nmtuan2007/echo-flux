@@ -88,3 +88,46 @@ def test_start_assistant_service_wires_and_scrubs_secrets(tmp_path):
     assert engine._assistant_service is None
     assert engine._summary_service is None
     fake_provider.stop.assert_awaited_once()
+
+
+def test_async_db_writer_preserves_order_and_timestamps(tmp_path):
+    from engine.session.session_orchestrator import STTTranscriptEvent
+
+    repo = ConversationRepository(tmp_path / "async_writer.db")
+    engine = EchoFluxEngine(insecure_dev=True, conversation_repo=repo)
+    with patch("engine.audio.microphone.MicrophoneInput"):
+        engine._initialize_pipeline(
+            {"audio.source": "microphone", "vad.enabled": False, "conversation_id": "conv-db-1"}
+        )
+
+    async def _run():
+        engine._db_queue = asyncio.Queue()
+        engine._db_task = asyncio.create_task(engine._db_writer_loop())
+        try:
+            event = STTTranscriptEvent(
+                stream_id="mic",
+                is_final=True,
+                text="Hello world",
+                item_key="mic:1:local:mic:0",
+                revision=1,
+                epoch_id=1,
+                provider_id="local",
+                language="en",
+                start_ms=1250.0,
+                end_ms=2750.0,
+            )
+            engine._on_stt_event(event)
+            await engine._flush_db_writes()
+        finally:
+            import contextlib
+
+            engine._db_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await engine._db_task
+
+    asyncio.run(_run())
+    msgs = repo.list_messages("conv-db-1")
+    assert len(msgs) == 1
+    assert msgs[0].text == "Hello world"
+    assert msgs[0].start_ms == 1250.0
+    assert msgs[0].end_ms == 2750.0

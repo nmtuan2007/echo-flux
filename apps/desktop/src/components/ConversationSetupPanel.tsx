@@ -29,6 +29,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
     setSourceLabels,
     pendingTitle,
     setPendingTitle,
+    setActiveView,
   } = useEngineStore();
 
   const [title, setTitle] = useState(pendingTitle);
@@ -75,14 +76,14 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
     }
   };
 
-  const applySetupDraft = (): ConversationSetupData => {
+  const applySetupDraft = (markDirtyForNext = false): ConversationSetupData => {
     const finalLabels = {
       mic: micLabel.trim().slice(0, MAX_LABEL_CHARS) || "Me",
       system: systemLabel.trim().slice(0, MAX_LABEL_CHARS) || "Others",
     };
     const finalTitle = title.trim().slice(0, MAX_TITLE_CHARS);
     setSourceLabels(finalLabels);
-    setPendingTitle(finalTitle);
+    setPendingTitle(finalTitle, markDirtyForNext);
     return {
       title: finalTitle,
       sourceLabels: finalLabels,
@@ -91,7 +92,7 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
   };
 
   const handleSaveOnly = () => {
-    applySetupDraft();
+    applySetupDraft(true);
     onClose();
   };
 
@@ -172,9 +173,19 @@ export function ConversationSetupPanel({ isOpen, onClose, onStart }: Conversatio
             </div>
 
             {profiles.length === 0 ? (
-              <p className="setup-profiles-empty">
-                No context profiles available. You can create profiles in the Profiles panel.
-              </p>
+              <div className="setup-profiles-empty">
+                <span>No context profiles available yet. </span>
+                <button
+                  type="button"
+                  className="btn-text"
+                  onClick={() => {
+                    onClose();
+                    setActiveView("profiles");
+                  }}
+                >
+                  Create a profile →
+                </button>
+              </div>
             ) : (
               <div className="setup-profiles-checklist setup-profiles-list">
                 {profiles.map((p) => {

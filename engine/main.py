@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from queue import Empty, Queue
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set, Tuple
 
 from engine.conversation.context_profiles import ContextProfileService
 from engine.conversation.models import (
@@ -30,7 +30,12 @@ from engine.core.runtime_setup import (
 from engine.core.runtime_setup import (
     setup_engine_logging as _setup_logging,
 )
-from engine.server.control_helpers import run_summary_stream as _run_summary_stream
+from engine.server.control_helpers import (
+    run_summary_stream as _run_summary_stream,
+)
+from engine.server.control_helpers import (
+    stored_assist_payload as _stored_assist_payload,
+)
 from engine.server.protocol import (
     ASSISTANT_ERROR_MESSAGES,
     ERROR_ASSISTANT_UNAVAILABLE,
@@ -45,7 +50,6 @@ from engine.server.protocol import (
     parse_summary_command,
     safe_command_id,
     suggestion_error_message,
-    suggestion_result_message,
     summary_chunk_message,
     summary_done_message,
     summary_error_replies,
@@ -89,26 +93,7 @@ def _assist_reply(command, outcome) -> dict:
             error.retryable,
             error.provider_code,
         )
-    stored = outcome.stored
-    return suggestion_result_message(
-        conversation_id=command.conversation_id,
-        message_id=command.message_id,
-        assist_id=stored.assist_id,
-        suggested_replies=[
-            {"strategy": s.strategy, "text": s.text, "reasoning": s.reasoning}
-            for s in stored.suggested_replies
-        ],
-        clarifying_questions=[
-            {"question": q.question, "purpose": q.purpose} for q in stored.clarifying_questions
-        ],
-        provider=stored.provider.to_dict() if stored.provider is not None else None,
-        context_window={
-            "message_count": outcome.context_message_count,
-            "omitted_message_count": outcome.omitted_message_count,
-            "profile_count": outcome.profile_count,
-            "omitted_profile_count": outcome.omitted_profile_count,
-        },
-    )
+    return _stored_assist_payload(command.conversation_id, command.message_id, outcome)
 
 
 def _warning_payload(warning) -> Optional[dict]:
@@ -262,7 +247,9 @@ class EchoFluxEngine:
         self,
         insecure_dev: bool = False,
         conversation_repo: Optional[ConversationRepository] = None,
+        config: Optional[Any] = None,
     ):
+        self._app_config = config
         # Tokens are consumed from the environment here and live only inside the server,
         # so they never reach Config, config dumps, logs, or child processes.
         tokens = BootstrapTokens.from_environ(os.environ)
@@ -318,6 +305,10 @@ class EchoFluxEngine:
         self._owned_assistant_provider = None
         self._assistant_tasks: Set[asyncio.Task] = set()
         self._summary_tasks: Dict[str, asyncio.Task] = {}
+        self._db_queue: Optional[asyncio.Queue] = None
+        self._db_task: Optional[asyncio.Task] = None
+        self._post_stop_translator: Optional[Any] = None
+        self._post_stop_translator_key: Optional[Tuple[str, str]] = None
 
         from engine.server.control_dispatcher import ControlCommandDispatcher
 
@@ -333,6 +324,8 @@ class EchoFluxEngine:
     async def start(self):
         self._loop = asyncio.get_running_loop()
         self._result_ready = asyncio.Event()
+        self._db_queue = asyncio.Queue()
+        self._db_task = asyncio.create_task(self._db_writer_loop())
 
         self._ws_server.on_start(self._on_client_start)
         self._ws_server.on_stop(self._on_client_stop)
@@ -429,6 +422,7 @@ class EchoFluxEngine:
 
         if self._running:
             await self._stop_pipeline()
+        await self._close_post_stop_translator()
 
         self._ephemeral_secrets = flat_secrets
         self._service_secrets = service_secrets
@@ -456,6 +450,13 @@ class EchoFluxEngine:
     async def _shutdown(self):
         await self._cancel_assistant_work()
         await self._stop_pipeline()
+        await self._flush_db_writes()
+        if self._db_task is not None:
+            self._db_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._db_task
+            self._db_task = None
+        await self._close_post_stop_translator()
         await self._close_owned_assistant_provider()
         await self._ws_server.stop()
 
@@ -695,6 +696,7 @@ class EchoFluxEngine:
             await translation.stop()
         self._translation_config = None
         self._partial_messages.clear()
+        await self._flush_db_writes()
         if self._active_session_id and self._conversation_repo:
             try:
                 self._conversation_repo.end_session(self._active_session_id)
@@ -775,6 +777,36 @@ class EchoFluxEngine:
     # _start_stt_session readies providers (no device open yet) -> _start_threads opens audio ->
     # Process-{stream} runs VAD and hands audio to the session -> _stop_pipeline stops the
     # session once. Any Start failure goes through _abort_pipeline_start.
+
+    async def _close_post_stop_translator(self) -> None:
+        provider, self._post_stop_translator = self._post_stop_translator, None
+        self._post_stop_translator_key = None
+        if provider is not None:
+            with contextlib.suppress(Exception):
+                await provider.stop()
+
+    async def _db_writer_loop(self) -> None:
+        assert self._db_queue is not None
+        while True:
+            fn = await self._db_queue.get()
+            try:
+                await asyncio.to_thread(fn)
+            except Exception as exc:
+                logger.warning("Async DB write failed (%s): %s", type(exc).__name__, exc)
+            finally:
+                self._db_queue.task_done()
+
+    def _enqueue_db_write(self, fn) -> None:
+        if self._db_queue is not None and self._db_task is not None and not self._db_task.done():
+            self._db_queue.put_nowait(fn)
+            return
+        fn()
+
+    async def _flush_db_writes(self, timeout_s: float = 5.0) -> None:
+        if self._db_queue is None or self._db_task is None or self._db_task.done():
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._db_queue.join(), timeout=timeout_s)
 
     async def _close_owned_assistant_provider(self) -> None:
         provider, self._owned_assistant_provider = self._owned_assistant_provider, None
@@ -996,21 +1028,23 @@ class EchoFluxEngine:
             self._last_entry_stamp = stamp
             entry_id = f"e-{stamp}"
             if self._conversation_repo and self._active_conversation_id:
-                try:
-                    msg_record = TranscriptMessage(
-                        message_id=entry_id,
-                        source=event.stream_id if event.stream_id in ("mic", "system") else "unknown",
-                        text=event.text,
-                        timestamp_ms=time.time() * 1000.0,
-                        is_final=True,
-                        revision=event.revision,
-                        session_id=self._active_session_id,
-                        detected_language=event.language,
-                        stt_provider=ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None,
-                    )
-                    self._conversation_repo.upsert_message(self._active_conversation_id, msg_record)
-                except Exception as e:
-                    logger.warning("Failed to upsert transcript message to repo: %s", e)
+                conv_id = self._active_conversation_id
+                msg_record = TranscriptMessage(
+                    message_id=entry_id,
+                    source=event.stream_id if event.stream_id in ("mic", "system") else "unknown",
+                    text=event.text,
+                    timestamp_ms=time.time() * 1000.0,
+                    start_ms=getattr(event, "start_ms", None),
+                    end_ms=getattr(event, "end_ms", None),
+                    is_final=True,
+                    revision=event.revision,
+                    session_id=self._active_session_id,
+                    detected_language=event.language,
+                    stt_provider=ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None,
+                )
+                self._enqueue_db_write(
+                    lambda cid=conv_id, rec=msg_record: self._conversation_repo.upsert_message(cid, rec)
+                )
 
         msg = _stt_transcript_message(
             event,
@@ -1044,17 +1078,17 @@ class EchoFluxEngine:
         if event.is_final:
             self._enqueue_result(_translation_update_message(event))
             if self._conversation_repo and self._active_conversation_id and event.entry_id:
-                try:
-                    provider_meta = ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None
-                    self._conversation_repo.set_translation(
-                        self._active_conversation_id,
-                        event.entry_id,
-                        event.translation,
-                        provider=provider_meta,
-                        revision=event.source_revision,
+                conv_id = self._active_conversation_id
+                provider_meta = ProviderMetadata(provider_id=event.provider_id) if event.provider_id else None
+                self._enqueue_db_write(
+                    lambda cid=conv_id, eid=event.entry_id, txt=event.translation, p=provider_meta, rev=event.source_revision: self._conversation_repo.set_translation(
+                        cid,
+                        eid,
+                        txt,
+                        provider=p,
+                        revision=rev,
                     )
-                except Exception as e:
-                    logger.warning("Failed to attach translation in repo: %s", e)
+                )
             return
         # A partial translation rides on its caption, and only while that caption is shown.
         caption = self._partial_messages.get(event.stream_id)
@@ -1354,24 +1388,40 @@ class EchoFluxEngine:
                 )
                 from engine.providers.types import TranslationRequest
 
-                settings = LocalTranslationSettings.from_options(dict(local_svc.options))
-                local_provider = LocalTranslationProvider(settings, provider_id=local_svc.provider_id)
-                try:
-                    await local_provider.start()
-                    res = await local_provider.translate(
-                        TranslationRequest(
-                            text=text,
-                            source_lang=cfg.source_lang,
-                            target_lang=cfg.target_lang,
-                        )
+                cache_key = (cfg.source_lang, cfg.target_lang)
+                if (
+                    self._post_stop_translator is None
+                    or self._post_stop_translator_key != cache_key
+                ):
+                    await self._close_post_stop_translator()
+                    settings = LocalTranslationSettings.from_options(dict(local_svc.options))
+                    local_provider = LocalTranslationProvider(
+                        settings, provider_id=local_svc.provider_id
                     )
-                    translated = (res.translated_text or "").strip() or None
-                    provider_id = local_svc.provider_id
-                except Exception as exc:
-                    logger.debug("Post-stop local retranslation skipped (%s)", type(exc).__name__)
-                finally:
-                    with contextlib.suppress(Exception):
-                        await local_provider.stop()
+                    try:
+                        await local_provider.start()
+                        self._post_stop_translator = local_provider
+                        self._post_stop_translator_key = cache_key
+                    except Exception as exc:
+                        logger.debug(
+                            "Post-stop local translator start skipped (%s)", type(exc).__name__
+                        )
+                        with contextlib.suppress(Exception):
+                            await local_provider.stop()
+
+                if self._post_stop_translator is not None:
+                    try:
+                        res = await self._post_stop_translator.translate(
+                            TranslationRequest(
+                                text=text,
+                                source_lang=cfg.source_lang,
+                                target_lang=cfg.target_lang,
+                            )
+                        )
+                        translated = (res.translated_text or "").strip() or None
+                        provider_id = local_svc.provider_id
+                    except Exception as exc:
+                        logger.debug("Post-stop local retranslation skipped (%s)", type(exc).__name__)
 
         if translated and self._conversation_repo is not None:
             meta = ProviderMetadata(provider_id=provider_id) if provider_id else None
@@ -1388,10 +1438,12 @@ class EchoFluxEngine:
 
 def run_engine(config_path=None, insecure_dev: bool = False):
     _load_dotenv()
+    app_config = None
     if config_path is not None:
         from engine.core.config import Config
 
-        _apply_cli_config_env(Config(config_path))
+        app_config = Config(config_path)
+        _apply_cli_config_env(app_config)
     _setup_logging()
 
     # Eagerly initialize PyTorch cuDNN to prevent DLL collision with CTranslate2 later on Windows
@@ -1404,7 +1456,7 @@ def run_engine(config_path=None, insecure_dev: bool = False):
 
     install_progress_hijack()
 
-    engine = EchoFluxEngine(insecure_dev=insecure_dev)
+    engine = EchoFluxEngine(insecure_dev=insecure_dev, config=app_config)
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(engine.start())
 

@@ -10,6 +10,9 @@ function languageLabel(code: string): string {
 
 export function StatusBar() {
   const connected = useEngineStore((s) => s.connected);
+  const engineStarting = useEngineStore((s) => s.engineStarting);
+  const engineStartError = useEngineStore((s) => s.engineStartError);
+  const connect = useEngineStore((s) => s.connect);
   const running = useEngineStore((s) => s.running);
   const entryCount = useEngineStore((s) => s.entries.length);
   const sourceLabels = useEngineStore((s) => s.sourceLabels);
@@ -33,8 +36,25 @@ export function StatusBar() {
   return (
     <footer className="status-bar">
       <div className="status-bar-left">
-        <span className={`status-dot ${connected ? "status-connected" : "status-disconnected"}`} />
-        <span className="status-label">{connected ? "Connected" : "Disconnected"}</span>
+        <span
+          className={`status-dot ${
+            connected ? "status-connected" : engineStarting ? "status-starting" : "status-disconnected"
+          }`}
+        />
+        <span className="status-label">
+          {connected ? "Connected" : engineStarting ? "Starting engine..." : "Disconnected"}
+        </span>
+        {!connected && !engineStarting && engineStartError && (
+          <button
+            type="button"
+            className="btn-text"
+            onClick={connect}
+            title={engineStartError}
+            style={{ fontSize: "11px", padding: "0 4px" }}
+          >
+            ↻ Retry
+          </button>
+        )}
         {running && (
           <>
             <span className="status-separator">|</span>

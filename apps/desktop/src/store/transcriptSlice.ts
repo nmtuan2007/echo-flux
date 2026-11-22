@@ -783,6 +783,7 @@ export const createTranscriptSlice =
           isViewingHistory: false,
           preserveEntriesOnStart: false,
           pendingTitle: "",
+          setupTitleDirty: false,
         });
       },
 

@@ -23,8 +23,10 @@ import {
   fingerprintedFieldsDiffer,
   initialServiceUiState,
   invalidateService,
+  isLocalMarianPairSupported,
   normalizeManifest,
   parseFieldInput,
+  resolveEffectiveTranslationSourceLang,
   setRuntimeCatalog,
   unvalidated,
   withLegacyAssistantRef,
@@ -114,13 +116,18 @@ export function derivePipelineReadiness(state: {
     const transSvc = state.services?.translation;
     const transManifest = transSvc ? findProvider("translation", transSvc.providerId) : undefined;
     const transIsCloud = Boolean(transManifest && transManifest.protocolFamily !== "local");
+    const sourceLang = resolveEffectiveTranslationSourceLang(state.services, state.config);
     const targetLang =
       (transSvc?.options?.target_lang as string) || state.config.targetLang || "vi";
 
-    if (!transIsCloud && state.packStatus.translation?.languageSupported === false) {
+    if (
+      !transIsCloud &&
+      (state.packStatus.translation?.languageSupported === false ||
+        !isLocalMarianPairSupported(sourceLang, targetLang))
+    ) {
       return {
         ready: false,
-        reason: `Offline Marian unsupported (→ ${targetLang})`,
+        reason: `Offline Marian unsupported (${sourceLang} → ${targetLang})`,
         targetService: "translation",
       };
     }
@@ -802,8 +809,7 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
               if (typeof qp === "string" && qp) cmd.quality_preset = qp;
             }
             if (cap === "translation") {
-              cmd.source_lang =
-                (services?.translation?.options?.source_lang as string) || config.sourceLang || "en";
+              cmd.source_lang = resolveEffectiveTranslationSourceLang(services, config);
               cmd.target_lang =
                 (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
             }

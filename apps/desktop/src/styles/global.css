@@ -415,3 +415,9 @@ body,
   font-size: 14px;
   font-weight: 600;
 }
+
+
+.status-starting {
+  background-color: var(--warning);
+  animation: pulse 1.2s ease-in-out infinite;
+}

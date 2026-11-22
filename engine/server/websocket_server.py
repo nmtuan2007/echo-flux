@@ -446,7 +446,7 @@ class WebSocketServer:
                 "speakers": [{"id": "default", "name": "Stop Engine to safely refresh"}],
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _blocking_enumerate():
             mics = []

@@ -74,6 +74,7 @@ export interface ProfilesSliceFields {
   sourceLabels: { mic: string; system: string };
   isSetupOpen: boolean;
   pendingTitle: string;
+  setupTitleDirty: boolean;
 
   loadProfiles: () => Promise<void>;
   getProfileDetail: (profileId: string) => Promise<ContextProfile | null>;
@@ -94,7 +95,7 @@ export interface ProfilesSliceFields {
   setSourceLabels: (labels: { mic: string; system: string }) => void;
   openSetup: () => void;
   closeSetup: () => void;
-  setPendingTitle: (title: string) => void;
+  setPendingTitle: (title: string, forNextSession?: boolean) => void;
   startSessionWithSetup: () => Promise<void>;
 }
 
@@ -115,6 +116,7 @@ export function createProfileActions(
     sourceLabels: initialPrefs.sourceLabels,
     isSetupOpen: false,
     pendingTitle: "",
+    setupTitleDirty: false,
 
     loadProfiles: async () => {
       set({ profilesLoading: true, profilesError: null });
@@ -286,7 +288,11 @@ export function createProfileActions(
 
     openSetup: () => set({ isSetupOpen: true }),
     closeSetup: () => set({ isSetupOpen: false }),
-    setPendingTitle: (title) => set({ pendingTitle: title.slice(0, MAX_TITLE_CHARS) }),
+    setPendingTitle: (title, forNextSession = false) =>
+      set((state) => ({
+        pendingTitle: title.slice(0, MAX_TITLE_CHARS),
+        setupTitleDirty: forNextSession ? true : state.setupTitleDirty,
+      })),
 
     startSessionWithSetup: async () => {
       const { pendingTitle, sourceLabels, attachedProfileIds } = get();
