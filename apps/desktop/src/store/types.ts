@@ -124,7 +124,10 @@ export interface AskTurn {
   id: string;
   question: string;
   answer: string;
+  createdAtMs?: number;
 }
+
+export type OverlayFontSize = "sm" | "md" | "lg";
 
 export interface Conversation {
   id: string;

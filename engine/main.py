@@ -309,6 +309,7 @@ class EchoFluxEngine:
         self._db_task: Optional[asyncio.Task] = None
         self._post_stop_translator: Optional[Any] = None
         self._post_stop_translator_key: Optional[Tuple[str, str]] = None
+        self._last_assistant_error_code: Optional[str] = None
 
         from engine.server.control_dispatcher import ControlCommandDispatcher
 
@@ -337,12 +338,26 @@ class EchoFluxEngine:
         await self._ws_server.start()
         if self._ws_server.is_authenticated:
             self._start_stdin_watch()
+        # Pre-warm Silero VAD ONNX model in background so first-time Start does not stall.
+        threading.Thread(target=self._prewarm_vad_model, name="VadPrewarm", daemon=True).start()
 
         try:
             while True:
                 await asyncio.sleep(1)
         except asyncio.CancelledError:
             await self._shutdown()
+
+    def _prewarm_vad_model(self) -> None:
+        try:
+            from engine.audio.vad import VAD
+
+            cfg = self._app_config
+            vad_enabled = cfg.get("vad.enabled", True) if cfg is not None else True
+            if not vad_enabled:
+                return
+            VAD({"enabled": True, "sample_rate": 16000})
+        except Exception as exc:
+            logger.debug("Background VAD pre-warm skipped (%s)", type(exc).__name__)
 
     def _start_stdin_watch(self):
         """Tauri requests shutdown by closing our stdin. Only armed when supervised
@@ -779,7 +794,8 @@ class EchoFluxEngine:
     # session once. Any Start failure goes through _abort_pipeline_start.
 
     async def _close_post_stop_translator(self) -> None:
-        provider, self._post_stop_translator = self._post_stop_translator, None
+        provider = getattr(self, "_post_stop_translator", None)
+        self._post_stop_translator = None
         self._post_stop_translator_key = None
         if provider is not None:
             with contextlib.suppress(Exception):
@@ -819,12 +835,15 @@ class EchoFluxEngine:
     ) -> bool:
         """Hot-reload repository-backed Assist and Summary from a v2 ``services.assistant`` dict."""
         if getattr(self, "_assistant_provider", None) is not None:
+            self._last_assistant_error_code = None
             return True
         if not isinstance(section, dict):
+            self._last_assistant_error_code = "invalid_config"
             return False
 
         await self._close_owned_assistant_provider()
         if not section.get("enabled", False):
+            self._last_assistant_error_code = "assistant_disabled"
             self.configure_assistant_services(None, None)
             return False
 
@@ -836,7 +855,7 @@ class EchoFluxEngine:
             )
             from engine.core.config import ServiceConfig
             from engine.providers.manifests import ProtocolFamily
-            from engine.providers.registry import build_default_registry
+            from engine.providers.registry import ProviderRegistryError, build_default_registry
             from engine.session.translation_orchestrator import _generation_options, _text_strategy
 
             service_cfg = ServiceConfig.from_dict("assistant", section)
@@ -846,11 +865,19 @@ class EchoFluxEngine:
                 if slot not in assistant_secrets and slot in self._ephemeral_secrets:
                     assistant_secrets[slot] = self._ephemeral_secrets[slot]
 
+            if resolved.credential_refs and any(
+                slot not in assistant_secrets for slot in resolved.credential_refs
+            ):
+                self._last_assistant_error_code = "missing_credential"
+                self.configure_assistant_services(None, None)
+                return False
+
             if resolved.protocol_family not in (
                 ProtocolFamily.OPENAI_COMPATIBLE_TEXT,
                 ProtocolFamily.GEMINI_TEXT,
             ):
                 logger.warning("Unsupported assistant protocol family: %s", resolved.protocol_family)
+                self._last_assistant_error_code = "unsupported_protocol"
                 self.configure_assistant_services(None, None)
                 return False
 
@@ -872,10 +899,17 @@ class EchoFluxEngine:
             self.configure_assistant_services(
                 self._conversation_repo, provider, model=resolved.model
             )
+            self._last_assistant_error_code = None
             return True
+        except ProviderRegistryError as exc:
+            logger.warning("Assistant service registry error (%s)", exc.code.value)
+            self._last_assistant_error_code = exc.code.value
+            self.configure_assistant_services(None, None)
+            return False
         except Exception as exc:
             # Assistant setup failure never halts STT/Translation capture.
             logger.warning("Assistant service could not be started (%s)", type(exc).__name__)
+            self._last_assistant_error_code = "assistant_start_failed"
             self.configure_assistant_services(None, None)
             return False
         finally:
@@ -963,6 +997,7 @@ class EchoFluxEngine:
             settings,
             provider_id=session_config.fallback.provider_id,
             stream_ids=session_config.stream_ids,
+            legacy_model_size=getattr(session_config, "legacy_model_size", None),
         )
 
     def _session_process_loop(self, stream_id: str, audio_queue: Queue, vad, session):
@@ -1390,8 +1425,8 @@ class EchoFluxEngine:
 
                 cache_key = (cfg.source_lang, cfg.target_lang)
                 if (
-                    self._post_stop_translator is None
-                    or self._post_stop_translator_key != cache_key
+                    getattr(self, "_post_stop_translator", None) is None
+                    or getattr(self, "_post_stop_translator_key", None) != cache_key
                 ):
                     await self._close_post_stop_translator()
                     settings = LocalTranslationSettings.from_options(dict(local_svc.options))
@@ -1409,9 +1444,10 @@ class EchoFluxEngine:
                         with contextlib.suppress(Exception):
                             await local_provider.stop()
 
-                if self._post_stop_translator is not None:
+                post_stop = getattr(self, "_post_stop_translator", None)
+                if post_stop is not None:
                     try:
-                        res = await self._post_stop_translator.translate(
+                        res = await post_stop.translate(
                             TranslationRequest(
                                 text=text,
                                 source_lang=cfg.source_lang,

@@ -857,14 +857,16 @@
             ("conversation_import", None, 30, false),
             ("message_update", None, 10, false),
             ("pack_status", None, 10, false),
-            ("pack_install", None, 600, false),
+            ("pack_install", None, 1800, false),
             ("pack_cancel", None, 10, false),
-            ("pack_retry", None, 600, false),
+            ("pack_retry", None, 1800, false),
+            ("pack_delete", None, 30, false),
             ("pack_check_readiness", None, 15, false),
             ("get_provider_manifests", None, 10, false),
             ("audio_probe", None, 10, false),
             ("summary_cancel", None, 10, false),
             ("assistant_ask", None, 60, false),
+            ("assistant_ask_clear", None, 10, false),
         ];
         for (kind, terminal, seconds, accepts_assistant_credentials) in table {
             let checked = check_forward_command(json!({"type": kind}), None).unwrap();

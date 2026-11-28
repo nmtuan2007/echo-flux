@@ -207,11 +207,13 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   pack_install: null,
   pack_cancel: null,
   pack_retry: null,
+  pack_delete: null,
   pack_check_readiness: null,
   get_provider_manifests: null,
   audio_probe: null,
   test_connection: "test_connection_result",
   assistant_ask: null,
+  assistant_ask_clear: null,
 };
 
 const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
@@ -240,11 +242,13 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   pack_install: "Install pack",
   pack_cancel: "Cancel pack",
   pack_retry: "Retry pack",
+  pack_delete: "Delete pack",
   pack_check_readiness: "Check pack readiness",
   get_provider_manifests: "Get provider manifests",
   audio_probe: "Audio probe",
   test_connection: "Test connection",
   assistant_ask: "Ask Assistant",
+  assistant_ask_clear: "Clear Ask history",
 };
 
 // What components and the other slices see as `socket` in secure mode. Legacy call sites

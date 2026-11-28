@@ -421,3 +421,8 @@ body,
   background-color: var(--warning);
   animation: pulse 1.2s ease-in-out infinite;
 }
+
+.overlay-unlock-btn {
+  border-color: rgba(245, 166, 35, 0.55);
+  color: var(--warning);
+}

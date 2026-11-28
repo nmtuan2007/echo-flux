@@ -4,8 +4,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
 import { assistKeyOf, isAssistantConfigured, streamRank } from "../store/transcriptSlice";
 
-type FontSize = "sm" | "md" | "lg";
-
 export const OverlayPanel: React.FC = () => {
   const {
     config,
@@ -22,12 +20,13 @@ export const OverlayPanel: React.FC = () => {
     suggestionLoading,
     audioLevels,
     shortcutsEnabled,
+    overlayFontSize: fontSize,
+    overlayHighOpacity: highOpacity,
+    setOverlayPrefs,
     requestAssist,
   } = useEngineStore();
   const assistantEnabled = useEngineStore(isAssistantConfigured);
   const [isLocked, setIsLocked] = useState(false);
-  const [fontSize, setFontSize] = useState<FontSize>("md");
-  const [highOpacity, setHighOpacity] = useState(false);
   const [dismissedAssistKey, setDismissedAssistKey] = useState<string | null>(null);
   const [copiedReplyIdx, setCopiedReplyIdx] = useState<number | null>(null);
   const [silenceHint, setSilenceHint] = useState(false);
@@ -69,6 +68,7 @@ export const OverlayPanel: React.FC = () => {
         return mod.listen("overlay_unlock", async () => {
           await invoke("set_ignore_cursor_events", { ignore: false });
           setIsLocked(false);
+          void emit("overlay_lock_changed", { locked: false }).catch(() => {});
         });
       })
       .then((fn) => {
@@ -101,6 +101,7 @@ export const OverlayPanel: React.FC = () => {
     if (!shortcutsEnabled && isLocked) {
       void invoke("set_ignore_cursor_events", { ignore: false }).catch(() => {});
       setIsLocked(false);
+      void emit("overlay_lock_changed", { locked: false }).catch(() => {});
     }
   }, [shortcutsEnabled, isLocked]);
 
@@ -110,12 +111,14 @@ export const OverlayPanel: React.FC = () => {
       const newLocked = !isLocked;
       await invoke("set_ignore_cursor_events", { ignore: newLocked });
       setIsLocked(newLocked);
+      void emit("overlay_lock_changed", { locked: newLocked }).catch(() => {});
     } catch (e) {
       console.error("Failed to set ignore cursor events", e);
     }
   };
 
   const handleBackToMain = async () => {
+    void emit("overlay_lock_changed", { locked: false }).catch(() => {});
     await emit("overlay_closed").catch(() => {});
     await invoke("revert_to_main_window").catch(console.error);
   };
@@ -129,7 +132,15 @@ export const OverlayPanel: React.FC = () => {
   };
 
   const cycleFontSize = () => {
-    setFontSize((prev) => (prev === "sm" ? "md" : prev === "md" ? "lg" : "sm"));
+    const next = fontSize === "sm" ? "md" : fontSize === "md" ? "lg" : "sm";
+    setOverlayPrefs({ fontSize: next });
+    void emit("relay_set_overlay_prefs", { fontSize: next }).catch(() => {});
+  };
+
+  const toggleHighOpacity = () => {
+    const next = !highOpacity;
+    setOverlayPrefs({ highOpacity: next });
+    void emit("relay_set_overlay_prefs", { highOpacity: next }).catch(() => {});
   };
 
   const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
@@ -239,7 +250,7 @@ export const OverlayPanel: React.FC = () => {
             <button
               type="button"
               className="overlay-btn"
-              onClick={() => setHighOpacity((v) => !v)}
+              onClick={toggleHighOpacity}
               title="Toggle background opacity"
             >
               {highOpacity ? "90%" : "60%"}

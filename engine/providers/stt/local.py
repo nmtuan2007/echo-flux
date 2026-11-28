@@ -169,6 +169,7 @@ def resolve_stt_pack(
     language: Optional[str],
     installer_factory: InstallerFactory = _default_installer,
     quality_preset: str = "balanced",
+    legacy_model_size: Optional[str] = None,
 ) -> ResolvedSTTPack:
     """Pick the STT pack for this machine. Blocking (hardware probe, filesystem)."""
     profile = probe.probe()
@@ -197,7 +198,10 @@ def resolve_stt_pack(
             )
         )
     if pack.source is PackSource.LEGACY_RUNTIME:
-        model_size = _QUALITY_MODEL_MAP.get(quality_preset, pack.legacy_model_id)
+        if isinstance(legacy_model_size, str) and legacy_model_size.strip():
+            model_size = legacy_model_size.strip()
+        else:
+            model_size = _QUALITY_MODEL_MAP.get(quality_preset, pack.legacy_model_id)
         pack_id = (
             f"legacy-faster-whisper-{model_size}"
             if model_size in ("tiny", "small", "medium")
@@ -280,6 +284,7 @@ class LocalSTTProvider(StreamingSTTProvider):
         max_pending_frames: int = DEFAULT_MAX_PENDING_FRAMES,
         stop_timeout_s: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
+        legacy_model_size: Optional[str] = None,
     ) -> None:
         self._settings = settings or LocalSTTSettings()
         validate_settings(self._settings)
@@ -297,6 +302,7 @@ class LocalSTTProvider(StreamingSTTProvider):
         self._max_pending = max_pending_frames
         self._stop_timeout_s = stop_timeout_s
         self._clock = clock
+        self._legacy_model_size = legacy_model_size
         self._events: asyncio.Queue[Any] = asyncio.Queue()
         self._lifecycle = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -455,6 +461,7 @@ class LocalSTTProvider(StreamingSTTProvider):
             self._settings.language,
             self._installer_factory,
             quality_preset=self._settings.quality_preset,
+            legacy_model_size=self._legacy_model_size,
         )
         backend = None
         try:
@@ -497,6 +504,7 @@ class LocalSTTProvider(StreamingSTTProvider):
             self._settings.language,
             self._installer_factory,
             quality_preset=self._settings.quality_preset,
+            legacy_model_size=self._legacy_model_size,
         )
 
     @staticmethod

@@ -200,3 +200,189 @@ async def test_retranslate_message_post_stop_uses_local_provider_and_persists(mo
     out = await engine.retranslate_message("conv-1", "msg-1", "Hello team")
     assert out == "VI:Hello team"
     engine._conversation_repo.set_translation.assert_called_once()
+
+
+def test_faster_whisper_lazy_buffer_and_concurrent_streams():
+    import threading
+    import time
+
+    from engine.asr.faster_whisper_backend import FasterWhisperBackend
+
+    backend = FasterWhisperBackend()
+    backend._config = types.SimpleNamespace(language="en")
+    backend._max_buffer_duration = 4.0
+
+    class SlowFakeModel:
+        def __init__(self):
+            self.active = 0
+            self.overlap = False
+
+        def transcribe(self, audio, **_kwargs):
+            self.active += 1
+            if self.active > 1:
+                self.overlap = True
+            time.sleep(0.02)
+            self.active -= 1
+            seg = types.SimpleNamespace(
+                text=f"n={len(audio)}",
+                start=0.0,
+                end=0.5,
+                no_speech_prob=0.0,
+                avg_logprob=-0.1,
+                compression_ratio=1.0,
+            )
+            return [seg], types.SimpleNamespace(language="en", language_probability=0.99)
+
+    fake_model = SlowFakeModel()
+    backend._model = fake_model
+
+    s1 = backend._get_stream("mic")
+    s2 = backend._get_stream("system")
+    assert s1 is not s2
+    chunk = np.ones(1600, dtype=np.int16).tobytes()
+    backend.transcribe_stream(chunk, "mic")
+    backend.transcribe_stream(chunk, "mic")
+    assert backend._buffer_samples(s1) == 3200
+    assert len(s1["pending_chunks"]) == 2
+    materialized = backend._materialize_buffer(s1)
+    assert len(materialized) == 3200
+    assert len(s1["audio_buffer"]) == 3200
+    assert len(s1["pending_chunks"]) == 0
+
+    s2["pending_chunks"].append(np.ones(3200, dtype=np.float32))
+    s2["pending_samples"] = 3200
+
+    errors = []
+
+    def run_once(sid, stream):
+        try:
+            res = backend._run_inference(sid, stream, is_final=True)
+            assert res is not None and res.text == "n=3200" and res.language == "en"
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=run_once, args=("mic", s1))
+    t2 = threading.Thread(target=run_once, args=("system", s2))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert not errors
+    assert fake_model.overlap is False
+
+
+def test_local_stt_honors_legacy_model_size():
+    from engine.local_models import builtin_catalog
+    from engine.providers.stt.local import resolve_stt_pack
+
+    catalog = builtin_catalog()
+    profile = HardwareProfile(8, 32.0, "windows", "x86_64")
+    probe = type("P", (HardwareProbe,), {"probe": lambda self: profile})()
+    resolved = resolve_stt_pack(catalog, probe, "en", legacy_model_size="tiny")
+    assert resolved.model_size == "tiny"
+    assert resolved.pack_id == "legacy-faster-whisper-tiny"
+
+
+def test_repository_ask_turns_v2_roundtrip(tmp_path):
+    from engine.conversation.models import ConversationRecord, StoredAskTurn
+    from engine.conversation.repository import ConversationRepository
+
+    db_path = tmp_path / "conv.db"
+    repo = ConversationRepository(db_path=str(db_path))
+    conv_id = "conv-ask-1"
+    repo.create_conversation(
+        ConversationRecord(
+            conversation_id=conv_id,
+            title="Ask Test",
+            created_at_ms=1700000000000,
+            updated_at_ms=1700000000000,
+        )
+    )
+    repo.save_ask_turn(
+        conversation_id=conv_id,
+        question="What are the action items?",
+        answer_markdown="1. Deploy v2.",
+        ask_id="ask-1",
+        created_at_ms=1700000001000,
+    )
+    listed = repo.list_ask_turns(conv_id)
+    assert len(listed) == 1
+    assert listed[0].question == "What are the action items?"
+    assert listed[0].answer_markdown == "1. Deploy v2."
+
+    exported = repo.export_conversation(conv_id)
+    assert len(exported["ask_turns"]) == 1
+
+    repo.clear_ask_turns(conv_id)
+    assert repo.list_ask_turns(conv_id) == []
+
+    imported_cid = "conv-ask-imported"
+    imported = repo.import_conversation(
+        ConversationRecord(
+            conversation_id=imported_cid,
+            title="Imported Ask",
+            created_at_ms=1700000000000,
+            updated_at_ms=1700000000000,
+            import_id="imp-ask-1",
+        ),
+        messages=(),
+        ask_turns=[
+            StoredAskTurn(
+                ask_id="ask-imp-1",
+                conversation_id=imported_cid,
+                question=exported["ask_turns"][0]["question"],
+                answer_markdown=exported["ask_turns"][0]["answer_markdown"],
+                created_at_ms=exported["ask_turns"][0]["created_at_ms"],
+            )
+        ],
+    )
+    imported_turns = repo.list_ask_turns(imported.conversation_id)
+    assert len(imported_turns) == 1
+    assert imported_turns[0].answer_markdown == "1. Deploy v2."
+    repo.close()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_pack_delete_and_ask_clear(monkeypatch, tmp_path):
+    import json
+
+    import engine.server.handlers_packs as handlers_packs
+
+    monkeypatch.setattr(
+        handlers_packs,
+        "delete_local_model_files",
+        lambda *_args, **_kwargs: 1,
+    )
+    sent = []
+
+    class FakeWS:
+        async def send(self, raw):
+            sent.append(json.loads(raw))
+
+    repo = MagicMock()
+    repo.clear_ask_turns.return_value = 2
+    dispatcher = ControlCommandDispatcher(conversation_repo=repo)
+    ws = FakeWS()
+
+    await dispatcher.dispatch(
+        "req-del",
+        "pack_delete",
+        {"capability": "stt", "pack_id": "legacy-faster-whisper-small"},
+        ws,
+        None,
+    )
+    assert sent[0]["op"] == "response"
+    assert sent[0]["data"]["deleted"] is True
+    assert sent[0]["data"]["removed_count"] == 1
+
+    sent.clear()
+    await dispatcher.dispatch(
+        "req-clr",
+        "assistant_ask_clear",
+        {"conversation_id": "conv-1"},
+        ws,
+        None,
+    )
+    assert sent[0]["op"] == "response"
+    assert "cleared" in sent[0]["data"]
+    repo.clear_ask_turns.assert_called_once_with("conv-1")

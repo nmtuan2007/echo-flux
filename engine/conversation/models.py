@@ -331,6 +331,26 @@ class StoredSummary:
         _validate_ms("latency_ms", self.latency_ms, optional=True)
 
 
+@dataclass(frozen=True)
+class StoredAskTurn:
+    ask_id: str
+    conversation_id: str
+    question: str
+    answer_markdown: str
+    created_at_ms: float
+    provider: Optional[ProviderMetadata] = None
+    record_version: int = RECORD_VERSION
+
+    def __post_init__(self) -> None:
+        validate_record_id("ask_id", self.ask_id)
+        validate_record_id("conversation_id", self.conversation_id)
+        _validate_text("question", self.question, allow_empty=False)
+        _validate_text("answer_markdown", self.answer_markdown, allow_empty=False)
+        _validate_ms("created_at_ms", self.created_at_ms)
+        if self.provider is not None and not isinstance(self.provider, ProviderMetadata):
+            raise ConversationValidationError("provider", "invalid_metadata")
+
+
 def validate_profile_name(name: Any) -> str:
     return _validate_short_text("profile.name", name, MAX_PROFILE_NAME_CHARS)
 

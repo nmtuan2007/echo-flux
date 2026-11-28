@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isTauriRuntime } from "../lib/engineBridge";
 import { useEngineStore, Conversation } from "../store/engineStore";
+import { isAssistantConfigured } from "../store/transcriptSlice";
 import type { ExportEntry } from "../utils/export";
 import { ExportMenu } from "./ExportMenu";
 import { MarkdownRenderer } from "./MarkdownRenderer";
@@ -24,6 +25,8 @@ export function HistoryPanel() {
     historySearchQuery,
     selectedConversationDetail,
     running,
+    entries,
+    isViewingHistory,
     loadHistoryList,
     getConversationDetail,
     deleteConversation,
@@ -36,6 +39,10 @@ export function HistoryPanel() {
   } = useEngineStore();
 
   const [deleteTarget, setDeleteTarget] = useState<DisplayItem | null>(null);
+  const [pendingOverwrite, setPendingOverwrite] = useState<{
+    mode: "load" | "continue";
+    convId: string;
+  } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -196,19 +203,25 @@ export function HistoryPanel() {
             const convId =
               selectedConversationDetail.conversation?.conversation_id ||
               selectedConversationDetail.conversation_id;
-            if (convId && !running) {
-              loadConversation(convId);
-              clearSelectedConversationDetail();
+            if (!convId || running) return;
+            if (entries.length > 0 && !isViewingHistory) {
+              setPendingOverwrite({ mode: "load", convId });
+              return;
             }
+            loadConversation(convId);
+            clearSelectedConversationDetail();
           }}
           onContinueSession={() => {
             const convId =
               selectedConversationDetail.conversation?.conversation_id ||
               selectedConversationDetail.conversation_id;
-            if (convId && !running) {
-              loadConversation(convId, { continueSession: true });
-              clearSelectedConversationDetail();
+            if (!convId || running) return;
+            if (entries.length > 0 && !isViewingHistory) {
+              setPendingOverwrite({ mode: "continue", convId });
+              return;
             }
+            loadConversation(convId, { continueSession: true });
+            clearSelectedConversationDetail();
           }}
           onExportBackup={async () => {
             const convId =
@@ -401,6 +414,49 @@ export function HistoryPanel() {
           </div>
         </div>
       )}
+
+      {/* Overwrite Active Transcript Confirmation Modal */}
+      {pendingOverwrite && (
+        <div
+          className="history-modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Replace live transcript view"
+          onClick={() => setPendingOverwrite(null)}
+        >
+          <div className="history-modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3 className="history-modal-title">Replace Active Session View?</h3>
+            <p className="history-modal-body">
+              Your live workspace currently has {entries.length} transcript item
+              {entries.length === 1 ? "" : "s"}. Loading this conversation will replace the current
+              transcript panel view.
+            </p>
+            <div className="history-modal-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setPendingOverwrite(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  const target = pendingOverwrite;
+                  setPendingOverwrite(null);
+                  loadConversation(target.convId, {
+                    continueSession: target.mode === "continue",
+                  });
+                  clearSelectedConversationDetail();
+                }}
+              >
+                {pendingOverwrite.mode === "continue" ? "Continue Session" : "Load Session"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -424,11 +480,51 @@ function ConversationDetailView({
   disabled: boolean;
 }) {
   const conv = detail.conversation || detail;
+  const convId: string | undefined = conv.conversation_id || detail.conversation_id;
   const messages = detail.messages || [];
+  const sessions = detail.sessions || [];
+  const assistResults = detail.assist_results || [];
+  const askTurns = detail.ask_turns || [];
   const summary = detail.summary;
   const profiles = detail.profiles || [];
   const summaryMarkdown =
     typeof summary === "string" ? summary : summary?.summary_markdown || "";
+
+  const connected = useEngineStore((s) => s.connected);
+  const askLoading = useEngineStore((s) => s.askLoading);
+  const askError = useEngineStore((s) => s.askError);
+  const askMeeting = useEngineStore((s) => s.askMeeting);
+  const clearAsk = useEngineStore((s) => s.clearAsk);
+  const assistantConfigured = useEngineStore(isAssistantConfigured);
+  const [askInput, setAskInput] = useState("");
+
+  const sessionMap = useMemo(() => {
+    const map = new Map<string, { num: number; startedAtMs?: number }>();
+    sessions.forEach((s: any, idx: number) => {
+      if (s?.session_id) {
+        map.set(s.session_id, { num: idx + 1, startedAtMs: s.started_at_ms });
+      }
+    });
+    return map;
+  }, [sessions]);
+
+  const assistByMessageId = useMemo(() => {
+    const map = new Map<string, any>();
+    for (const row of assistResults) {
+      if (row?.message_id) {
+        map.set(row.message_id, row);
+      }
+    }
+    return map;
+  }, [assistResults]);
+
+  const handleSubmitAsk = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = askInput.trim();
+    if (!trimmed || !convId || askLoading || !connected || !assistantConfigured) return;
+    askMeeting(trimmed, convId);
+    setAskInput("");
+  };
 
   const toExportEntries = (): ExportEntry[] =>
     messages.map((m: any) => {
@@ -500,6 +596,60 @@ function ConversationDetailView({
         </div>
       )}
 
+      {(askTurns.length > 0 || (assistantConfigured && connected && convId)) && (
+        <div className="history-detail-ask">
+          <div className="history-detail-ask-header">
+            <h3 className="history-detail-section-title">Quick Ask History</h3>
+            {askTurns.length > 0 && convId && (
+              <button
+                type="button"
+                className="btn-text"
+                onClick={() => clearAsk(convId)}
+              >
+                Clear Q&amp;A
+              </button>
+            )}
+          </div>
+          {askTurns.length > 0 && (
+            <div className="history-detail-ask-list">
+              {askTurns.map((turn: any, idx: number) => (
+                <div key={turn.ask_id || idx} className="history-detail-ask-turn">
+                  <div className="history-detail-ask-q">Q: {turn.question}</div>
+                  {turn.error ? (
+                    <div className="history-detail-ask-error">⚠ {turn.error}</div>
+                  ) : (
+                    <div className="history-detail-ask-a">
+                      <MarkdownRenderer text={turn.answer_markdown ?? turn.answer ?? ""} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {assistantConfigured && connected && convId && (
+            <form className="summary-ask-form" onSubmit={handleSubmitAsk}>
+              <input
+                type="text"
+                className="summary-ask-input"
+                placeholder="Ask a follow-up question about this archived meeting..."
+                value={askInput}
+                onChange={(e) => setAskInput(e.target.value)}
+                disabled={askLoading}
+                aria-label="Ask about this archived conversation"
+              />
+              <button
+                type="submit"
+                className="btn btn-primary btn-sm"
+                disabled={askLoading || !askInput.trim()}
+              >
+                {askLoading ? "Asking..." : "Ask"}
+              </button>
+            </form>
+          )}
+          {askError && <div className="summary-ask-error">⚠ {askError}</div>}
+        </div>
+      )}
+
       <div className="history-detail-messages-section">
         <h3 className="history-detail-section-title">
           Messages ({messages.length})
@@ -515,20 +665,57 @@ function ConversationDetailView({
                 (m.source === "mic" ? "Me" : "Others");
               const text = m.stt_text || m.text || "";
               const translation = m.translation_text || m.translation || null;
+              const prevSessionId = idx > 0 ? messages[idx - 1]?.session_id : null;
+              const showSessionDivider =
+                sessions.length > 1 && m.session_id && m.session_id !== prevSessionId;
+              const sessionMeta = m.session_id ? sessionMap.get(m.session_id) : undefined;
+              const assist = m.message_id ? assistByMessageId.get(m.message_id) : undefined;
+              const replies = assist?.suggested_replies || assist?.options || [];
+              const questions = assist?.clarifying_questions || [];
               return (
-                <div key={m.message_id || idx} className="history-detail-message">
-                  <div className="history-detail-message-meta">
-                    <span className="history-detail-speaker">{speaker}</span>
-                    {m.timestamp_ms && (
-                      <span className="history-detail-time">
-                        {new Date(m.timestamp_ms).toLocaleTimeString()}
+                <div key={m.message_id || idx} className="history-detail-message-wrap">
+                  {showSessionDivider && (
+                    <div className="history-session-divider">
+                      <span>
+                        Session #{sessionMeta?.num ?? "?"}
+                        {sessionMeta?.startedAtMs
+                          ? ` · ${new Date(sessionMeta.startedAtMs).toLocaleString()}`
+                          : ""}
                       </span>
+                    </div>
+                  )}
+                  <div className="history-detail-message">
+                    <div className="history-detail-message-meta">
+                      <span className="history-detail-speaker">{speaker}</span>
+                      {m.timestamp_ms && (
+                        <span className="history-detail-time">
+                          {new Date(m.timestamp_ms).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </div>
+                    <div className="history-detail-message-text">{text}</div>
+                    {translation && (
+                      <div className="history-detail-message-trans">🌐 {translation}</div>
+                    )}
+                    {(replies.length > 0 || questions.length > 0) && (
+                      <div className="history-detail-assist">
+                        {replies.map((r: any, rIdx: number) => (
+                          <div key={rIdx} className="history-detail-assist-item">
+                            <span className="history-detail-assist-tag">
+                              {typeof r === "string" ? "Reply" : r.strategy || "Reply"}
+                            </span>
+                            <span>{typeof r === "string" ? r : r.text}</span>
+                          </div>
+                        ))}
+                        {questions.map((q: any, qIdx: number) => (
+                          <div key={`q-${qIdx}`} className="history-detail-assist-item">
+                            <span className="history-detail-assist-tag">Question</span>
+                            <span>{typeof q === "string" ? q : q.question}</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
-                  <div className="history-detail-message-text">{text}</div>
-                  {translation && (
-                    <div className="history-detail-message-trans">🌐 {translation}</div>
-                  )}
                 </div>
               );
             })}

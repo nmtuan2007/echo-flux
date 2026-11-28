@@ -164,7 +164,7 @@ export function SummaryModal() {
               <div className="summary-ask-header">
                 <span className="summary-ask-title">💬 Quick Ask</span>
                 {(askHistory.length > 0 || askAnswer) && (
-                  <button type="button" className="btn-text" onClick={clearAsk}>
+                  <button type="button" className="btn-text" onClick={() => clearAsk()}>
                     Clear
                   </button>
                 )}

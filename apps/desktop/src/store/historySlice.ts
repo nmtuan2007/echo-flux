@@ -7,6 +7,7 @@ import {
 import type { EngineState } from "./engineStore";
 import {
   MAX_TITLE_CHARS,
+  type AskTurn,
   type Conversation,
   type ConversationRecord,
   type SuggestionOption,
@@ -101,6 +102,7 @@ function hydrateDetailEntries(detail: any, id: string): {
   entries: TranscriptEntry[];
   sourceLabels?: { mic: string; system: string };
   summaryText: string;
+  askHistory: AskTurn[];
   title: string;
 } {
   const rawMessages = detail.messages || [];
@@ -151,11 +153,22 @@ function hydrateDetailEntries(detail: any, id: string): {
     };
   });
   const convLabels = detail.conversation?.source_labels || detail.source_labels;
+  const askHistory: AskTurn[] = Array.isArray(detail.ask_turns)
+    ? detail.ask_turns
+        .filter((t: any) => t && typeof t.question === "string" && typeof t.answer_markdown === "string")
+        .map((t: any, idx: number) => ({
+          id: t.ask_id || `ask-${idx}`,
+          question: t.question,
+          answer: t.answer_markdown,
+          createdAtMs: typeof t.created_at_ms === "number" ? t.created_at_ms : undefined,
+        }))
+    : [];
   return {
     entries,
     summaryText:
       detail.summary?.summary_markdown ||
       (typeof detail.summary === "string" ? detail.summary : ""),
+    askHistory,
     title: detail.conversation?.title || detail.title || "",
     ...(convLabels?.mic || convLabels?.system
       ? {
@@ -460,8 +473,8 @@ export function createHistoryActions(
           summaryText: hydrated.summaryText,
           summaryVisible: false,
           summaryLoading: false,
-          askAnswer: "",
-          askHistory: [],
+          askAnswer: hydrated.askHistory.length > 0 ? hydrated.askHistory[hydrated.askHistory.length - 1].answer : "",
+          askHistory: hydrated.askHistory,
           askError: null,
           activeConversationId: id,
           engineConversationId: id,

@@ -5,6 +5,7 @@ import { resolveEffectiveTranslationSourceLang } from "../store/providerCatalog"
 export interface LocalPackStatusProps {
   capability: "stt" | "translation";
   disabled?: boolean;
+  allowRemove?: boolean;
   onStatusChange?: (isReady: boolean) => void;
 }
 
@@ -17,10 +18,12 @@ function formatSize(bytes: number): string {
 export function LocalPackStatus({
   capability,
   disabled = false,
+  allowRemove = false,
   onStatusChange,
 }: LocalPackStatusProps) {
   const {
     connected,
+    engineStarting,
     packStatus,
     packDownloads,
     packInstallErrors,
@@ -31,10 +34,13 @@ export function LocalPackStatus({
     installLocalPack,
     cancelLocalPack,
     retryLocalPack,
+    deleteLocalPack,
     isPackChecking,
   } = useEngineStore();
 
   const [installing, setInstalling] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const sourceLang = resolveEffectiveTranslationSourceLang(services, config);
@@ -89,6 +95,19 @@ export function LocalPackStatus({
     setInstalling(false);
   };
 
+  const handleRemove = async () => {
+    setErrorMsg(null);
+    setRemoving(true);
+    const ok = await deleteLocalPack(capability, { packId, ...(langOptions || {}) });
+    setConfirmRemove(false);
+    if (ok) {
+      await checkPackReadiness(capability);
+    } else {
+      setErrorMsg("Failed to remove local model files.");
+    }
+    setRemoving(false);
+  };
+
   const handleRetry = async () => {
     setErrorMsg(null);
     setInstalling(true);
@@ -120,7 +139,11 @@ export function LocalPackStatus({
           <h4 className="pack-status-title">{title}</h4>
         </div>
         <div className="pack-status-badge-container">
-          {isPackChecking ? (
+          {!connected && !item ? (
+            <span className="pack-badge pack-badge-checking">
+              {engineStarting ? "Starting Engine..." : "Engine Offline"}
+            </span>
+          ) : isPackChecking ? (
             <span className="pack-badge pack-badge-checking">Checking...</span>
           ) : isReady ? (
             <span className="pack-badge pack-badge-ready">✓ Ready</span>
@@ -199,7 +222,7 @@ export function LocalPackStatus({
           </div>
         )}
 
-        {!isReady && !isDownloadingThis && !displayError && languageSupported && (
+        {!isReady && !isDownloadingThis && !displayError && languageSupported && connected && (
           <div className="pack-action-row">
             <button
               type="button"
@@ -212,6 +235,41 @@ export function LocalPackStatus({
                 ? "Waiting for other download..."
                 : `Download Model Pack (~${sizeLabel})`}
             </button>
+          </div>
+        )}
+
+        {allowRemove && isReady && !isDownloadingThis && connected && (
+          <div className="pack-action-row">
+            {confirmRemove ? (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-danger btn-sm"
+                  onClick={handleRemove}
+                  disabled={disabled || removing}
+                >
+                  {removing ? "Removing..." : "Confirm Remove"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setConfirmRemove(false)}
+                  disabled={removing}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setConfirmRemove(true)}
+                disabled={disabled || removing}
+                title="Delete cached local model files to reclaim disk space"
+              >
+                Remove Cached Model
+              </button>
+            )}
           </div>
         )}
       </div>

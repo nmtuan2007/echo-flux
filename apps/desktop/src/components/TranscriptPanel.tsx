@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useEngineStore } from "../store/engineStore";
 import { deriveSttNotice, streamRank, sttProviderLabel } from "../store/transcriptSlice";
 import type {
@@ -75,9 +75,41 @@ function intervalText(interval: ContinuityInterval): string {
   return `${formatMs(interval.startMs)}–${formatMs(interval.endMs)}`;
 }
 
+function renderHighlighted(text: string, normalizedQuery: string): ReactNode {
+  if (!normalizedQuery) return text;
+  const lower = text.toLowerCase();
+  const qLen = normalizedQuery.length;
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let matchIdx = lower.indexOf(normalizedQuery, cursor);
+  if (matchIdx === -1) return text;
+  while (matchIdx !== -1) {
+    if (matchIdx > cursor) {
+      parts.push(text.slice(cursor, matchIdx));
+    }
+    parts.push(
+      <mark key={matchIdx} className="transcript-highlight">
+        {text.slice(matchIdx, matchIdx + qLen)}
+      </mark>,
+    );
+    cursor = matchIdx + qLen;
+    matchIdx = lower.indexOf(normalizedQuery, cursor);
+  }
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+  return parts;
+}
+
 // Memoized on the entry object: the store replaces only entries that changed, so a partial on
 // either stream re-renders no final entry.
-const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry }) {
+const FinalEntry = memo(function FinalEntry({
+  entry,
+  highlightQuery,
+}: {
+  entry: TranscriptEntry;
+  highlightQuery: string;
+}) {
   const translationEnabled = useEngineStore(
     (s) => s.services?.translation?.enabled ?? s.config.translationEnabled,
   );
@@ -207,14 +239,14 @@ const FinalEntry = memo(function FinalEntry({ entry }: { entry: TranscriptEntry 
           </div>
         </div>
       ) : (
-        <div className="transcript-text">{entry.text}</div>
+        <div className="transcript-text">{renderHighlighted(entry.text, highlightQuery)}</div>
       )}
       {translationEnabled && entry.translation && (
         <div
           className="transcript-translation"
           data-translation-state={entry.translationFinal === false ? "draft" : "final"}
         >
-          {entry.translation}
+          {renderHighlighted(entry.translation, highlightQuery)}
           {entry.translationFallback && (
             <span
               className="transcript-translation-fallback"
@@ -536,7 +568,7 @@ export function TranscriptPanel() {
         )}
 
         {renderedEntries.map((entry) => (
-          <FinalEntry key={entry.id} entry={entry} />
+          <FinalEntry key={entry.id} entry={entry} highlightQuery={normalizedQuery} />
         ))}
 
         {partialStreams.map((stream) => (

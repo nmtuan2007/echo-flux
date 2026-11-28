@@ -1,4 +1,5 @@
 import { describeCommandError, errorCodeOf, forwardCommand, isTauriRuntime } from "../lib/engineBridge";
+import { describeAssistantSetupError } from "./conversationSlice";
 import type { EngineSliceCreator, EngineState } from "./engineStore";
 import type { EngineCommands } from "./sessionSlice";
 import { findProvider, publicConfigSnapshot } from "./settingsSlice";
@@ -609,8 +610,13 @@ export function deriveAssistView(input: AssistViewInput): AssistView {
     unavailable,
     canRequest: false,
   };
-  if (!configured || !entry.isFinal || !entry.text.trim()) return view;
-  view.canRequest = unavailable === null && !loading;
+  if (!entry.isFinal || !entry.text.trim()) return view;
+
+  const outcome = entry.assist;
+  const legacy = entry.suggestions;
+  // Preserve already-saved Assist suggestions even when Assistant is currently toggled off.
+  if (!configured && !outcome && !legacy) return view;
+  view.canRequest = configured && unavailable === null && !loading;
 
   if (loading) return { ...view, phase: "loading" };
   if (request) {
@@ -627,7 +633,6 @@ export function deriveAssistView(input: AssistViewInput): AssistView {
     };
   }
 
-  const outcome = entry.assist;
   if (outcome) {
     if (outcome.error) return { ...view, phase: "error", error: outcome.error };
     const empty = outcome.suggestedReplies.length === 0 && outcome.clarifyingQuestions.length === 0;
@@ -639,7 +644,6 @@ export function deriveAssistView(input: AssistViewInput): AssistView {
     };
   }
 
-  const legacy = entry.suggestions;
   if (legacy) {
     if (legacy.error) {
       return {
@@ -879,8 +883,7 @@ export const createTranscriptSlice =
                 return {
                   suggestionLoading,
                   assistRequests,
-                  appError:
-                    "Assistant is not configured or credentials are missing. Check Assistant settings.",
+                  appError: describeAssistantSetupError(s.lastAssistantErrorCode),
                 };
               });
               return;

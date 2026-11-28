@@ -1,13 +1,14 @@
 import logging
+import re
+import threading
 import time
 import zlib
-import re
-from typing import Optional, List
+from typing import List, Optional
 
 import numpy as np
 
-from engine.core.config import TranscriptionConfig
 from engine.asr.base import ASRBackend, TranscriptResult
+from engine.core.config import TranscriptionConfig
 
 logger = logging.getLogger("echoflux.asr.faster_whisper")
 
@@ -27,15 +28,17 @@ _MODEL_MAX_BUFFER = {
     "large": 6.0,
 }
 
+
 class FasterWhisperBackend(ASRBackend):
     def __init__(self):
         self._model = None
+        self._model_lock = threading.Lock()
         self._config: Optional[TranscriptionConfig] = None
         self._device: Optional[str] = None
 
         self._sample_rate = 16000
-        
-        # Dictionary of streams to keep independent buffers and timers 
+
+        # Dictionary of streams to keep independent buffers and timers
         # (e.g. {"mic": {...}, "system": {...}})
         self._streams = {}
 
@@ -46,6 +49,8 @@ class FasterWhisperBackend(ASRBackend):
         if stream_id not in self._streams:
             self._streams[stream_id] = {
                 "audio_buffer": np.array([], dtype=np.float32),
+                "pending_chunks": [],
+                "pending_samples": 0,
                 "last_inference_time": 0.0,
                 "last_final_text": "",
                 "dominant_language": None,
@@ -54,13 +59,38 @@ class FasterWhisperBackend(ASRBackend):
             }
         return self._streams[stream_id]
 
+    @staticmethod
+    def _buffer_samples(stream: dict) -> int:
+        return len(stream["audio_buffer"]) + stream.get("pending_samples", 0)
+
+    @staticmethod
+    def _materialize_buffer(stream: dict) -> np.ndarray:
+        pending = stream.get("pending_chunks")
+        if pending:
+            base = stream["audio_buffer"]
+            parts = [base, *pending] if len(base) > 0 else pending
+            stream["audio_buffer"] = np.concatenate(parts) if len(parts) > 1 else parts[0]
+            pending.clear()
+            stream["pending_samples"] = 0
+        return stream["audio_buffer"]
+
+    @staticmethod
+    def _clear_buffer(stream: dict) -> None:
+        stream["audio_buffer"] = np.array([], dtype=np.float32)
+        pending = stream.get("pending_chunks")
+        if pending:
+            pending.clear()
+        stream["pending_samples"] = 0
+
     def load_model(self, config: TranscriptionConfig) -> None:
         from faster_whisper import WhisperModel
+
+        from engine.core.config import Config
 
         self._config = config
         target_device = config.device
         if target_device == "auto":
-             target_device = "cuda"
+            target_device = "cuda"
 
         compute_type = config.compute_type
         model_path = config.model_path or config.model_size
@@ -69,35 +99,35 @@ class FasterWhisperBackend(ASRBackend):
         self._inference_interval = _MODEL_INFERENCE_INTERVAL.get(model_size, 0.3)
         self._max_buffer_duration = _MODEL_MAX_BUFFER.get(model_size, 4.0)
 
-        from engine.core.config import Config
         models_dir = str(Config().models_dir)
 
-        if target_device == "cuda":
-            logger.info("Loading Faster-Whisper on CUDA (compute_type=%s)...", compute_type)
-            try:
-                self._model = WhisperModel(
-                    model_path,
-                    device="cuda",
-                    compute_type=compute_type,
-                    cpu_threads=4,
-                    download_root=models_dir
-                )
-                logger.info("Faster-Whisper loaded successfully on CUDA.")
-                self._device = "cuda"
-                return
-            except Exception as e:
-                logger.warning("Failed on CUDA: %s. Fallback to CPU.", e)
+        with self._model_lock:
+            if target_device == "cuda":
+                logger.info("Loading Faster-Whisper on CUDA (compute_type=%s)...", compute_type)
+                try:
+                    self._model = WhisperModel(
+                        model_path,
+                        device="cuda",
+                        compute_type=compute_type,
+                        cpu_threads=4,
+                        download_root=models_dir,
+                    )
+                    logger.info("Faster-Whisper loaded successfully on CUDA.")
+                    self._device = "cuda"
+                    return
+                except Exception as e:
+                    logger.warning("Failed on CUDA: %s. Fallback to CPU.", e)
 
-        logger.info("Loading Faster-Whisper on CPU (int8)...")
-        self._model = WhisperModel(
-            model_path,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=4,
-            download_root=models_dir
-        )
-        logger.info("Faster-Whisper loaded successfully on CPU.")
-        self._device = "cpu"
+            logger.info("Loading Faster-Whisper on CPU (int8)...")
+            self._model = WhisperModel(
+                model_path,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=4,
+                download_root=models_dir,
+            )
+            logger.info("Faster-Whisper loaded successfully on CPU.")
+            self._device = "cpu"
 
     @property
     def is_loaded(self) -> bool:
@@ -116,27 +146,32 @@ class FasterWhisperBackend(ASRBackend):
         return language
 
     def unload_model(self) -> None:
-        if self._model:
-            del self._model
-        self._model = None
-        self._device = None
-        self._streams.clear()
+        with self._model_lock:
+            if self._model:
+                del self._model
+            self._model = None
+            self._device = None
+            self._streams.clear()
 
     def reset_stream(self, stream_id: str = "default") -> None:
         if stream_id in self._streams:
             del self._streams[stream_id]
 
-    def transcribe_stream(self, audio_chunk: bytes, stream_id: str = "default") -> Optional[TranscriptResult]:
+    def transcribe_stream(
+        self, audio_chunk: bytes, stream_id: str = "default"
+    ) -> Optional[TranscriptResult]:
         if not self._model:
             return None
 
         stream = self._get_stream(stream_id)
         new_samples = self._bytes_to_float32(audio_chunk)
-        stream["audio_buffer"] = np.concatenate((stream["audio_buffer"], new_samples))
+        if len(new_samples) > 0:
+            stream.setdefault("pending_chunks", []).append(new_samples)
+            stream["pending_samples"] = stream.get("pending_samples", 0) + len(new_samples)
 
         max_samples = int(self._max_buffer_duration * self._sample_rate)
 
-        if len(stream["audio_buffer"]) > max_samples:
+        if self._buffer_samples(stream) > max_samples:
             logger.debug("ASR [%s]: Buffer exceeded max_samples, forcing finalize.", stream_id)
             return self._run_finalize(stream_id, stream)
 
@@ -148,7 +183,7 @@ class FasterWhisperBackend(ASRBackend):
         # Auto-detect needs a longer window than fixed-language mode to avoid wild guesses.
         target_lang = self.normalize_language(self._config.language) if self._config else None
         min_partial_sec = 0.8 if target_lang is None else 0.4
-        if len(stream["audio_buffer"]) < int(min_partial_sec * self._sample_rate):
+        if self._buffer_samples(stream) < int(min_partial_sec * self._sample_rate):
             return None
 
         return self._run_inference(stream_id, stream, is_final=False)
@@ -157,16 +192,23 @@ class FasterWhisperBackend(ASRBackend):
         return self._run_finalize(stream_id, self._get_stream(stream_id))
 
     def _run_finalize(self, stream_id: str, stream: dict) -> Optional[TranscriptResult]:
-        if not self._model or len(stream["audio_buffer"]) == 0:
+        if not self._model or self._buffer_samples(stream) == 0:
             return None
 
-        logger.debug("ASR [%s]: Running finalize against %.2fs buffer.", stream_id, len(stream["audio_buffer"])/self._sample_rate)
+        logger.debug(
+            "ASR [%s]: Running finalize against %.2fs buffer.",
+            stream_id,
+            self._buffer_samples(stream) / self._sample_rate,
+        )
         result = self._run_inference(stream_id, stream, is_final=True)
-        stream["audio_buffer"] = np.array([], dtype=np.float32)
+        self._clear_buffer(stream)
         return result
 
-    def _run_inference(self, stream_id: str, stream: dict, is_final: bool) -> Optional[TranscriptResult]:
-        buffer_duration = len(stream["audio_buffer"]) / self._sample_rate
+    def _run_inference(
+        self, stream_id: str, stream: dict, is_final: bool
+    ) -> Optional[TranscriptResult]:
+        audio_buffer = self._materialize_buffer(stream)
+        buffer_duration = len(audio_buffer) / self._sample_rate
         target_lang = self.normalize_language(self._config.language) if self._config else None
 
         # Fixed parameter name: log_prob_threshold instead of logprob_threshold
@@ -180,41 +222,55 @@ class FasterWhisperBackend(ASRBackend):
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
         )
-        segments_gen, info = self._model.transcribe(stream["audio_buffer"], language=target_lang, **transcribe_kwargs)
+        # Serialize WhisperModel inference across concurrent mic/system worker threads.
+        with self._model_lock:
+            model = self._model
+            if model is None:
+                return None
+            segments_gen, info = model.transcribe(
+                audio_buffer, language=target_lang, **transcribe_kwargs
+            )
+            segments = list(segments_gen)
 
-        if target_lang is None:
-            detected_lang = getattr(info, "language", None)
-            lang_prob = getattr(info, "language_probability", 1.0)
-            dominant = stream.get("dominant_language")
-            if dominant is None:
-                if detected_lang and lang_prob >= 0.80:
-                    stream["dominant_language"] = detected_lang
-                elif not is_final and lang_prob < 0.50:
-                    return None
-            elif detected_lang == dominant:
-                stream["alt_lang"] = None
-                stream["alt_streak"] = 0
-            else:
-                if detected_lang and lang_prob >= 0.95:
-                    streak = (stream.get("alt_streak", 0) + 1) if stream.get("alt_lang") == detected_lang else 1
-                    stream["alt_lang"] = detected_lang
-                    stream["alt_streak"] = streak
-                else:
-                    streak = 0
-                    stream["alt_lang"] = None
-                    stream["alt_streak"] = 0
-                if streak >= 2:
-                    stream["dominant_language"] = detected_lang
+            if target_lang is None:
+                detected_lang = getattr(info, "language", None)
+                lang_prob = getattr(info, "language_probability", 1.0)
+                dominant = stream.get("dominant_language")
+                if dominant is None:
+                    if detected_lang and lang_prob >= 0.80:
+                        stream["dominant_language"] = detected_lang
+                    elif not is_final and lang_prob < 0.50:
+                        return None
+                elif detected_lang == dominant:
                     stream["alt_lang"] = None
                     stream["alt_streak"] = 0
                 else:
-                    segments_gen, info = self._model.transcribe(stream["audio_buffer"], language=dominant, **transcribe_kwargs)
+                    if detected_lang and lang_prob >= 0.95:
+                        streak = (
+                            (stream.get("alt_streak", 0) + 1)
+                            if stream.get("alt_lang") == detected_lang
+                            else 1
+                        )
+                        stream["alt_lang"] = detected_lang
+                        stream["alt_streak"] = streak
+                    else:
+                        streak = 0
+                        stream["alt_lang"] = None
+                        stream["alt_streak"] = 0
+                    if streak >= 2:
+                        stream["dominant_language"] = detected_lang
+                        stream["alt_lang"] = None
+                        stream["alt_streak"] = 0
+                    else:
+                        segments_gen, info = model.transcribe(
+                            audio_buffer, language=dominant, **transcribe_kwargs
+                        )
+                        segments = list(segments_gen)
 
-        segments = list(segments_gen)
         if not segments:
             return None
 
-        valid_segments = []
+        valid_segments: List[str] = []
         for s in segments:
             if self._validate_segment(s):
                 valid_segments.append(s.text.strip())
@@ -228,7 +284,7 @@ class FasterWhisperBackend(ASRBackend):
         if self._is_hallucination(raw_text, buffer_duration):
             logger.debug("ASR [%s]: Dropped due to hallucination filter: '%s'", stream_id, raw_text)
             if is_final:
-                stream["audio_buffer"] = np.array([], dtype=np.float32)
+                self._clear_buffer(stream)
             return None
 
         # Record the last final text just in case we need it later, but DO NOT drop it simply because it matches.
@@ -236,25 +292,25 @@ class FasterWhisperBackend(ASRBackend):
 
         if is_final:
             stream["last_final_text"] = clean_text
-            stream["audio_buffer"] = np.array([], dtype=np.float32)
+            self._clear_buffer(stream)
             return TranscriptResult(
                 text=clean_text,
                 is_final=True,
                 language=info.language,
-                stream_id=stream_id
+                stream_id=stream_id,
             )
 
         return TranscriptResult(
             text=clean_text,
             is_final=False,
             language=info.language,
-            stream_id=stream_id
+            stream_id=stream_id,
         )
 
     def _validate_segment(self, segment) -> bool:
         # Relaxed Validation: VAD already ensures speech is present.
         # We only drop absolute garbage that the hallucination filter might miss.
-        
+
         # 1. No Speech Probability
         if segment.no_speech_prob > 0.85:
             return False
@@ -264,10 +320,7 @@ class FasterWhisperBackend(ASRBackend):
             return False
 
         # 3. Compression Ratio (Internal Whisper Metric)
-        if segment.compression_ratio > 3.2:
-            return False
-
-        return True
+        return segment.compression_ratio <= 3.2
 
     def _is_hallucination(self, text: str, duration: float) -> bool:
         text_len = len(text)
@@ -290,10 +343,7 @@ class FasterWhisperBackend(ASRBackend):
 
         # 3. Character Repetition (Regex)
         # Detects patterns like "......." or "?????"
-        if re.search(r'([^\w\s])\1{3,}', text):
-            return True
-
-        return False
+        return bool(re.search(r"([^\w\s])\1{3,}", text))
 
     @staticmethod
     def _bytes_to_float32(raw_bytes: bytes) -> np.ndarray:

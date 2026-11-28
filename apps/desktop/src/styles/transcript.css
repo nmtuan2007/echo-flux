@@ -80,12 +80,10 @@
 }
 
 .transcript-time {
-  position: absolute;
-  top: 10px;
-  right: 12px;
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 /* ── Source Badges ── */
@@ -1006,7 +1004,7 @@
 }
 
 .transcript-copy-btn {
-  opacity: 0;
+  opacity: 0.45;
   padding: 2px 7px;
   font-size: 11px;
   border-radius: var(--radius-sm);
@@ -1114,9 +1112,34 @@
 
 /* ── Phase 1-3 UX Refinements ── */
 .transcript-entry-actions .transcript-time {
-  position: static;
   margin-left: 4px;
-  white-space: nowrap;
+}
+
+mark.transcript-highlight {
+  background-color: rgba(245, 166, 35, 0.28);
+  color: var(--text-primary);
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.assist-panel-subtle {
+  opacity: 0.72;
+  transition: opacity 0.15s ease;
+}
+
+.transcript-entry:hover .assist-panel-subtle,
+.assist-panel-subtle:focus-within,
+.assist-panel-subtle[data-phase="loading"],
+.assist-panel-subtle[data-phase="success"] {
+  opacity: 1;
+}
+
+.assist-btn-subtle {
+  background-color: transparent;
+  border-style: dashed;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 8px;
 }
 
 .transcript-silence-hint {

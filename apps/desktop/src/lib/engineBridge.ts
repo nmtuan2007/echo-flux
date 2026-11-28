@@ -189,11 +189,13 @@ export const FORWARDED_COMMAND_TYPES = [
   "pack_install",
   "pack_cancel",
   "pack_retry",
+  "pack_delete",
   "pack_check_readiness",
   "get_provider_manifests",
   "audio_probe",
   "test_connection",
   "assistant_ask",
+  "assistant_ask_clear",
 ] as const;
 
 export type ForwardedCommandType = (typeof FORWARDED_COMMAND_TYPES)[number];

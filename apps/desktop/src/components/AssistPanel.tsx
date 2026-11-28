@@ -132,18 +132,29 @@ export const AssistPanel = memo(function AssistPanel({ entry }: { entry: Transcr
     requestAssist(entry.id);
   };
 
+  const isMic = entry.source === "mic";
+
   return (
-    <section className="assist-panel" data-phase={view.phase} aria-label="Assist">
+    <section
+      className={`assist-panel${isMic ? " assist-panel-subtle" : ""}`}
+      data-phase={view.phase}
+      aria-label="Assist"
+    >
       {(view.phase === "idle" || view.phase === "unavailable") && (
         <div className="assist-row">
           <button
-            className="suggest-btn assist-btn"
+            className={`suggest-btn assist-btn${isMic ? " assist-btn-subtle" : ""}`}
             onClick={onRequest}
             disabled={!view.canRequest}
+            aria-label="Assist"
             aria-describedby={reason ? reasonId : undefined}
-            title="Suggest replies and questions for this message"
+            title={
+              isMic
+                ? "Suggest clearer phrasing or follow-up for your own message"
+                : "Suggest replies and questions for this message"
+            }
           >
-            Assist
+            {isMic ? "Rephrase" : "Assist"}
           </button>
           {reason}
         </div>

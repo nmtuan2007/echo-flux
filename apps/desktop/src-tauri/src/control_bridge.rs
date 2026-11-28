@@ -865,9 +865,10 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
 
         // Phase B: Local Model Packs (EF-008)
         "pack_status" => (None, 10, false),
-        "pack_install" => (None, 600, false),
+        "pack_install" => (None, 1800, false),
         "pack_cancel" => (None, 10, false),
-        "pack_retry" => (None, 600, false),
+        "pack_retry" => (None, 1800, false),
+        "pack_delete" => (None, 30, false),
         "pack_check_readiness" => (None, 15, false),
 
         // Phase B: Provider Manifests (EF-003 / EF-022)
@@ -879,6 +880,7 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
         // Phase B: Summary Streaming & Cancellation (EF-022)
         "summary_cancel" => (None, 10, false),
         "assistant_ask" => (None, 60, false),
+        "assistant_ask_clear" => (None, 10, false),
 
         _ => return None,
     };

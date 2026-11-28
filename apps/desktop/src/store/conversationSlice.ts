@@ -32,6 +32,24 @@ export function applyLlmChunk(state: EngineState, message: EngineMessage): Parti
   return { summaryText: state.summaryText + text };
 }
 
+export function describeAssistantSetupError(code: string | null | undefined): string {
+  switch (code) {
+    case "missing_credential":
+      return "Assistant API key is missing. Save your key in Settings → Assistant.";
+    case "invalid_endpoint":
+    case "missing_endpoint":
+      return "Assistant API URL is missing or invalid. Check Settings → Assistant.";
+    case "missing_model":
+      return "Assistant model name is required. Check Settings → Assistant.";
+    case "unsupported_protocol":
+      return "Selected Assistant provider protocol is unsupported.";
+    case "assistant_start_failed":
+      return "Assistant failed to initialize. Check endpoint, model, and key in Settings.";
+    default:
+      return "Assistant is not configured or credentials are missing. Check Assistant settings.";
+  }
+}
+
 export interface ConversationSlice extends HistorySliceFields, ProfilesSliceFields {
   // Summary & Quick Ask
   summaryText: string;
@@ -47,14 +65,15 @@ export interface ConversationSlice extends HistorySliceFields, ProfilesSliceFiel
   askHistory: AskTurn[];
   askLoading: boolean;
   askError: string | null;
+  lastAssistantErrorCode: string | null;
 
   syncAssistantService: () => Promise<boolean>;
   requestSummary: () => void;
   cancelSummary: () => Promise<void>;
   openSummary: () => void;
   closeSummary: () => void;
-  askMeeting: (question: string) => Promise<void>;
-  clearAsk: () => void;
+  askMeeting: (question: string, targetConversationId?: string) => Promise<void>;
+  clearAsk: (targetConversationId?: string) => void;
 }
 
 export const createConversationSlice =
@@ -77,6 +96,7 @@ export const createConversationSlice =
       askHistory: [],
       askLoading: false,
       askError: null,
+      lastAssistantErrorCode: null,
 
       syncAssistantService: async () => {
         const { connected, services, secretStatus, engineGeneration } = get();
@@ -84,6 +104,7 @@ export const createConversationSlice =
         const assistantCfg = services?.assistant;
         if (!assistantCfg?.enabled) {
           lastSyncedAssistantKey = null;
+          set({ lastAssistantErrorCode: "assistant_disabled" });
           return false;
         }
         const syncKey = JSON.stringify({
@@ -115,17 +136,22 @@ export const createConversationSlice =
             },
             credentials,
           );
-          const configured = res.messages.some(
-            (m) => (m as { configured?: unknown }).configured === true,
-          );
-          if (configured) {
+          const reply = res.messages.find(
+            (m) => (m as { configured?: unknown }).configured !== undefined,
+          ) as { configured?: unknown; error_code?: unknown } | undefined;
+          if (reply?.configured === true) {
             lastSyncedAssistantKey = syncKey;
+            set({ lastAssistantErrorCode: null });
             return true;
           }
           lastSyncedAssistantKey = null;
+          const code =
+            typeof reply?.error_code === "string" ? reply.error_code : "assistant_start_failed";
+          set({ lastAssistantErrorCode: code });
           return false;
-        } catch {
+        } catch (err) {
           lastSyncedAssistantKey = null;
+          set({ lastAssistantErrorCode: errorCodeOf(err) });
           return false;
         }
       },
@@ -184,8 +210,7 @@ export const createConversationSlice =
               if (!ok) {
                 set({
                   summaryLoading: false,
-                  summaryError:
-                    "Assistant is not configured or credentials are missing. Check Assistant settings.",
+                  summaryError: describeAssistantSetupError(get().lastAssistantErrorCode),
                 });
                 return;
               }
@@ -224,13 +249,30 @@ export const createConversationSlice =
         set({ summaryVisible: false });
       },
 
-      clearAsk: () => set({ askAnswer: "", askHistory: [], askError: null, askLoading: false }),
+      clearAsk: (targetConversationId) => {
+        const state = get();
+        const convId =
+          targetConversationId || state.engineConversationId || state.activeConversationId;
+        set({ askAnswer: "", askHistory: [], askError: null, askLoading: false });
+        if (convId && isTauriRuntime()) {
+          void forwardCommand({
+            type: "assistant_ask_clear",
+            conversation_id: convId,
+          }).catch(() => {});
+        }
+        const detail = state.selectedConversationDetail;
+        const detailId = detail?.conversation?.conversation_id || detail?.conversation_id;
+        if (detail && detailId === convId) {
+          set({ selectedConversationDetail: { ...detail, ask_turns: [] } });
+        }
+      },
 
-      askMeeting: async (question) => {
+      askMeeting: async (question, targetConversationId) => {
         const trimmed = question.trim();
         if (!trimmed) return;
         const state = get();
-        const conversationId = state.engineConversationId || state.activeConversationId;
+        const conversationId =
+          targetConversationId || state.engineConversationId || state.activeConversationId;
         if (!conversationId || !state.connected || !isTauriRuntime()) {
           set({ askError: "Start or load a saved conversation with a connected engine to ask AI." });
           return;
@@ -253,7 +295,7 @@ export const createConversationSlice =
           if (!ok) {
             set({
               askLoading: false,
-              askError: "Assistant is not configured or credentials are missing.",
+              askError: describeAssistantSetupError(get().lastAssistantErrorCode),
             });
             return;
           }
@@ -273,19 +315,42 @@ export const createConversationSlice =
             set({ askLoading: false, askError: "Assistant returned an empty answer." });
             return;
           }
-          set((prev) => ({
-            askAnswer: answer,
-            askHistory: [
-              ...prev.askHistory,
-              {
-                id: `${Date.now()}-${prev.askHistory.length}`,
-                question: trimmed,
-                answer,
-              },
-            ],
-            askLoading: false,
-            askError: null,
-          }));
+          const askId =
+            typeof reply?.ask_id === "string" && reply.ask_id
+              ? reply.ask_id
+              : `${Date.now()}-${get().askHistory.length}`;
+          set((prev) => {
+            const newTurn = {
+              id: askId,
+              question: trimmed,
+              answer,
+              createdAtMs: Date.now(),
+            };
+            const detail = prev.selectedConversationDetail;
+            const detailId = detail?.conversation?.conversation_id || detail?.conversation_id;
+            const updatedDetail =
+              detail && detailId === conversationId
+                ? {
+                    ...detail,
+                    ask_turns: [
+                      ...(Array.isArray(detail.ask_turns) ? detail.ask_turns : []),
+                      {
+                        ask_id: askId,
+                        question: trimmed,
+                        answer_markdown: answer,
+                        created_at_ms: newTurn.createdAtMs,
+                      },
+                    ],
+                  }
+                : detail;
+            return {
+              askAnswer: answer,
+              askHistory: [...prev.askHistory, newTurn],
+              askLoading: false,
+              askError: null,
+              selectedConversationDetail: updatedDetail,
+            };
+          });
         } catch (err) {
           const code = errorCodeOf(err);
           set({

@@ -459,6 +459,22 @@
   margin-bottom: 20px;
 }
 
+.onboarding-audio-card {
+  padding: 14px 16px;
+  background: var(--bg-primary);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding-audio-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .onboarding-tips-card h4 {
   margin: 0 0 10px;
   font-size: 14px;

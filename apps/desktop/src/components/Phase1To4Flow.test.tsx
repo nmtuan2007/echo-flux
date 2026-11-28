@@ -11,6 +11,8 @@ import { TranscriptPanel } from "./TranscriptPanel";
 import { CloudConsent } from "./CloudConsent";
 import { ConversationSetupPanel } from "./ConversationSetupPanel";
 import { ExportMenu } from "./ExportMenu";
+import { HistoryPanel } from "./HistoryPanel";
+import { OnboardingDialog } from "./OnboardingDialog";
 import { exportAsMarkdown, exportAsSRT } from "../utils/export";
 
 vi.mock("@tauri-apps/api/tauri", () => ({ invoke: vi.fn(async () => undefined) }));
@@ -78,7 +80,9 @@ describe("Phase 1-4 UI enhancements", () => {
     const search = screen.getByRole("searchbox", { name: /Search transcript/i });
     fireEvent.change(search, { target: { value: "Budget" } });
     expect(screen.queryByText("Hello from me")).toBeNull();
-    expect(screen.getByText("Budget update")).toBeTruthy();
+    const highlighted = document.querySelector("mark.transcript-highlight");
+    expect(highlighted?.textContent).toBe("Budget");
+    expect(document.querySelector(".transcript-text")?.textContent).toBe("Budget update");
   });
 
   it("updates target language from LiveSessionBar", () => {
@@ -641,5 +645,107 @@ describe("Phase 1-4 UI enhancements", () => {
     const btn = screen.getByRole("button", { name: /Toggle translation/i });
     fireEvent.click(btn);
     expect(eventMod.emit).toHaveBeenCalledWith("relay_toggle_translation");
+  });
+
+  it("keeps saved Assist suggestions visible when Assistant is toggled off", () => {
+    useEngineStore.setState({
+      services: {
+        ...defaultServices(),
+        assistant: {
+          ...defaultServices().assistant,
+          enabled: false,
+          providerId: "local",
+        },
+      },
+      entries: [
+        {
+          id: "e-saved",
+          text: "Can you confirm the timeline?",
+          translation: null,
+          isFinal: true,
+          timestamp: 1000,
+          source: "system",
+          assist: {
+            requestId: "r-1",
+            assistId: "a-1",
+            conversationId: "conv-1",
+            providerId: "openai",
+            suggestedReplies: [{ strategy: "Direct", text: "Yes, Friday at 2 PM works." }],
+            clarifyingQuestions: [],
+            error: null,
+          },
+        },
+      ],
+    });
+    render(<TranscriptPanel />);
+    expect(screen.getByText(/Yes, Friday at 2 PM works\./)).toBeTruthy();
+  });
+
+  it("guides through Audio Setup & Shortcuts in streamlined OnboardingDialog Step 2", () => {
+    useEngineStore.setState({
+      onboardingCompleted: false,
+      connected: true,
+      availableMics: [{ id: "mic-1", name: "USB Studio Mic" }],
+      availableSpeakers: [{ id: "spk-1", name: "Headphones" }],
+    });
+    render(<OnboardingDialog />);
+    fireEvent.click(screen.getByRole("button", { name: /Continue|Next/i }));
+    expect(screen.getByText(/Audio Setup & Quick Shortcuts/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Check Audio/i })).toBeTruthy();
+    expect(screen.queryByText(/Optional Cloud AI Permissions/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Save & Launch/i }));
+    expect(useEngineStore.getState().onboardingCompleted).toBe(true);
+  });
+
+  it("renders session dividers, saved assist results, ask turns, and overwrite confirmation in HistoryPanel", () => {
+    useEngineStore.setState({
+      isViewingHistory: false,
+      entries: [
+        { id: "live-1", text: "Active line", translation: null, isFinal: true, timestamp: 1, source: "mic" },
+      ],
+      selectedConversationDetail: {
+        conversation: { conversation_id: "conv-h1", title: "Weekly Sync", created_at_ms: 1700000000000 },
+        sessions: [
+          { session_id: "s-1", started_at_ms: 1700000000000 },
+          { session_id: "s-2", started_at_ms: 1700003600000 },
+        ],
+        messages: [
+          { message_id: "m-1", session_id: "s-1", source: "system", stt_text: "Part 1", timestamp_ms: 1700000001000 },
+          { message_id: "m-2", session_id: "s-2", source: "system", stt_text: "Part 2", timestamp_ms: 1700003601000 },
+        ],
+        assist_results: [
+          {
+            message_id: "m-1",
+            suggested_replies: [{ strategy: "Helpful", text: "Let me share the link." }],
+            clarifying_questions: [{ question: "Which branch?", purpose: "Clarity" }],
+          },
+        ],
+        ask_turns: [
+          { ask_id: "ask-1", question: "What was decided?", answer_markdown: "Ship on Monday." },
+        ],
+        summary: { summary_markdown: "## Recap\n- Sync completed." },
+        profiles: [],
+      },
+    });
+    render(<HistoryPanel />);
+    expect(screen.getByText(/Session #1/)).toBeTruthy();
+    expect(screen.getByText(/Session #2/)).toBeTruthy();
+    expect(screen.getByText(/Let me share the link\./)).toBeTruthy();
+    expect(screen.getByText(/Which branch\?/)).toBeTruthy();
+    expect(screen.getByText(/Q: What was decided\?/)).toBeTruthy();
+    expect(screen.getByText(/Ship on Monday\./)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Load Into Session" }));
+    expect(screen.getByText(/Replace Active Session View\?/i)).toBeTruthy();
+  });
+
+  it("mirrors services <-> config in settingsSlice", () => {
+    const store = createEngineStore();
+    store.getState().updateServiceConfig("translation", { enabled: true });
+    expect(store.getState().config.translationEnabled).toBe(true);
+    store.getState().setServiceOptionInput("stt", "language", "vi");
+    expect(store.getState().config.language).toBe("vi");
+    store.getState().setServiceOptionInput("translation", "target_lang", "ja");
+    expect(store.getState().config.targetLang).toBe("ja");
   });
 });

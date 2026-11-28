@@ -1,21 +1,33 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
-import { CloudConsent } from "./CloudConsent";
 import { LocalPackStatus } from "./LocalPackStatus";
 
 export function OnboardingDialog() {
   const {
     onboardingCompleted,
-    hasConsentedToCloud,
     setOnboardingCompleted,
+    connected,
     services,
+    config,
+    availableMics,
+    availableSpeakers,
+    audioProbeLoading,
+    audioProbeResult,
     updateServiceConfig,
     updateConfig,
+    requestDeviceList,
+    probeAudioInput,
   } = useEngineStore();
   const [step, setStep] = useState<number>(1);
   const [sttReady, setSttReady] = useState<boolean>(false);
   const [transReady, setTransReady] = useState<boolean>(false);
   const translationEnabled = services.translation.enabled;
+
+  useEffect(() => {
+    if (step === 2 && connected) {
+      requestDeviceList();
+    }
+  }, [step, connected, requestDeviceList]);
 
   if (onboardingCompleted) return null;
 
@@ -36,7 +48,7 @@ export function OnboardingDialog() {
           <span className="onboarding-step-label">Local AI</span>
           <div className="onboarding-step-divider" />
           <div className={`onboarding-step-indicator ${step >= 2 ? "active" : ""}`}>2</div>
-          <span className="onboarding-step-label">Privacy &amp; Shortcuts</span>
+          <span className="onboarding-step-label">Audio &amp; Shortcuts</span>
         </div>
 
         {step === 1 && (
@@ -83,14 +95,118 @@ export function OnboardingDialog() {
         {step === 2 && (
           <div className="onboarding-body">
             <h2 id="onboarding-step-title" className="onboarding-step-title">
-              Privacy &amp; Quick Shortcuts
+              Audio Setup &amp; Quick Shortcuts
             </h2>
             <p className="onboarding-step-desc">
-              By default, all audio stays on your device. Enable optional cloud providers below only
-              if needed.
+              Choose your audio streams and test signal detection before your first meeting. Audio
+              stays 100% on-device unless you enable a cloud provider in Settings.
             </p>
 
-            <CloudConsent mode="onboarding" />
+            <div className="onboarding-audio-card">
+              <div className="settings-field">
+                <label htmlFor="onboarding-audio-source">Audio Source</label>
+                <select
+                  id="onboarding-audio-source"
+                  className="settings-select"
+                  value={config.audioSource}
+                  onChange={(e) =>
+                    updateConfig({
+                      audioSource: e.target.value as "microphone" | "system" | "both",
+                    })
+                  }
+                >
+                  <option value="both">Mic + System Audio (Recommended for meetings)</option>
+                  <option value="microphone">Microphone Only</option>
+                  <option value="system">System Audio Only</option>
+                </select>
+              </div>
+
+              {config.audioSource !== "system" && (
+                <div className="settings-field">
+                  <label htmlFor="onboarding-mic-device">Microphone</label>
+                  <select
+                    id="onboarding-mic-device"
+                    className="settings-select"
+                    value={config.micDeviceId ?? ""}
+                    onChange={(e) => updateConfig({ micDeviceId: e.target.value || undefined })}
+                    disabled={!connected}
+                  >
+                    <option value="">System Default Microphone</option>
+                    {availableMics.map((dev) => (
+                      <option key={dev.id} value={dev.id}>
+                        {dev.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {config.audioSource !== "microphone" && (
+                <div className="settings-field">
+                  <label htmlFor="onboarding-speaker-device">System Audio (Loopback)</label>
+                  <select
+                    id="onboarding-speaker-device"
+                    className="settings-select"
+                    value={config.speakerDeviceId ?? ""}
+                    onChange={(e) =>
+                      updateConfig({ speakerDeviceId: e.target.value || undefined })
+                    }
+                    disabled={!connected}
+                  >
+                    <option value="">System Default Output</option>
+                    {availableSpeakers.map((dev) => (
+                      <option key={dev.id} value={dev.id}>
+                        {dev.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="onboarding-audio-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void probeAudioInput()}
+                  disabled={!connected || audioProbeLoading}
+                >
+                  {audioProbeLoading ? "Checking..." : "Check Audio"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-text"
+                  onClick={requestDeviceList}
+                  disabled={!connected}
+                >
+                  ↻ Refresh Devices
+                </button>
+              </div>
+
+              {audioProbeResult && (
+                <div className="audio-probe-panel" role="status" aria-label="Audio signal check">
+                  {Object.entries(audioProbeResult).map(([stream, info]) => {
+                    const pct = Math.round((info.level || 0) * 100);
+                    return (
+                      <div key={stream} className="audio-probe-row">
+                        <span className="audio-probe-label">
+                          {stream === "mic" ? "Mic" : "System"}
+                        </span>
+                        <div className="audio-probe-meter">
+                          <div className="audio-probe-fill" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className={`audio-probe-status ${info.ok ? "" : "error"}`}>
+                          {!info.ok
+                            ? `Error (${info.error || "failed"})`
+                            : pct > 0
+                              ? `Signal OK (${pct}%)`
+                              : "Silence (0%)"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
             <div className="onboarding-tips-card">
               <h4>Quick Shortcuts</h4>
@@ -112,7 +228,7 @@ export function OnboardingDialog() {
                 ← Back
               </button>
               <button type="button" className="btn btn-primary btn-large" onClick={handleComplete}>
-                {hasConsentedToCloud ? "Save & Launch 🚀" : "Keep 100% Local & Launch 🚀"}
+                Save &amp; Launch 🚀
               </button>
             </div>
           </div>

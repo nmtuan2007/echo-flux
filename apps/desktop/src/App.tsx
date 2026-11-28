@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Header } from "./components/Header";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { OverlayPanel } from "./components/OverlayPanel";
@@ -20,18 +20,21 @@ import { emit, listen } from "@tauri-apps/api/event";
 
 function ErrorToast() {
   const { appError, clearAppError } = useEngineStore();
+  const [paused, setPaused] = useState(false);
 
   useEffect(() => {
-    if (appError) {
-      const t = setTimeout(() => clearAppError(), 5000);
-      return () => clearTimeout(t);
-    }
-  }, [appError, clearAppError]);
+    if (!appError || paused) return;
+    const t = setTimeout(() => clearAppError(), 9000);
+    return () => clearTimeout(t);
+  }, [appError, paused, clearAppError]);
 
   if (!appError) return null;
 
   return (
     <div
+      role="alert"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
       style={{
         position: "absolute",
         bottom: "20px",
@@ -60,6 +63,8 @@ function ErrorToast() {
       `}</style>
       <span>⚠ {appError}</span>
       <button
+        type="button"
+        aria-label="Dismiss notification"
         onClick={clearAppError}
         style={{
           background: "transparent",
@@ -68,7 +73,7 @@ function ErrorToast() {
           cursor: "pointer",
           fontSize: "18px",
           padding: 0,
-          opacity: 0.8,
+          opacity: 0.85,
         }}
       >
         ×
@@ -97,12 +102,15 @@ export default function App() {
 
   useEffect(() => {
     let unlistenSync: (() => void) | undefined;
+    let unlistenAudioSync: (() => void) | undefined;
     let unlistenReq: (() => void) | undefined;
     let unlistenClosed: (() => void) | undefined;
     let unlistenRelay: (() => void) | undefined;
     let unlistenAssistRelay: (() => void) | undefined;
     let unlistenToggleRelay: (() => void) | undefined;
     let unlistenTransRelay: (() => void) | undefined;
+    let unlistenOverlayPrefs: (() => void) | undefined;
+    let unlistenOverlayLock: (() => void) | undefined;
     let unsubStore: (() => void) | undefined;
     let overlayActive = false;
 
@@ -110,7 +118,6 @@ export default function App() {
     let lastSyncedConfig: unknown = null;
     let lastSyncedLabels: unknown = null;
     let lastSyncedEntries: unknown = null;
-    let lastSyncedAudioLevels: unknown = null;
     const getSyncPayload = (full: boolean) => {
       const state = useEngineStore.getState();
       const payload: Record<string, unknown> = {
@@ -123,9 +130,10 @@ export default function App() {
         engineConversationId: state.engineConversationId,
         sttStreams: state.sttStreams,
         shortcutsEnabled: state.shortcutsEnabled,
+        overlayFontSize: state.overlayFontSize,
+        overlayHighOpacity: state.overlayHighOpacity,
       };
-      if (full || state.audioLevels !== lastSyncedAudioLevels) {
-        lastSyncedAudioLevels = state.audioLevels;
+      if (full) {
         payload.audioLevels = state.audioLevels;
       }
       if (full || state.entries !== lastSyncedEntries) {
@@ -158,11 +166,25 @@ export default function App() {
       }, 60);
     };
 
+    let audioSyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleAudioSync = () => {
+      if (!overlayActive || audioSyncTimer) return;
+      audioSyncTimer = setTimeout(() => {
+        audioSyncTimer = null;
+        if (!overlayActive) return;
+        void emit("sync_audio_levels", useEngineStore.getState().audioLevels);
+      }, 100);
+    };
+
     if (isOverlay) {
       // OVERLAY WINDOW: Mirror state from Main Window
       listen("sync_state", (event: any) => {
         useEngineStore.setState(event.payload);
       }).then((f) => (unlistenSync = f));
+
+      listen("sync_audio_levels", (event: any) => {
+        useEngineStore.setState({ audioLevels: event.payload });
+      }).then((f) => (unlistenAudioSync = f));
 
       emit("request_sync_state");
     } else {
@@ -176,7 +198,22 @@ export default function App() {
 
       listen("overlay_closed", () => {
         overlayActive = false;
+        useEngineStore.getState().setOverlayLocked(false);
       }).then((f) => (unlistenClosed = f));
+
+      listen("relay_set_overlay_prefs", (event: any) => {
+        const payload = event.payload || {};
+        useEngineStore.getState().setOverlayPrefs({
+          ...(payload.fontSize ? { fontSize: payload.fontSize } : {}),
+          ...(typeof payload.highOpacity === "boolean"
+            ? { highOpacity: payload.highOpacity }
+            : {}),
+        });
+      }).then((f) => (unlistenOverlayPrefs = f));
+
+      listen("overlay_lock_changed", (event: any) => {
+        useEngineStore.getState().setOverlayLocked(Boolean(event.payload?.locked));
+      }).then((f) => (unlistenOverlayLock = f));
 
       listen("relay_request_suggestion", (event: any) => {
         const { entryId } = event.payload || {};
@@ -206,6 +243,9 @@ export default function App() {
 
       unsubStore = useEngineStore.subscribe((state, prev) => {
         if (!overlayActive) return;
+        if (state.audioLevels !== prev.audioLevels) {
+          scheduleAudioSync();
+        }
         if (
           state.entries !== prev.entries ||
           state.partials !== prev.partials ||
@@ -219,8 +259,9 @@ export default function App() {
           state.sttStreams !== prev.sttStreams ||
           state.services !== prev.services ||
           state.config !== prev.config ||
-          state.audioLevels !== prev.audioLevels ||
-          state.shortcutsEnabled !== prev.shortcutsEnabled
+          state.shortcutsEnabled !== prev.shortcutsEnabled ||
+          state.overlayFontSize !== prev.overlayFontSize ||
+          state.overlayHighOpacity !== prev.overlayHighOpacity
         ) {
           scheduleSync();
         }
@@ -229,13 +270,17 @@ export default function App() {
 
     return () => {
       if (syncTimer) clearTimeout(syncTimer);
+      if (audioSyncTimer) clearTimeout(audioSyncTimer);
       if (unlistenSync) unlistenSync();
+      if (unlistenAudioSync) unlistenAudioSync();
       if (unlistenReq) unlistenReq();
       if (unlistenClosed) unlistenClosed();
       if (unlistenRelay) unlistenRelay();
       if (unlistenAssistRelay) unlistenAssistRelay();
       if (unlistenToggleRelay) unlistenToggleRelay();
       if (unlistenTransRelay) unlistenTransRelay();
+      if (unlistenOverlayPrefs) unlistenOverlayPrefs();
+      if (unlistenOverlayLock) unlistenOverlayLock();
       if (unsubStore) unsubStore();
       if (!isOverlay) {
         disconnect();

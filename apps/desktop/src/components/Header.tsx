@@ -1,5 +1,6 @@
-import { useEngineStore } from "../store/engineStore";
+import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
+import { useEngineStore } from "../store/engineStore";
 
 export function Header() {
   const {
@@ -8,6 +9,7 @@ export function Header() {
     isToggling,
     activeView,
     theme,
+    overlayLocked,
     startPipeline,
     stopPipeline,
     setActiveView,
@@ -72,6 +74,21 @@ export function Header() {
         >
           PiP Overlay
         </button>
+
+        {overlayLocked && (
+          <button
+            type="button"
+            className="btn btn-secondary overlay-unlock-btn"
+            onClick={() => {
+              void emit("overlay_unlock").catch((e) =>
+                console.error("Failed to unlock overlay window:", e),
+              );
+            }}
+            title="Unlock click-through overlay (Ctrl+Shift+L)"
+          >
+            Unlock Overlay
+          </button>
+        )}
       </div>
 
       <div className="header-right">

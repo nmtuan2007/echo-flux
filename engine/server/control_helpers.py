@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -9,6 +10,15 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from engine.core.config import Config
 from engine.providers.manifests import ManifestField, ProviderManifest
 from engine.server.protocol import suggestion_result_message
+
+
+class DispatcherError(Exception):
+    """Safe domain failure with a fixed error code and sanitized display message."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def stored_assist_payload(
@@ -281,3 +291,50 @@ def probe_audio_stream(kind: str, device_id: Optional[str], duration_ms: int) ->
         if inp is not None:
             with contextlib.suppress(Exception):
                 inp.stop()
+
+
+def delete_local_model_files(
+    capability: str,
+    source_lang: Optional[str] = None,
+    target_lang: Optional[str] = None,
+    pack_id: Optional[str] = None,
+    models_dir: Optional[Path] = None,
+) -> int:
+    """Remove locally cached Whisper or Marian model directories matching the target pack."""
+    resolved_dir = models_dir if models_dir is not None else Config().models_dir
+    if not resolved_dir or not resolved_dir.exists():
+        return 0
+    cap = (capability or "").lower()
+    targets = []
+    if cap in ("stt", "speech", "whisper"):
+        expected_size = _expected_whisper_size(pack_id)
+        if expected_size:
+            targets = list(resolved_dir.glob(f"models--Systran--faster-whisper-{expected_size}*")) + list(
+                resolved_dir.glob(f"models--openai--whisper-{expected_size}*")
+            )
+        else:
+            targets = list(resolved_dir.glob("models--Systran--faster-whisper-*")) + list(
+                resolved_dir.glob("models--openai--whisper-*")
+            )
+    elif cap in ("translation", "translate", "marian", "opus"):
+        ct2_dir = resolved_dir / "ct2"
+        if ct2_dir.exists():
+            src = (source_lang or "").strip().lower()
+            tgt = (target_lang or "").strip().lower()
+            if src and src != "auto" and tgt and tgt != "auto":
+                targets = list(ct2_dir.glob(f"Helsinki-NLP_opus-mt-{src}-{tgt}*"))
+            elif tgt and tgt != "auto":
+                targets = list(ct2_dir.glob(f"Helsinki-NLP_opus-mt-*-{tgt}*"))
+            else:
+                targets = list(ct2_dir.glob("Helsinki-NLP_opus-mt-*"))
+
+    removed = 0
+    for path in targets:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+        elif path.is_file():
+            with contextlib.suppress(OSError):
+                path.unlink()
+                removed += 1
+    return removed

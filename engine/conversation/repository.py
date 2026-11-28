@@ -29,6 +29,7 @@ from engine.conversation.models import (
     ConversationValidationError,
     ProviderMetadata,
     SessionRecord,
+    StoredAskTurn,
     StoredAssistResult,
     StoredSummary,
     TranscriptMessage,
@@ -48,7 +49,7 @@ from engine.providers.types import (
 logger = get_logger("conversation.repository")
 
 DB_FILENAME = "conversations.sqlite3"
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2
 EXPORT_FORMAT = "echoflux.conversation-export"
 EXPORT_FORMAT_VERSION = 1
 BUSY_TIMEOUT_MS = 5000
@@ -241,9 +242,34 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+_SCHEMA_V2 = (
+    """
+    CREATE TABLE ask_turns (
+        ask_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL
+            REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        question TEXT NOT NULL,
+        answer_markdown TEXT NOT NULL,
+        provider TEXT,
+        created_at_ms REAL NOT NULL,
+        record_version INTEGER NOT NULL
+    )
+    """,
+    "CREATE INDEX ask_turns_by_conversation ON ask_turns(conversation_id, created_at_ms)",
+)
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    for statement in _SCHEMA_V2:
+        conn.execute(statement)
+
+
 # Migration hook: append (version, step) for each schema change. Steps run in order inside the
 # same transaction that bumps PRAGMA user_version, so a failed step leaves the old schema intact.
-MIGRATIONS: Tuple[Tuple[int, Callable[[sqlite3.Connection], None]], ...] = ((1, _migrate_to_v1),)
+MIGRATIONS: Tuple[Tuple[int, Callable[[sqlite3.Connection], None]], ...] = (
+    (1, _migrate_to_v1),
+    (2, _migrate_to_v2),
+)
 
 
 # --- row mapping ------------------------------------------------------------------------------
@@ -365,6 +391,18 @@ def _summary_from_row(row: sqlite3.Row) -> StoredSummary:
         latency_ms=row["latency_ms"],
         record_version=row["record_version"],
         **{name: tuple(payload[name]) for name in _SUMMARY_LISTS},
+    )
+
+
+def _ask_turn_from_row(row: sqlite3.Row) -> StoredAskTurn:
+    return StoredAskTurn(
+        ask_id=row["ask_id"],
+        conversation_id=row["conversation_id"],
+        question=row["question"],
+        answer_markdown=row["answer_markdown"],
+        created_at_ms=row["created_at_ms"],
+        provider=_provider_from_json(row["provider"]),
+        record_version=row["record_version"],
     )
 
 
@@ -1018,6 +1056,67 @@ class ConversationRepository:
         summaries = self.list_summaries(conversation_id)
         return summaries[-1] if summaries else None
 
+    def _insert_ask_turn(self, conn: sqlite3.Connection, record: StoredAskTurn) -> None:
+        try:
+            conn.execute(
+                "INSERT INTO ask_turns (ask_id, conversation_id, question, answer_markdown,"
+                " provider, created_at_ms, record_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.ask_id,
+                    record.conversation_id,
+                    record.question,
+                    record.answer_markdown,
+                    _provider_to_json(record.provider),
+                    record.created_at_ms,
+                    record.record_version,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise RecordConflictError("ask_id", "duplicate_id") from exc
+
+    def save_ask_turn(
+        self,
+        conversation_id: str,
+        question: str,
+        answer_markdown: str,
+        provider: Optional[ProviderMetadata] = None,
+        ask_id: Optional[str] = None,
+        created_at_ms: Optional[float] = None,
+    ) -> StoredAskTurn:
+        record = StoredAskTurn(
+            ask_id=ask_id or new_record_id(),
+            conversation_id=conversation_id,
+            question=question,
+            answer_markdown=answer_markdown,
+            created_at_ms=_now_ms() if created_at_ms is None else created_at_ms,
+            provider=provider,
+        )
+        with self.transaction() as conn:
+            self.require_conversation(conn, conversation_id)
+            self._insert_ask_turn(conn, record)
+            self._touch(conn, conversation_id, record.created_at_ms)
+        return record
+
+    def list_ask_turns(self, conversation_id: str) -> List[StoredAskTurn]:
+        validate_record_id("conversation_id", conversation_id)
+        with self.read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ask_turns WHERE conversation_id = ?"
+                " ORDER BY created_at_ms, ask_id",
+                (conversation_id,),
+            ).fetchall()
+        return [_ask_turn_from_row(row) for row in rows]
+
+    def clear_ask_turns(self, conversation_id: str) -> int:
+        validate_record_id("conversation_id", conversation_id)
+        with self.transaction() as conn:
+            self.require_conversation(conn, conversation_id)
+            cur = conn.execute(
+                "DELETE FROM ask_turns WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            return int(cur.rowcount or 0)
+
     # --- import and export --------------------------------------------------------------------
 
     def import_conversation(
@@ -1026,6 +1125,7 @@ class ConversationRepository:
         messages: Sequence[TranscriptMessage],
         assist_results: Sequence[StoredAssistResult] = (),
         summaries: Sequence[StoredSummary] = (),
+        ask_turns: Sequence[StoredAskTurn] = (),
     ) -> ImportOutcome:
         """Idempotently import one externally held conversation (e.g. browser history).
 
@@ -1059,6 +1159,10 @@ class ConversationRepository:
                 if summary.conversation_id != record.conversation_id:
                     raise ConversationValidationError("summaries", "wrong_conversation")
                 self._insert_summary(conn, summary)
+            for ask_turn in ask_turns:
+                if ask_turn.conversation_id != record.conversation_id:
+                    raise ConversationValidationError("ask_turns", "wrong_conversation")
+                self._insert_ask_turn(conn, ask_turn)
         logger.info(
             "Imported conversation %s with %d messages", record.conversation_id, len(messages)
         )
@@ -1100,6 +1204,11 @@ class ConversationRepository:
             summary_rows = conn.execute(
                 "SELECT * FROM summaries WHERE conversation_id = ?"
                 " ORDER BY created_at_ms, summary_id",
+                (conversation_id,),
+            ).fetchall()
+            ask_rows = conn.execute(
+                "SELECT * FROM ask_turns WHERE conversation_id = ?"
+                " ORDER BY created_at_ms, ask_id",
                 (conversation_id,),
             ).fetchall()
 
@@ -1182,6 +1291,19 @@ class ConversationRepository:
                 }
             )
 
+        ask_turns = []
+        for row in ask_rows:
+            t = _ask_turn_from_row(row)
+            ask_turns.append(
+                {
+                    "ask_id": t.ask_id,
+                    "question": t.question,
+                    "answer_markdown": t.answer_markdown,
+                    "created_at_ms": t.created_at_ms,
+                    "provider": provider(t.provider),
+                }
+            )
+
         export = {
             "format": EXPORT_FORMAT,
             "format_version": EXPORT_FORMAT_VERSION,
@@ -1198,6 +1320,7 @@ class ConversationRepository:
             "messages": messages,
             "assist_results": assists,
             "summaries": summaries,
+            "ask_turns": ask_turns,
         }
         # Defense in depth: the whitelist above should make this unreachable.
         reject_secret_keys("export", export)

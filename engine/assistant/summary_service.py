@@ -335,6 +335,7 @@ ChunkCallback = Callable[[str], Awaitable[None]]
 class AskOutcome:
     conversation_id: str
     answer_markdown: Optional[str] = None
+    ask_id: Optional[str] = None
     error: Optional[SummaryError] = None
     warning: Optional[SummaryWarning] = None
     provider: Optional[ProviderMetadata] = None
@@ -603,7 +604,22 @@ class SummaryService:
         answer = answer.replace("\x00", "").strip()
         if not answer or len(answer) > MAX_SUMMARY_CHARS:
             return replace(outcome, error=_error(SummaryErrorCode.INVALID_RESPONSE))
-        return replace(outcome, answer_markdown=answer)
+        ask_id: Optional[str] = None
+        if hasattr(self._repo, "save_ask_turn"):
+            try:
+                stored_turn = await asyncio.to_thread(
+                    self._repo.save_ask_turn,
+                    conversation_id,
+                    cleaned_q,
+                    answer,
+                    metadata,
+                    None,
+                    self._clock_ms(),
+                )
+                ask_id = stored_turn.ask_id
+            except (RepositoryError, ConversationValidationError):
+                logger.warning("Failed to persist ask turn for conversation=%s", conversation_id)
+        return replace(outcome, answer_markdown=answer, ask_id=ask_id)
 
     def _log_failure(self, conversation_id: str, error: SummaryError) -> None:
         logger.warning(

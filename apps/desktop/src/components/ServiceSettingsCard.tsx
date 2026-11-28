@@ -53,6 +53,7 @@ function testButtonLabel(phase: TestConnectionPhase): string {
 
 export function ServiceSettingsCard({ service }: { service: ServiceName }) {
   const config = useEngineStore((s) => s.services[service]);
+  const appConfig = useEngineStore((s) => s.config);
   const running = useEngineStore((s) => s.running);
   const testUi = useEngineStore((s) => s.connectionTests[service]);
   const credentialOps = useEngineStore((s) => s.credentialOps[service]);
@@ -291,13 +292,20 @@ export function ServiceSettingsCard({ service }: { service: ServiceName }) {
               )}
 
               {isLocalProvider && (service === "stt" || service === "translation") && (
-                <LocalPackStatus capability={service} disabled={locked} />
+                <LocalPackStatus capability={service} disabled={locked} allowRemove />
               )}
 
               {service !== "assistant" && (
                 <p className="settings-note service-language-note">
-                  Source language: auto-detect.
-                  {hasHint && " Language hints are under Advanced."}
+                  Source language:{" "}
+                  {(() => {
+                    const raw =
+                      service === "stt"
+                        ? (config.options.language as string) || appConfig.language || "auto"
+                        : (config.options.source_lang as string) || appConfig.sourceLang || "auto";
+                    return raw === "auto" ? "auto-detect" : raw;
+                  })()}
+                  .{hasHint && " Language hints are under Advanced."}
                 </p>
               )}
 

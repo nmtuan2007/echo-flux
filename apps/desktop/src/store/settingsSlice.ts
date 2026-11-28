@@ -41,6 +41,7 @@ import type {
   EngineConfig,
   HardwareInfo,
   ManifestField,
+  OverlayFontSize,
   PackStatusItem,
   ProviderManifest,
   ServiceConfig,
@@ -248,6 +249,34 @@ export interface PackDownloadProgress {
 }
 
 const SHORTCUTS_ENABLED_KEY = "echoflux:shortcuts_enabled";
+const OVERLAY_PREFS_KEY = "echoflux:overlay_prefs";
+
+function loadOverlayPrefs(): { fontSize: OverlayFontSize; highOpacity: boolean } {
+  const defaults: { fontSize: OverlayFontSize; highOpacity: boolean } = {
+    fontSize: "md",
+    highOpacity: false,
+  };
+  if (typeof window === "undefined") return defaults;
+  try {
+    const raw = window.localStorage?.getItem(OVERLAY_PREFS_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as { fontSize?: unknown; highOpacity?: unknown };
+    const fontSize: OverlayFontSize =
+      parsed.fontSize === "sm" || parsed.fontSize === "md" || parsed.fontSize === "lg"
+        ? parsed.fontSize
+        : "md";
+    return { fontSize, highOpacity: Boolean(parsed.highOpacity) };
+  } catch {
+    return defaults;
+  }
+}
+
+function persistOverlayPrefs(prefs: { fontSize: OverlayFontSize; highOpacity: boolean }): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage?.setItem(OVERLAY_PREFS_KEY, JSON.stringify(prefs));
+  } catch {}
+}
 
 function loadShortcutsEnabled(): boolean {
   if (typeof window === "undefined") return true;
@@ -341,9 +370,14 @@ export interface SettingsSlice {
   hardwareInfo: HardwareInfo | null;
   isPackChecking: boolean;
   shortcutsEnabled: boolean;
+  overlayFontSize: OverlayFontSize;
+  overlayHighOpacity: boolean;
+  overlayLocked: boolean;
   settingsFocusService: ServiceName | null;
 
   setShortcutsEnabled: (enabled: boolean) => void;
+  setOverlayPrefs: (prefs: Partial<{ fontSize: OverlayFontSize; highOpacity: boolean }>) => void;
+  setOverlayLocked: (locked: boolean) => void;
   openSettingsFor: (service?: ServiceName) => void;
   clearSettingsFocus: () => void;
   setOnboardingCompleted: (completed: boolean) => void;
@@ -361,6 +395,10 @@ export interface SettingsSlice {
   retryLocalPack: (
     packId: string,
     options?: { sourceLang?: string; targetLang?: string },
+  ) => Promise<boolean>;
+  deleteLocalPack: (
+    capability: "stt" | "translation",
+    options?: { packId?: string; sourceLang?: string; targetLang?: string },
   ) => Promise<boolean>;
 }
 
@@ -443,6 +481,7 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
     typeof window !== "undefined" &&
     window.localStorage?.getItem("echoflux:onboarding_completed") === "true";
   const initialConsent = loadInitialConsent();
+  const initialOverlayPrefs = loadOverlayPrefs();
 
   return {
     config: { ...DEFAULT_CONFIG },
@@ -460,6 +499,9 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
     hardwareInfo: null,
     isPackChecking: false,
     shortcutsEnabled: loadShortcutsEnabled(),
+    overlayFontSize: initialOverlayPrefs.fontSize,
+    overlayHighOpacity: initialOverlayPrefs.highOpacity,
+    overlayLocked: false,
     settingsFocusService: null,
     manifestsLoaded: false,
 
@@ -470,6 +512,21 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
         }
       } catch {}
       set({ shortcutsEnabled: enabled });
+    },
+
+    setOverlayPrefs: (prefs) => {
+      set((state) => {
+        const next = {
+          fontSize: prefs.fontSize ?? state.overlayFontSize,
+          highOpacity: prefs.highOpacity ?? state.overlayHighOpacity,
+        };
+        persistOverlayPrefs(next);
+        return { overlayFontSize: next.fontSize, overlayHighOpacity: next.highOpacity };
+      });
+    },
+
+    setOverlayLocked: (locked) => {
+      set({ overlayLocked: locked });
     },
 
     openSettingsFor: (service) => {
@@ -520,7 +577,14 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
           validation: current.validation,
         };
         if (fingerprintedFieldsDiffer(current, next)) next.validation = unvalidated();
-        return { services: { ...state.services, [service]: next } };
+        const nextServices = { ...state.services, [service]: next };
+        if (service === "translation" && changes.enabled !== undefined) {
+          return {
+            services: nextServices,
+            config: { ...state.config, translationEnabled: Boolean(changes.enabled) },
+          };
+        }
+        return { services: nextServices };
       });
     },
 
@@ -615,6 +679,17 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       if (value === undefined) delete options[key];
       else options[key] = value;
       get().updateServiceConfig(service, { options });
+      // Keep legacy config fields mirrored so StatusBar, LiveSessionBar, and Settings stay aligned.
+      if (!error) {
+        const strVal = typeof value === "string" ? value : undefined;
+        if (service === "stt" && key === "language") {
+          get().updateConfig({ language: strVal || "auto" });
+        } else if (service === "translation" && key === "target_lang" && strVal) {
+          get().updateConfig({ targetLang: strVal });
+        } else if (service === "translation" && key === "source_lang") {
+          get().updateConfig({ sourceLang: strVal || "auto" });
+        }
+      }
       set((state) => {
         const drafts = { ...state.optionDrafts[service] };
         if (error) drafts[key] = String(raw);
@@ -960,6 +1035,24 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       options?: { sourceLang?: string; targetLang?: string },
     ) => {
       return get().installLocalPack(packId, options);
+    },
+
+    deleteLocalPack: async (capability, options) => {
+      try {
+        await forwardCommand({
+          type: "pack_delete",
+          capability,
+          ...(options?.packId ? { pack_id: options.packId } : {}),
+          ...(options?.sourceLang ? { source_lang: options.sourceLang } : {}),
+          ...(options?.targetLang ? { target_lang: options.targetLang } : {}),
+        });
+        await get().checkPackReadiness(capability);
+        return true;
+      } catch (err) {
+        const code = errorCodeOf(err);
+        set({ appError: `Could not remove offline model (${code}).` });
+        return false;
+      }
     },
   };
 };
