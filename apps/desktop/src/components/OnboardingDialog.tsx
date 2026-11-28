@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useEngineStore } from "../store/engineStore";
+import { PRESET_INPUT_LANGUAGES, PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
 import { LocalPackStatus } from "./LocalPackStatus";
 
 export function OnboardingDialog() {
@@ -15,6 +16,7 @@ export function OnboardingDialog() {
     audioProbeResult,
     updateServiceConfig,
     updateConfig,
+    setServiceOptionInput,
     requestDeviceList,
     probeAudioInput,
   } = useEngineStore();
@@ -22,6 +24,10 @@ export function OnboardingDialog() {
   const [sttReady, setSttReady] = useState<boolean>(false);
   const [transReady, setTransReady] = useState<boolean>(false);
   const translationEnabled = services.translation.enabled;
+  const spokenLang =
+    (services?.stt?.options?.language as string) || config.language || "auto";
+  const targetLang =
+    (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
 
   useEffect(() => {
     if (step === 2 && connected) {
@@ -62,6 +68,26 @@ export function OnboardingDialog() {
             </p>
 
             <div className="onboarding-packs-container">
+              <div className="settings-field">
+                <label htmlFor="onboarding-source-lang">Spoken Language</label>
+                <select
+                  id="onboarding-source-lang"
+                  className="settings-select"
+                  value={spokenLang}
+                  onChange={(e) => {
+                    const lang = e.target.value;
+                    setServiceOptionInput("stt", "language", lang);
+                    setServiceOptionInput("translation", "source_lang", lang);
+                    updateConfig({ language: lang, sourceLang: lang });
+                  }}
+                >
+                  {PRESET_INPUT_LANGUAGES.map((opt) => (
+                    <option key={opt.code} value={opt.code}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <LocalPackStatus capability="stt" onStatusChange={setSttReady} />
               <label className="onboarding-toggle-row">
                 <input
@@ -77,7 +103,28 @@ export function OnboardingDialog() {
                 <span>Enable Live Translation (downloads ~300 MB offline pack)</span>
               </label>
               {translationEnabled && (
-                <LocalPackStatus capability="translation" onStatusChange={setTransReady} />
+                <>
+                  <div className="settings-field">
+                    <label htmlFor="onboarding-target-lang">Translate to</label>
+                    <select
+                      id="onboarding-target-lang"
+                      className="settings-select"
+                      value={targetLang}
+                      onChange={(e) => {
+                        const lang = e.target.value;
+                        setServiceOptionInput("translation", "target_lang", lang);
+                        updateConfig({ targetLang: lang });
+                      }}
+                    >
+                      {PRESET_TARGET_LANGUAGES.map((opt) => (
+                        <option key={opt.code} value={opt.code}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <LocalPackStatus capability="translation" onStatusChange={setTransReady} />
+                </>
               )}
             </div>
 
@@ -219,6 +266,9 @@ export function OnboardingDialog() {
                 </li>
                 <li>
                   <kbd>Ctrl+Shift+S</kbd>: Request AI Assist on latest remote utterance
+                </li>
+                <li>
+                  <kbd>Ctrl+Shift+U</kbd>: Unlock click-through Overlay
                 </li>
               </ul>
             </div>

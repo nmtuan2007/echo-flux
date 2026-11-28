@@ -222,6 +222,9 @@ class FasterWhisperBackend(ASRBackend):
             log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
         )
+        initial_prompt = getattr(self._config, "initial_prompt", None) if self._config else None
+        if isinstance(initial_prompt, str) and initial_prompt.strip():
+            transcribe_kwargs["initial_prompt"] = initial_prompt.strip()
         # Serialize WhisperModel inference across concurrent mic/system worker threads.
         with self._model_lock:
             model = self._model

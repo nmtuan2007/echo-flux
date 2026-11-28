@@ -350,3 +350,34 @@
   color: #fde68a;
   font-size: 11px;
 }
+
+.overlay-fallback-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(245, 166, 35, 0.22);
+  border: 1px solid rgba(245, 166, 35, 0.5);
+  color: #fde68a;
+  pointer-events: auto;
+  white-space: nowrap;
+}
+
+.overlay-select {
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  max-width: 110px;
+}
+
+.overlay-select option {
+  background: #14161c;
+  color: #ffffff;
+}

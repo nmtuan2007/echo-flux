@@ -194,6 +194,7 @@ export const FORWARDED_COMMAND_TYPES = [
   "get_provider_manifests",
   "audio_probe",
   "test_connection",
+  "translation_configure",
   "assistant_ask",
   "assistant_ask_clear",
 ] as const;

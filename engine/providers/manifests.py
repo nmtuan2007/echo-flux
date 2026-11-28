@@ -471,7 +471,7 @@ BUILTIN_MANIFESTS: Tuple[ProviderManifest, ...] = (
                 label="Speed / Accuracy",
                 field_type=FieldType.CHOICE,
                 default="balanced",
-                advanced=True,
+                advanced=False,
                 choices=("fast", "balanced", "accurate"),
                 description=(
                     "Fast uses tiny (~75 MB), balanced uses small (~500 MB), "

@@ -1,6 +1,8 @@
+import contextlib
 import logging
 import threading
 from typing import Callable, Optional
+
 from tqdm.auto import tqdm as std_tqdm
 
 logger = logging.getLogger("echoflux.core.progress")
@@ -37,10 +39,10 @@ class HijackedTqdm(std_tqdm):
         # Always enable the progress bar so we get updates
         if "disable" in kwargs:
             kwargs["disable"] = False
-            
+
         # huggingface_hub passes 'name' which isn't accepted by std_tqdm
         kwargs.pop("name", None)
-            
+
         super().__init__(*args, **kwargs)
         self._last_percent = -1
         # Extract the model name from the description (desc) or use a generic one
@@ -49,22 +51,19 @@ class HijackedTqdm(std_tqdm):
     def update(self, n=1):
         super().update(n)
         self._report_progress()
-        
+
     def close(self):
-        try:
+        with contextlib.suppress(AttributeError):
             super().close()
-        except AttributeError:
-            pass
-            
+
         # Ensure we always send 100% when done
-        if hasattr(self, "total") and hasattr(self, "n"):
-            if self.total and self.n >= self.total:
-                self._emit(100)
+        if hasattr(self, "total") and hasattr(self, "n") and self.total and self.n >= self.total:
+            self._emit(100)
 
     def _report_progress(self):
         if not hasattr(self, "total") or not hasattr(self, "n") or not self.total:
             return
-            
+
         percent = int((self.n / self.total) * 100)
         # Update only when percent changes by a reasonable step, e.g., 2% to avoid flooding
         if percent - self._last_percent >= 2 or percent == 100:
@@ -76,7 +75,7 @@ class HijackedTqdm(std_tqdm):
         cb = None
         with _lock:
             cb = _progress_callback
-            
+
         if cb:
             try:
                 cb(self._model_name, percent)
@@ -90,7 +89,7 @@ def install_progress_hijack():
     Call this early in the initialization.
     """
     logger.info("Installing tqdm progress hijack...")
-    
+
     # 1. Patch tqdm.auto.tqdm (used by many HF libraries)
     import tqdm
     import tqdm.auto
@@ -113,16 +112,16 @@ def install_progress_hijack():
         faster_whisper.utils.disabled_tqdm = HijackedTqdm
     except Exception:
         pass
-        
+
     # 4. Patch transformers utils natively if available
     try:
-        import transformers.utils.logging
         import transformers.utils.hub
+        import transformers.utils.logging
         # Transformers might alias tqdm
         if hasattr(transformers.utils.logging, "tqdm"):
             transformers.utils.logging.tqdm = HijackedTqdm
     except Exception:
         pass
-    
+
     logger.debug("Tqdm hijacked for progress reporting.")
 

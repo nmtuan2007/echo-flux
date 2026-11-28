@@ -354,21 +354,38 @@ def default_cloud_builder(registry: ProviderRegistry) -> CloudBuilder:
         if resolved.protocol_family is ProtocolFamily.OPENAI_REALTIME:
             from engine.providers.stt.openai_protocol import OpenAIRealtimeSettings
 
+            raw_prompt = resolved.options.get("prompt")
+            prompt = raw_prompt.strip() if isinstance(raw_prompt, str) and raw_prompt.strip() else None
+            raw_keywords = resolved.options.get("keywords")
+            keywords = (
+                tuple(p.strip() for p in raw_keywords.split(",") if p.strip())
+                if isinstance(raw_keywords, str)
+                else tuple(raw_keywords or ())
+            )
             settings = OpenAIRealtimeSettings(
                 endpoint=resolved.endpoint,
                 model=resolved.model,
                 api_key=secrets.get("api_key", ""),
                 languages=_language_hints(resolved),
+                prompt=prompt,
+                keywords=keywords,
             )
             return factory(settings, provider_id=resolved.provider_id, stream_ids=stream_ids)
         if resolved.protocol_family is ProtocolFamily.GEMINI_LIVE:
             from engine.providers.stt.gemini_live import GeminiLiveSTTConfig
 
+            raw_vocab = resolved.options.get("custom_vocabulary")
+            vocab = (
+                tuple(p.strip() for p in raw_vocab.split(",") if p.strip())
+                if isinstance(raw_vocab, str)
+                else tuple(raw_vocab or ())
+            )
             config = GeminiLiveSTTConfig(
                 api_key=secrets.get("api_key", ""),
                 endpoint=resolved.endpoint,
                 model=resolved.model,
                 language_hints=_language_hints(resolved),
+                custom_vocabulary=vocab,
                 provider_id=resolved.provider_id,
             )
             return factory(config)

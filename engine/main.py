@@ -6,8 +6,8 @@ import os
 import sys
 import threading
 import time
-from queue import Empty, Queue
-from typing import Any, Dict, Optional, Set, Tuple
+from queue import Empty, Full, Queue
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.conversation.context_profiles import ContextProfileService
 from engine.conversation.models import (
@@ -282,7 +282,7 @@ class EchoFluxEngine:
 
         self._running = False
 
-        self._result_queue = Queue()
+        self._result_queue: Queue = Queue(maxsize=1000)
         self._result_ready: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_translation_config = None
@@ -310,6 +310,7 @@ class EchoFluxEngine:
         self._post_stop_translator: Optional[Any] = None
         self._post_stop_translator_key: Optional[Tuple[str, str]] = None
         self._last_assistant_error_code: Optional[str] = None
+        self._translation_live_lock: Optional[asyncio.Lock] = None
 
         from engine.server.control_dispatcher import ControlCommandDispatcher
 
@@ -614,6 +615,8 @@ class EchoFluxEngine:
             )
             profile_svc.start_session(session_record, profile_ids=selected_profile_ids)
             self._active_session_id = session_id
+
+        self._session_config = self._inject_context_vocabulary(self._session_config, settings)
 
         if (
             self._assistant_service is None
@@ -1140,8 +1143,16 @@ class EchoFluxEngine:
             }
         )
 
-    def _enqueue_result(self, msg: dict) -> None:
-        self._result_queue.put(msg)
+    def _enqueue_result(self, payload: Dict[str, Any]) -> None:
+        if payload.get("type") == "audio_level" and self._result_queue.qsize() > 800:
+            return
+        try:
+            self._result_queue.put_nowait(payload)
+        except Full:
+            with contextlib.suppress(Empty):
+                self._result_queue.get_nowait()
+            with contextlib.suppress(Full):
+                self._result_queue.put_nowait(payload)
         loop = getattr(self, "_loop", None)
         ready = getattr(self, "_result_ready", None)
         if loop is not None and ready is not None:
@@ -1470,6 +1481,250 @@ class EchoFluxEngine:
                     provider=meta,
                 )
         return translated
+
+    def _get_translation_live_lock(self) -> asyncio.Lock:
+        lock = getattr(self, "_translation_live_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._translation_live_lock = lock
+        return lock
+
+    async def configure_translation_live(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Hot-toggle live translation on/off or update source/target language mid-session."""
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "Invalid payload"}
+        async with self._get_translation_live_lock():
+            cfg = getattr(self, "_current_config", None)
+            if not isinstance(cfg, dict):
+                cfg = {}
+                self._current_config = cfg
+
+            existing_section = cfg.get("services.translation")
+            if existing_section is None and isinstance(cfg.get("services"), dict):
+                existing_section = cfg["services"].get("translation")
+
+            if isinstance(payload.get("service"), dict):
+                svc_section = dict(payload["service"])
+            elif isinstance(existing_section, dict):
+                svc_section = dict(existing_section)
+            else:
+                svc_section = {
+                    "enabled": bool(cfg.get("translation.enabled", False)),
+                    "providerId": "local",
+                    "options": {},
+                }
+
+            options = dict(svc_section.get("options") or {})
+            if "source_lang" not in options and isinstance(cfg.get("translation.source_lang"), str):
+                options["source_lang"] = cfg["translation.source_lang"]
+            if "target_lang" not in options and isinstance(cfg.get("translation.target_lang"), str):
+                options["target_lang"] = cfg["translation.target_lang"]
+
+            if "enabled" in payload:
+                svc_section["enabled"] = bool(payload["enabled"])
+            if isinstance(payload.get("source_lang"), str) and payload["source_lang"].strip():
+                options["source_lang"] = payload["source_lang"].strip()
+            if isinstance(payload.get("target_lang"), str) and payload["target_lang"].strip():
+                options["target_lang"] = payload["target_lang"].strip()
+            options.setdefault("source_lang", "auto")
+            options.setdefault("target_lang", "vi")
+            svc_section["options"] = options
+            svc_section.setdefault("providerId", "local")
+            svc_section.setdefault("enabled", bool(payload.get("enabled", False)))
+
+            enabled = bool(svc_section["enabled"])
+            source_lang = str(options.get("source_lang") or "auto")
+            target_lang = str(options.get("target_lang") or "vi")
+
+            if isinstance(cfg.get("services"), dict):
+                cfg["services"]["translation"] = svc_section
+            if "services.translation" in cfg or not isinstance(cfg.get("services"), dict):
+                cfg["services.translation"] = svc_section
+            cfg["translation.enabled"] = enabled
+            cfg["translation.source_lang"] = source_lang
+            cfg["translation.target_lang"] = target_lang
+
+            old_session, self._translation_session = (
+                getattr(self, "_translation_session", None),
+                None,
+            )
+            if old_session is not None:
+                with contextlib.suppress(Exception):
+                    await old_session.stop()
+
+            try:
+                new_config = await asyncio.to_thread(resolve_translation_session_config, cfg)
+            except Exception as exc:
+                logger.warning("Failed to resolve live translation config: %s", exc)
+                return {
+                    "ok": False,
+                    "error": str(exc),
+                    "enabled": False,
+                    "source_lang": source_lang,
+                    "target_lang": target_lang,
+                    "active": False,
+                }
+
+            self._translation_config = new_config
+            if new_config is not None:
+                self._last_translation_config = new_config
+
+            if getattr(self, "_running", False) and new_config is not None and new_config.enabled:
+                try:
+                    await self._start_translation_session()
+                except Exception as exc:
+                    logger.warning("Failed to start live translation session: %s", exc)
+                    self._translation_session = None
+                    return {
+                        "ok": False,
+                        "error": str(exc),
+                        "enabled": False,
+                        "source_lang": source_lang,
+                        "target_lang": target_lang,
+                        "active": False,
+                    }
+
+            return {
+                "ok": True,
+                "enabled": enabled,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "active": getattr(self, "_translation_session", None) is not None,
+            }
+
+    @staticmethod
+    def _parse_glossary_terms(text: str) -> List[str]:
+        terms: List[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith(("- ", "* ", "• ")):
+                line = line[2:].strip()
+            if not line:
+                continue
+            candidate: Optional[str] = None
+            for sep in (":", "="):
+                if sep in line:
+                    left = line.split(sep, 1)[0].strip()
+                    if left and len(left) <= 60:
+                        candidate = left
+                    break
+            if candidate is None:
+                for sep in (" - ", " \u2014 ", " \u2013 "):
+                    if sep in line:
+                        left = line.split(sep, 1)[0].strip()
+                        if left and len(left) <= 60:
+                            candidate = left
+                        break
+            if candidate is not None:
+                cleaned = candidate.strip("`\"' ")
+                if cleaned:
+                    terms.append(cleaned)
+            elif "," in line:
+                for part in line.split(","):
+                    cleaned = part.strip("`\"' \t")
+                    if cleaned and len(cleaned) <= 60:
+                        terms.append(cleaned)
+            elif len(line) <= 60:
+                cleaned = line.strip("`\"' ")
+                if cleaned:
+                    terms.append(cleaned)
+        return terms
+
+    def _extract_context_vocabulary(self, config_dict: Dict[str, Any]) -> List[str]:
+        """Extract up to 25 concise glossary terms (<= 200 chars joined) from active profiles."""
+        texts: List[str] = []
+        if isinstance(config_dict, dict):
+            glossary = config_dict.get("glossary_text")
+            if isinstance(glossary, str) and glossary.strip():
+                texts.append(glossary)
+
+        repo = getattr(self, "_conversation_repo", None)
+        if repo is not None:
+            conv_id = getattr(self, "_active_conversation_id", None)
+            if not conv_id and isinstance(config_dict, dict):
+                conv_id = config_dict.get("conversation_id") or config_dict.get("conversationId")
+            profile_svc = ContextProfileService(repo)
+            profile_ids: List[str] = []
+            if isinstance(conv_id, str) and conv_id:
+                with contextlib.suppress(Exception):
+                    profile_ids.extend(profile_svc.attached_profile_ids(conv_id))
+            if isinstance(config_dict, dict):
+                raw_ids = config_dict.get("attached_profile_ids")
+                if isinstance(raw_ids, list):
+                    for pid in raw_ids:
+                        if isinstance(pid, str) and pid and pid not in profile_ids:
+                            profile_ids.append(pid)
+            for pid in profile_ids:
+                with contextlib.suppress(Exception):
+                    prof = profile_svc.get_profile(pid)
+                    if prof is not None and prof.content:
+                        texts.append(prof.content)
+
+        selected: List[str] = []
+        seen: Set[str] = set()
+        total_len = 0
+        for block in texts:
+            for term in self._parse_glossary_terms(block):
+                key = term.lower()
+                if key in seen:
+                    continue
+                added_len = len(term) if not selected else len(term) + 2
+                if total_len + added_len > 200:
+                    continue
+                seen.add(key)
+                selected.append(term)
+                total_len += added_len
+                if len(selected) >= 25:
+                    return selected
+        return selected
+
+    def _inject_context_vocabulary(self, session_config: Any, config_dict: Dict[str, Any]) -> Any:
+        if session_config is None:
+            return None
+        terms = self._extract_context_vocabulary(config_dict)
+        if not terms:
+            return session_config
+
+        import dataclasses
+        from types import MappingProxyType
+
+        from engine.providers.manifests import ProtocolFamily
+
+        joined = ", ".join(terms)
+
+        def _inject_service(resolved: Any) -> Any:
+            opts = dict(resolved.options)
+            pid = resolved.provider_id
+            if pid == "local":
+                if not opts.get("initial_prompt"):
+                    opts["initial_prompt"] = joined
+            elif pid in ("openai", "groq", "openai-realtime") or (
+                resolved.protocol_family is ProtocolFamily.OPENAI_REALTIME
+            ):
+                if not opts.get("prompt"):
+                    opts["prompt"] = joined
+            elif pid == "deepgram":
+                if not opts.get("keyterms"):
+                    opts["keyterms"] = joined
+            elif pid == "assemblyai":
+                if not opts.get("keyterms_prompt"):
+                    opts["keyterms_prompt"] = joined
+            elif (
+                pid in ("alibaba", "gemini-live")
+                or resolved.protocol_family is ProtocolFamily.GEMINI_LIVE
+            ) and not opts.get("custom_vocabulary"):
+                opts["custom_vocabulary"] = joined
+            return dataclasses.replace(resolved, options=MappingProxyType(opts))
+
+        primary = _inject_service(session_config.primary)
+        fallback = (
+            primary
+            if session_config.fallback is session_config.primary
+            else _inject_service(session_config.fallback)
+        )
+        return dataclasses.replace(session_config, primary=primary, fallback=fallback)
 
 
 def run_engine(config_path=None, insecure_dev: bool = False):

@@ -361,7 +361,7 @@ export const PROVIDER_CATALOG: readonly ProviderManifest[] = [
       LANGUAGE_HINT,
       manifestField("quality_preset", "Speed / Accuracy", "choice", {
         default: "balanced",
-        advanced: true,
+        advanced: false,
         choices: ["fast", "balanced", "accurate"],
         description:
           "Fast uses tiny (~75 MB), balanced uses small (~500 MB), accurate uses medium (~1.5 GB).",

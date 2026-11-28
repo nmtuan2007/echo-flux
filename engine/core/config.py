@@ -1,14 +1,14 @@
-import os
-import sys
-import json
+import contextlib
 import copy
 import hashlib
+import json
+import os
 import re
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
-
 
 _DEFAULT_CONFIG = {
     "engine": {
@@ -95,6 +95,7 @@ class TranscriptionConfig:
     device: str
     compute_type: str
     model_path: Optional[str] = None
+    initial_prompt: Optional[str] = None
 
 
 # Schema version 2: independent, provider-backed service sections under "services".
@@ -492,7 +493,7 @@ def _load_dotenv(env_path: Path):
     if not env_path.exists():
         return
 
-    with open(env_path, "r", encoding="utf-8") as f:
+    with open(env_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -541,7 +542,7 @@ class Config:
         self._normalize_services()
 
     def _load_file(self):
-        with open(self._config_path, "r", encoding="utf-8") as f:
+        with open(self._config_path, encoding="utf-8") as f:
             user_config = json.load(f)
         try:
             self._loaded_schema_version = read_schema_version(user_config)
@@ -599,10 +600,8 @@ class Config:
         for env_key, (dotted_key, cast_fn) in _ENV_MAP.items():
             value = os.environ.get(env_key)
             if value is not None:
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     self.set(dotted_key, cast_fn(value))
-                except (ValueError, TypeError):
-                    pass
 
     def get(self, dotted_key: str, default: Any = None) -> Any:
         keys = dotted_key.split(".")

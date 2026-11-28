@@ -1,13 +1,11 @@
-import os
 import shutil
-import logging
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
-from engine.translation.base import TranslationBackend, TranslationResult
 from engine.core.config import Config
-from engine.core.logging import get_logger
 from engine.core.exceptions import ModelLoadError, TranslationError
+from engine.core.logging import get_logger
+from engine.translation.base import TranslationBackend, TranslationResult
 
 logger = get_logger("translation.marian")
 
@@ -44,7 +42,7 @@ class MarianBackend(TranslationBackend):
             import ctranslate2
             from transformers import MarianTokenizer
         except ImportError:
-            raise ModelLoadError("ctranslate2 or transformers not installed")
+            raise ModelLoadError("ctranslate2 or transformers not installed") from None
 
         # Reloading must not leak the previous translator.
         if self._translator is not None or self._tokenizer is not None:

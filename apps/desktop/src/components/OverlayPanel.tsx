@@ -1,8 +1,16 @@
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { isTauriRuntime } from "../lib/engineBridge";
 import { useEngineStore } from "../store/engineStore";
-import { assistKeyOf, isAssistantConfigured, streamRank } from "../store/transcriptSlice";
+import { PRESET_TARGET_LANGUAGES } from "../store/providerCatalog";
+import {
+  assistKeyOf,
+  deriveSttNotice,
+  isAssistantConfigured,
+  streamRank,
+  sttProviderLabel,
+} from "../store/transcriptSlice";
 
 export const OverlayPanel: React.FC = () => {
   const {
@@ -19,10 +27,12 @@ export const OverlayPanel: React.FC = () => {
     engineConversationId,
     suggestionLoading,
     audioLevels,
+    sttStreams,
     shortcutsEnabled,
     overlayFontSize: fontSize,
     overlayHighOpacity: highOpacity,
     setOverlayPrefs,
+    configureLiveTranslation,
     requestAssist,
   } = useEngineStore();
   const assistantEnabled = useEngineStore(isAssistantConfigured);
@@ -129,6 +139,9 @@ export const OverlayPanel: React.FC = () => {
 
   const handleToggleTranslation = async () => {
     await emit("relay_toggle_translation").catch(console.error);
+    if (!isTauriRuntime()) {
+      await configureLiveTranslation({ enabled: !translationEnabled });
+    }
   };
 
   const cycleFontSize = () => {
@@ -144,6 +157,9 @@ export const OverlayPanel: React.FC = () => {
   };
 
   const translationEnabled = services?.translation?.enabled ?? config.translationEnabled;
+  const targetLang =
+    (services?.translation?.options?.target_lang as string) || config.targetLang || "vi";
+  const hasCustomLang = !PRESET_TARGET_LANGUAGES.some((o) => o.code === targetLang);
   const recentEntries = entries.slice(-30);
   const partialStreams = useMemo(
     () => Object.keys(partials).sort((a, b) => streamRank(a) - streamRank(b)),
@@ -155,6 +171,23 @@ export const OverlayPanel: React.FC = () => {
     if (source === "system") return sourceLabels.system || "Others";
     return source || "";
   };
+
+  const fallbackNotice = useMemo(
+    () => deriveSttNotice(entries, sttStreams, running),
+    [entries, sttStreams, running],
+  );
+  const hasFallback =
+    fallbackNotice.fallbacks.length > 0 || fallbackNotice.translationFallback;
+  const fallbackTitle = hasFallback
+    ? [
+        ...fallbackNotice.fallbacks.map(
+          (f) => `${labelFor(f.source)}: switched to Local from ${sttProviderLabel(f.from)}`,
+        ),
+        ...(fallbackNotice.translationFallback
+          ? ["Translation switched to Local fallback"]
+          : []),
+      ].join(" · ")
+    : "";
 
   const assistTarget = useMemo(() => {
     const finals = entries.filter((e) => e.isFinal && e.text.trim());
@@ -227,6 +260,11 @@ export const OverlayPanel: React.FC = () => {
                 />
               </span>
             )}
+            {hasFallback && (
+              <span className="overlay-fallback-badge" title={fallbackTitle}>
+                Local Fallback
+              </span>
+            )}
           </div>
 
           <div className="overlay-btn-group">
@@ -259,18 +297,37 @@ export const OverlayPanel: React.FC = () => {
               type="button"
               className={`overlay-btn ${translationEnabled ? "overlay-btn-primary" : ""}`}
               onClick={() => void handleToggleTranslation()}
-              disabled={running || isToggling}
+              disabled={isToggling}
               title={
-                running
-                  ? "Stop session to toggle translation"
-                  : translationEnabled
-                    ? "Disable live translation"
-                    : "Enable live translation"
+                translationEnabled ? "Disable live translation" : "Enable live translation"
               }
               aria-label="Toggle translation"
             >
               {translationEnabled ? "🌐 On" : "🌐 Off"}
             </button>
+            {translationEnabled && (
+              <select
+                className="overlay-select"
+                aria-label="Target language"
+                value={targetLang}
+                onChange={(e) => {
+                  const lang = e.target.value;
+                  void emit("relay_set_target_lang", { targetLang: lang }).catch(console.error);
+                  if (!isTauriRuntime()) {
+                    void configureLiveTranslation({ targetLang: lang });
+                  }
+                }}
+                disabled={isToggling}
+                title="Translation target language"
+              >
+                {hasCustomLang && <option value={targetLang}>{targetLang}</option>}
+                {PRESET_TARGET_LANGUAGES.map((opt) => (
+                  <option key={opt.code} value={opt.code}>
+                    → {opt.label}
+                  </option>
+                ))}
+              </select>
+            )}
             {assistantEnabled && (
               <button
                 type="button"

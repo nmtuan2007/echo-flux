@@ -150,6 +150,7 @@ class ControlCommandDispatcher:
             "audio_probe": lambda p: handle_audio_probe(self._engine, p),
             # Manual Assist, Streaming Summary & Quick Ask
             "configure_assistant": self._handle_configure_assistant,
+            "translation_configure": self._handle_translation_configure,
             "request_assist": self._handle_request_assist,
             "request_suggestion": self._handle_request_assist,
             "request_summary": self._handle_request_summary,
@@ -174,7 +175,9 @@ class ControlCommandDispatcher:
         return self._catalog or builtin_catalog()
 
     def _get_probe(self) -> Any:
-        return self._probe or SystemHardwareProbe()
+        if self._probe is None:
+            self._probe = SystemHardwareProbe()
+        return self._probe
 
     def _get_config(self) -> Config:
         cfg = getattr(self._engine, "_app_config", None) if self._engine is not None else None
@@ -328,6 +331,16 @@ class ControlCommandDispatcher:
             secret_map.clear()
             if isinstance(secrets, dict):
                 secrets.clear()
+
+    async def _handle_translation_configure(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        if self._engine is None or not hasattr(self._engine, "configure_translation_live"):
+            raise DispatcherError(
+                "translation_unavailable", "Engine cannot configure live translation"
+            )
+        result = await self._engine.configure_translation_live(msg)
+        payload = dict(result) if isinstance(result, dict) else {"ok": bool(result)}
+        payload.setdefault("type", "translation_configure_result")
+        return payload
 
     async def _handle_request_assist(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         cid = payload.get("conversation_id")

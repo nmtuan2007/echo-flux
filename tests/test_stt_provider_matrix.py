@@ -328,7 +328,7 @@ def test_language_auto_detect_is_default_and_hints_are_advanced():
             )
         for spec in manifest.option_fields_for(STT):
             assert isinstance(spec.field_type, FieldType)
-            if spec.key not in ("region", "protocol_profile"):
+            if spec.key not in ("region", "protocol_profile", "quality_preset"):
                 assert spec.advanced, (provider_id, spec.key)
 
     assert registry.validate_options(STT, "gemini-live", {}) == {"language": "auto"}

@@ -84,7 +84,7 @@ export function Header() {
                 console.error("Failed to unlock overlay window:", e),
               );
             }}
-            title="Unlock click-through overlay (Ctrl+Shift+L)"
+            title="Unlock Overlay (make interactive) - Ctrl+Shift+U"
           >
             Unlock Overlay
           </button>

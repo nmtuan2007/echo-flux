@@ -877,6 +877,9 @@ pub fn forward_policy(kind: &str) -> Option<ForwardPolicy> {
         // Audio Input Probe
         "audio_probe" => (None, 10, false),
 
+        // Live Translation Hot-Toggle
+        "translation_configure" => (None, 15, false),
+
         // Phase B: Summary Streaming & Cancellation (EF-022)
         "summary_cancel" => (None, 10, false),
         "assistant_ask" => (None, 60, false),

@@ -581,6 +581,12 @@ class DeepgramSTTProvider(StreamingSTTProvider):
         endpoint = getattr(resolved, "endpoint", "") or "wss://api.deepgram.com/v1/listen"
         model = getattr(resolved, "model", "") or "nova-3"
         provider_id = getattr(resolved, "provider_id", "deepgram")
+        raw_keyterms = options.get("keyterms", ())
+        keyterms = (
+            tuple(t.strip() for t in raw_keyterms.split(",") if t.strip())
+            if isinstance(raw_keyterms, str)
+            else tuple(raw_keyterms)
+        )
         settings = DeepgramSettings(
             model=model,
             api_key=api_key,
@@ -592,7 +598,7 @@ class DeepgramSTTProvider(StreamingSTTProvider):
             utterance_end_ms=options.get("utterance_end_ms"),
             smart_format=options.get("smart_format"),
             punctuate=options.get("punctuate"),
-            keyterms=tuple(options.get("keyterms", ())),
+            keyterms=keyterms,
         )
         return cls(
             settings,

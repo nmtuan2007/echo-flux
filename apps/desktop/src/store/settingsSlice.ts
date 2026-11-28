@@ -1,5 +1,11 @@
 import type { StateStorage } from "zustand/middleware";
-import { errorCodeOf, forwardCommand, testProviderConnection } from "../lib/engineBridge";
+import {
+  describeCommandError,
+  errorCodeOf,
+  forwardCommand,
+  isTauriRuntime,
+  testProviderConnection,
+} from "../lib/engineBridge";
 import {
   deleteCredential,
   getCredentialStatus,
@@ -166,7 +172,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   sourceLang: "en",
   targetLang: "vi",
   vadEnabled: true,
-  audioSource: "microphone",
+  audioSource: "both",
   micDeviceId: "",
   speakerDeviceId: "",
   llmEnabled: false,
@@ -384,6 +390,11 @@ export interface SettingsSlice {
   setHasConsentedToCloud: (consented: boolean) => void;
   acceptCloudConsent: (consents?: Partial<CloudConsentState>) => void;
   revokeCloudConsent: () => void;
+  configureLiveTranslation: (patch: {
+    enabled?: boolean;
+    targetLang?: string;
+    sourceLang?: string;
+  }) => Promise<void>;
   manifestsLoaded: boolean;
   loadProviderManifests: () => Promise<void>;
   checkPackReadiness: (capability?: "stt" | "translation") => Promise<void>;
@@ -730,6 +741,13 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
       if (get().services[service].providerId !== providerId) return true;
       const previous = get().services[service].credentialRefs[slot];
       setCredentialRef(service, slot, { configId, slot, version: (previous?.version ?? 0) + 1 });
+      if (!get().consent[service]) {
+        get().acceptCloudConsent(
+          service === "assistant"
+            ? { assistant: true, summary: true }
+            : { [service]: true },
+        );
+      }
       return true;
     },
 
@@ -852,6 +870,68 @@ export const createSettingsSlice: EngineSliceCreator<SettingsSlice> = (set, get)
         persistConsentState(next);
         return { hasConsentedToCloud: false, consent: next };
       });
+    },
+
+    configureLiveTranslation: async (patch) => {
+      const state = get();
+      const currentSvc = state.services.translation;
+      const nextEnabled =
+        patch.enabled !== undefined ? patch.enabled : currentSvc.enabled;
+      const nextTarget =
+        patch.targetLang !== undefined
+          ? patch.targetLang
+          : ((currentSvc.options.target_lang as string) || state.config.targetLang || "vi");
+      const nextSource =
+        patch.sourceLang !== undefined
+          ? patch.sourceLang
+          : ((currentSvc.options.source_lang as string) || state.config.sourceLang || "auto");
+
+      const nextOptions = { ...currentSvc.options };
+      if (patch.targetLang !== undefined) nextOptions.target_lang = nextTarget;
+      if (patch.sourceLang !== undefined) nextOptions.source_lang = nextSource;
+
+      get().updateServiceConfig("translation", {
+        enabled: nextEnabled,
+        options: nextOptions,
+      });
+      get().updateConfig({
+        translationEnabled: nextEnabled,
+        targetLang: nextTarget,
+        sourceLang: nextSource,
+      });
+
+      if (!get().running) return;
+      const next = get();
+      try {
+        const res = await forwardCommand({
+          type: "translation_configure",
+          enabled: next.config.translationEnabled,
+          target_lang: nextTarget,
+          source_lang: nextSource,
+          service: next.services.translation,
+        });
+        const errReply = res.messages.find((item) => {
+          const rec = item as Record<string, unknown>;
+          return (
+            (rec.type === "translation_configure_result" && rec.ok === false) ||
+            rec.type === "error"
+          );
+        }) as Record<string, unknown> | undefined;
+        if (errReply) {
+          set({
+            appError: String(
+              errReply.error || errReply.message || "Failed to update live translation",
+            ),
+          });
+        }
+      } catch (error) {
+        if (isTauriRuntime()) {
+          const code = errorCodeOf(error);
+          set({
+            appError: `Updating live translation: ${describeCommandError(code)} (${code})`,
+          });
+        }
+      }
     },
 
     loadProviderManifests: async () => {

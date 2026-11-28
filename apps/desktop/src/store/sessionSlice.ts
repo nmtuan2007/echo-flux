@@ -212,6 +212,7 @@ const TERMINAL_REPLY: Record<ForwardedCommandType, string | null> = {
   get_provider_manifests: null,
   audio_probe: null,
   test_connection: "test_connection_result",
+  translation_configure: "translation_configure_result",
   assistant_ask: null,
   assistant_ask_clear: null,
 };
@@ -247,6 +248,7 @@ const COMMAND_LABEL: Record<ForwardedCommandType, string> = {
   get_provider_manifests: "Get provider manifests",
   audio_probe: "Audio probe",
   test_connection: "Test connection",
+  translation_configure: "Updating live translation",
   assistant_ask: "Ask Assistant",
   assistant_ask_clear: "Clear Ask history",
 };
@@ -408,11 +410,15 @@ export const createSessionSlice =
       // Replies for an engine run that has since been replaced describe nothing current.
       if (gen !== generation) return;
       const skipStreamedChunks = type === "request_summary" && get().summaryStreamedViaEvent;
-      for (const message of result.messages) {
-        if (skipStreamedChunks && message.type === "llm_chunk" && message.is_error !== true) {
+      for (const rawMsg of result.messages) {
+        if (skipStreamedChunks && rawMsg.type === "llm_chunk" && rawMsg.is_error !== true) {
           continue;
         }
-        deps.routeMessage(message);
+        const rec = rawMsg as Record<string, unknown>;
+        if (rec.type === "translation_configure_result" && rec.ok === false) {
+          set({ appError: String(rec.error || "Failed to update live translation") });
+        }
+        deps.routeMessage(rawMsg);
       }
 
       const terminal = TERMINAL_REPLY[type];

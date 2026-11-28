@@ -34,12 +34,16 @@ export function LiveSessionBar() {
     consent,
     availableMics,
     availableSpeakers,
+    audioProbeLoading,
+    audioProbeResult,
     requestDeviceList,
+    probeAudioInput,
     checkPackReadiness,
     openSettingsFor,
     updateConfig,
     updateServiceConfig,
     setServiceOptionInput,
+    configureLiveTranslation,
     openSetup,
     clearTranscript,
     openSummary,
@@ -250,159 +254,201 @@ export function LiveSessionBar() {
         )}
       </div>
 
-      {!running && (
-        <div className="live-session-controls">
-          <select
-            className="quick-select"
-            aria-label="Audio source"
-            value={config.audioSource}
-            onChange={(e) =>
-              updateConfig({ audioSource: e.target.value as EngineConfig["audioSource"] })
-            }
-            disabled={isToggling}
-            title="Audio capture source"
-          >
-            <option value="microphone">🎤 Mic only</option>
-            <option value="system">🔊 System audio</option>
-            <option value="both">🔄 Mic + System</option>
-          </select>
-
-          <div className="quick-audio-popover-wrap" ref={audioPopoverRef}>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => setAudioPopoverOpen((v) => !v)}
-              disabled={isToggling || !connected}
-              title="Select microphone or speaker device"
-              aria-expanded={audioPopoverOpen}
-            >
-              Devices ▾
-            </button>
-            {audioPopoverOpen && (
-              <div className="quick-audio-popover" role="dialog" aria-label="Quick audio devices">
-                {(config.audioSource === "microphone" || config.audioSource === "both") && (
-                  <label className="quick-audio-field">
-                    <span>Microphone</span>
-                    <select
-                      value={config.micDeviceId}
-                      onChange={(e) => updateConfig({ micDeviceId: e.target.value })}
-                    >
-                      <option value="">Default microphone</option>
-                      {availableMics.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {(config.audioSource === "system" || config.audioSource === "both") && (
-                  <label className="quick-audio-field">
-                    <span>Speaker (Loopback)</span>
-                    <select
-                      value={config.speakerDeviceId}
-                      onChange={(e) => updateConfig({ speakerDeviceId: e.target.value })}
-                    >
-                      <option value="">Default speaker loopback</option>
-                      {availableSpeakers.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                <div className="quick-audio-actions">
-                  <button
-                    type="button"
-                    className="btn-text"
-                    onClick={requestDeviceList}
-                  >
-                    ↻ Refresh
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-text"
-                    onClick={() => {
-                      setAudioPopoverOpen(false);
-                      openSettingsFor();
-                    }}
-                  >
-                    Audio Settings →
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <select
-            className="quick-select"
-            aria-label="Spoken language"
-            value={spokenLang}
-            onChange={(e) => {
-              const lang = e.target.value;
-              if (sttSupportsLanguage) {
-                setServiceOptionInput("stt", "language", lang);
-              }
-              updateConfig({ language: lang, sourceLang: lang });
-              setServiceOptionInput("translation", "source_lang", lang);
-              if (connected && isTauriRuntime() && translationEnabled) {
-                void checkPackReadiness("translation");
-              }
-            }}
-            disabled={isToggling || !sttSupportsLanguage}
-            title={
-              sttSupportsLanguage
-                ? "Spoken language for Speech-to-Text (syncs translation source)"
-                : "Configured via provider-specific language settings"
-            }
-          >
-            {hasCustomSpokenLang && <option value={spokenLang}>{spokenLang}</option>}
-            {PRESET_INPUT_LANGUAGES.map((opt) => (
-              <option key={opt.code} value={opt.code}>
-                🗣 {opt.label}
-              </option>
-            ))}
-          </select>
-
-          <label className="quick-toggle" title="Toggle live translation">
-            <input
-              type="checkbox"
-              checked={translationEnabled}
-              onChange={(e) => {
-                const enabled = e.target.checked;
-                updateServiceConfig("translation", { enabled });
-                updateConfig({ translationEnabled: enabled });
-              }}
-              disabled={isToggling}
-            />
-            <span>Translate</span>
-          </label>
-
-          {translationEnabled && (
+      <div className="live-session-controls">
+        {!running && (
+          <>
             <select
               className="quick-select"
-              aria-label="Target language"
-              value={targetLang}
+              aria-label="Audio source"
+              value={config.audioSource}
+              onChange={(e) =>
+                updateConfig({ audioSource: e.target.value as EngineConfig["audioSource"] })
+              }
+              disabled={isToggling}
+              title="Audio capture source"
+            >
+              <option value="microphone">🎤 Mic only</option>
+              <option value="system">🔊 System audio</option>
+              <option value="both">🔄 Mic + System</option>
+            </select>
+
+            <div className="quick-audio-popover-wrap" ref={audioPopoverRef}>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setAudioPopoverOpen((v) => !v)}
+                disabled={isToggling || !connected}
+                title="Select microphone or speaker device"
+                aria-expanded={audioPopoverOpen}
+              >
+                Devices ▾
+              </button>
+              {audioPopoverOpen && (
+                <div className="quick-audio-popover" role="dialog" aria-label="Quick audio devices">
+                  {(config.audioSource === "microphone" || config.audioSource === "both") && (
+                    <label className="quick-audio-field">
+                      <span>Microphone</span>
+                      <select
+                        value={config.micDeviceId}
+                        onChange={(e) => updateConfig({ micDeviceId: e.target.value })}
+                      >
+                        <option value="">Default microphone</option>
+                        {availableMics.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {(config.audioSource === "system" || config.audioSource === "both") && (
+                    <label className="quick-audio-field">
+                      <span>Speaker (Loopback)</span>
+                      <select
+                        value={config.speakerDeviceId}
+                        onChange={(e) => updateConfig({ speakerDeviceId: e.target.value })}
+                      >
+                        <option value="">Default speaker loopback</option>
+                        {availableSpeakers.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  <div className="quick-audio-actions">
+                    <button
+                      type="button"
+                      className="btn-text"
+                      onClick={() => void probeAudioInput()}
+                      disabled={!connected || audioProbeLoading || running}
+                    >
+                      {audioProbeLoading ? "Checking..." : "Check Signal"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-text"
+                      onClick={requestDeviceList}
+                    >
+                      ↻ Refresh
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-text"
+                      onClick={() => {
+                        setAudioPopoverOpen(false);
+                        openSettingsFor();
+                      }}
+                    >
+                      Audio Settings →
+                    </button>
+                  </div>
+                  {audioProbeResult && (
+                    <div className="audio-probe-panel" role="status" aria-label="Audio signal check">
+                      {Object.entries(audioProbeResult).map(([stream, info]) => {
+                        const pct = Math.round((info.level || 0) * 100);
+                        return (
+                          <div key={stream} className="audio-probe-row">
+                            <span className="audio-probe-label">
+                              {stream === "mic" ? "Mic" : "System"}
+                            </span>
+                            <div className="audio-probe-meter">
+                              <div className="audio-probe-fill" style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className={`audio-probe-status ${info.ok ? "" : "error"}`}>
+                              {!info.ok
+                                ? `Error (${info.error || "failed"})`
+                                : pct > 0
+                                  ? `Signal OK (${pct}%)`
+                                  : "Silence (0%)"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <select
+              className="quick-select"
+              aria-label="Spoken language"
+              value={spokenLang}
               onChange={(e) => {
                 const lang = e.target.value;
-                setServiceOptionInput("translation", "target_lang", lang);
-                updateConfig({ targetLang: lang });
-                if (connected && isTauriRuntime()) void checkPackReadiness("translation");
+                if (sttSupportsLanguage) {
+                  setServiceOptionInput("stt", "language", lang);
+                }
+                updateConfig({ language: lang, sourceLang: lang });
+                setServiceOptionInput("translation", "source_lang", lang);
+                if (connected && isTauriRuntime() && translationEnabled) {
+                  void checkPackReadiness("translation");
+                }
               }}
-              disabled={isToggling}
-              title="Translation target language"
+              disabled={isToggling || !sttSupportsLanguage}
+              title={
+                sttSupportsLanguage
+                  ? "Spoken language for Speech-to-Text (syncs translation source)"
+                  : "Configured via provider-specific language settings"
+              }
             >
-              {hasCustomLang && <option value={targetLang}>{targetLang}</option>}
-              {PRESET_TARGET_LANGUAGES.map((opt) => (
+              {hasCustomSpokenLang && <option value={spokenLang}>{spokenLang}</option>}
+              {PRESET_INPUT_LANGUAGES.map((opt) => (
                 <option key={opt.code} value={opt.code}>
-                  → {opt.label}
+                  🗣 {opt.label}
                 </option>
               ))}
             </select>
-          )}
-        </div>
-      )}
+          </>
+        )}
+
+        <label className="quick-toggle" title="Toggle live translation">
+          <input
+            type="checkbox"
+            checked={translationEnabled}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              if (running) {
+                void configureLiveTranslation({ enabled });
+              } else {
+                updateServiceConfig("translation", { enabled });
+                updateConfig({ translationEnabled: enabled });
+              }
+            }}
+            disabled={isToggling}
+          />
+          <span>Translate</span>
+        </label>
+
+        {translationEnabled && (
+          <select
+            className="quick-select"
+            aria-label="Target language"
+            value={targetLang}
+            onChange={(e) => {
+              const lang = e.target.value;
+              if (running) {
+                void configureLiveTranslation({ targetLang: lang });
+              } else {
+                setServiceOptionInput("translation", "target_lang", lang);
+                updateConfig({ targetLang: lang });
+                if (connected && isTauriRuntime()) void checkPackReadiness("translation");
+              }
+            }}
+            disabled={isToggling}
+            title="Translation target language"
+          >
+            {hasCustomLang && <option value={targetLang}>{targetLang}</option>}
+            {PRESET_TARGET_LANGUAGES.map((opt) => (
+              <option key={opt.code} value={opt.code}>
+                → {opt.label}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
 
       <div className="live-session-actions">
         {!running && (

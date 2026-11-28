@@ -116,6 +116,7 @@ const FinalEntry = memo(function FinalEntry({
   const updateEntry = useEngineStore((s) => s.updateEntry);
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [draftText, setDraftText] = useState(entry.text);
 
   const handleCopyEntry = async (e: React.MouseEvent) => {
@@ -135,9 +136,14 @@ const FinalEntry = memo(function FinalEntry({
 
   const handleSaveEdit = async () => {
     const trimmed = draftText.trim();
-    if (!trimmed) return;
-    const ok = await updateEntry(entry.id, { text: trimmed });
-    if (ok) setEditing(false);
+    if (!trimmed || isSaving) return;
+    setIsSaving(true);
+    try {
+      const ok = await updateEntry(entry.id, { text: trimmed });
+      if (ok) setEditing(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleToggleSpeaker = () => {
@@ -208,8 +214,10 @@ const FinalEntry = memo(function FinalEntry({
             className="transcript-edit-input"
             value={draftText}
             rows={2}
+            disabled={isSaving}
             onChange={(e) => setDraftText(e.target.value)}
             onKeyDown={(e) => {
+              if (isSaving) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSaveEdit();
@@ -225,14 +233,15 @@ const FinalEntry = memo(function FinalEntry({
               type="button"
               className="btn btn-primary btn-sm"
               onClick={() => void handleSaveEdit()}
-              disabled={!draftText.trim()}
+              disabled={isSaving || !draftText.trim()}
             >
-              Save
+              {isSaving ? "Saving..." : "Save"}
             </button>
             <button
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={() => setEditing(false)}
+              disabled={isSaving}
             >
               Cancel
             </button>

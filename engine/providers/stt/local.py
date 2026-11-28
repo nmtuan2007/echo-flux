@@ -112,16 +112,22 @@ class LocalSTTSettings:
     device: str = "auto"
     compute_type: str = "float16"
     quality_preset: str = "balanced"
+    initial_prompt: Optional[str] = None
 
     @classmethod
     def from_options(cls, options: Dict[str, Any]) -> "LocalSTTSettings":
         """Build from registry-resolved options; keys for other capabilities are ignored."""
         defaults = cls()
+        raw_prompt = options.get("initial_prompt")
+        initial_prompt = (
+            raw_prompt.strip() if isinstance(raw_prompt, str) and raw_prompt.strip() else None
+        )
         return cls(
             language=options.get("language", defaults.language),
             device=options.get("device", defaults.device),
             compute_type=options.get("compute_type", defaults.compute_type),
             quality_preset=options.get("quality_preset", defaults.quality_preset),
+            initial_prompt=initial_prompt,
         )
 
 
@@ -137,6 +143,8 @@ def validate_settings(settings: LocalSTTSettings) -> None:
         raise _invalid("compute_type")
     if settings.quality_preset not in QUALITY_PRESETS:
         raise _invalid("quality_preset")
+    if settings.initial_prompt is not None and not isinstance(settings.initial_prompt, str):
+        raise _invalid("initial_prompt")
 
 
 # ── Pack resolution ──────────────────────────────────────────────────────────
@@ -474,6 +482,7 @@ class LocalSTTProvider(StreamingSTTProvider):
                     device=self._settings.device,
                     compute_type=self._settings.compute_type,
                     model_path=pack.model_path,
+                    initial_prompt=self._settings.initial_prompt,
                 )
             )
         except Exception as exc:

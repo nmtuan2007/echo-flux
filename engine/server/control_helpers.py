@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -216,6 +217,10 @@ def is_local_model_ready(
         return False
 
 
+_UNSET_GPU_CACHE = object()
+_GPU_PROBE_LOCK = threading.Lock()
+
+
 def probe_hardware_with_gpu(probe: Any) -> Any:
     """Run ``probe.probe()`` and lazily enrich GPU info via ctranslate2 when using SystemHardwareProbe."""
     from engine.local_models.selector import GpuInfo, HardwareProfile, SystemHardwareProbe
@@ -223,32 +228,59 @@ def probe_hardware_with_gpu(probe: Any) -> Any:
     profile: HardwareProfile = probe.probe()
     if profile.gpu is not None or type(probe) is not SystemHardwareProbe:
         return profile
-    try:
-        import ctranslate2
-
-        if ctranslate2.get_cuda_device_count() <= 0:
+    cached = getattr(probe, "_cached_gpu_enrichment", _UNSET_GPU_CACHE)
+    if cached is not _UNSET_GPU_CACHE:
+        if cached is None:
             return profile
-        vram_gb = 4.0
-        with contextlib.suppress(Exception):
-            import subprocess
-
-            out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-                timeout=1.5,
-                text=True,
-            )
-            first_mb = float(out.strip().splitlines()[0])
-            if first_mb > 0:
-                vram_gb = round(first_mb / 1024.0, 2)
         return HardwareProfile(
             cpu_cores=profile.cpu_cores,
             ram_gb=profile.ram_gb,
             platform=profile.platform,
             architecture=profile.architecture,
-            gpu=GpuInfo(backend="cuda", vram_gb=vram_gb),
+            gpu=cached,
         )
-    except Exception:
-        return profile
+    with _GPU_PROBE_LOCK:
+        cached = getattr(probe, "_cached_gpu_enrichment", _UNSET_GPU_CACHE)
+        if cached is not _UNSET_GPU_CACHE:
+            if cached is None:
+                return profile
+            return HardwareProfile(
+                cpu_cores=profile.cpu_cores,
+                ram_gb=profile.ram_gb,
+                platform=profile.platform,
+                architecture=profile.architecture,
+                gpu=cached,
+            )
+        try:
+            import ctranslate2
+
+            if ctranslate2.get_cuda_device_count() <= 0:
+                probe._cached_gpu_enrichment = None
+                return profile
+            vram_gb = 4.0
+            with contextlib.suppress(Exception):
+                import subprocess
+
+                out = subprocess.check_output(
+                    ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                    timeout=1.5,
+                    text=True,
+                )
+                first_mb = float(out.strip().splitlines()[0])
+                if first_mb > 0:
+                    vram_gb = round(first_mb / 1024.0, 2)
+            gpu = GpuInfo(backend="cuda", vram_gb=vram_gb)
+            probe._cached_gpu_enrichment = gpu
+            return HardwareProfile(
+                cpu_cores=profile.cpu_cores,
+                ram_gb=profile.ram_gb,
+                platform=profile.platform,
+                architecture=profile.architecture,
+                gpu=gpu,
+            )
+        except Exception:
+            probe._cached_gpu_enrichment = None
+            return profile
 
 
 def probe_audio_stream(kind: str, device_id: Optional[str], duration_ms: int) -> Dict[str, Any]:

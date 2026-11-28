@@ -612,6 +612,12 @@ class AssemblyAISTTProvider(StreamingSTTProvider):
         endpoint = getattr(resolved, "endpoint", "") or "wss://streaming.assemblyai.com/v3/ws"
         model = getattr(resolved, "model", "") or "universal-streaming"
         provider_id = getattr(resolved, "provider_id", "assemblyai")
+        raw_keyterms = options.get("keyterms_prompt", ())
+        keyterms_prompt = (
+            tuple(t.strip() for t in raw_keyterms.split(",") if t.strip())
+            if isinstance(raw_keyterms, str)
+            else tuple(raw_keyterms)
+        )
         settings = AssemblyAISettings(
             endpoint=endpoint,
             speech_model=model,
@@ -620,7 +626,7 @@ class AssemblyAISTTProvider(StreamingSTTProvider):
             format_turns=options.get("format_turns"),
             language_detection=options.get("language_detection"),
             language_codes=language_codes,
-            keyterms_prompt=tuple(options.get("keyterms_prompt", ())),
+            keyterms_prompt=keyterms_prompt,
             end_of_turn_confidence_threshold=options.get("end_of_turn_confidence_threshold"),
             min_turn_silence_ms=options.get("min_turn_silence_ms"),
             max_turn_silence_ms=options.get("max_turn_silence_ms"),
